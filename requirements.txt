@@ -1,0 +1,20 @@
+# Music Arranger - Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core web framework
+flask>=2.3.0
+
+# Audio processing and synthesis
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Optional dependencies (system-level, install separately):
+# - fluidsynth: For high-quality SF2 soundfont rendering
+#   Ubuntu/Debian: sudo apt install fluidsynth
+#   macOS: brew install fluid-synth
+#   Windows: Download from https://github.com/FluidSynth/fluidsynth/releases
+#
+# - ffmpeg: For MP3 audio conversion
+#   Ubuntu/Debian: sudo apt install ffmpeg
+#   macOS: brew install ffmpeg
+#   Windows: Download from https://ffmpeg.org/download.html
