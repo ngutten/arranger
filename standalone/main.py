@@ -6,12 +6,23 @@ and arrangement timeline. Built with tkinter.
 
 Usage:
     python -m standalone.main [--instruments DIR]
+    python standalone/main.py [--instruments DIR]
 """
 
 import argparse
 import sys
 import tkinter as tk
 from pathlib import Path
+
+# Allow running as a script (python standalone/main.py) in addition to
+# running as a module (python -m standalone.main).  When executed directly,
+# __package__ is None or empty, so we set it and ensure the parent directory
+# is on sys.path so that relative imports within the package work.
+if not __package__:
+    _parent = str(Path(__file__).resolve().parent.parent)
+    if _parent not in sys.path:
+        sys.path.insert(0, _parent)
+    __package__ = "standalone"
 
 
 def main():
