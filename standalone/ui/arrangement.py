@@ -14,7 +14,8 @@ class ArrangementView(QFrame):
     # Layout constants
     TH = 56    # track height
     BW = 30    # pixels per beat
-    TOT = 64   # total beats shown
+    MIN_BEATS = 64 # Minimum number of beats to show
+    LOOKAHEAD_FACTOR = 1.5 # How much to extend the scrollbar past the current song extent
 
     def __init__(self, parent, app):
         super().__init__(parent)
@@ -28,6 +29,9 @@ class ArrangementView(QFrame):
         self._drag_beat_pl = None
         self._resize_beat_pl = None
 
+        # Dynamic extent tracking
+        self._max_scroll_beats = self.MIN_BEATS
+        
         # Loop marker drag state
         self._drag_loop_marker = None  # 'start' or 'end'
 
@@ -90,7 +94,27 @@ class ArrangementView(QFrame):
         # Sync timeline with horizontal scroll
         self.timeline_widget.scroll_offset = value
         self.timeline_widget.update()
-
+        
+        # Dynamic expansion: if scrolled past 75% of current extent, expand
+        scrollbar = self.scroll_area.horizontalScrollBar()
+        current_beat = value / self.BW
+        
+        # Expand if we're in the lookahead zone
+        if current_beat > self._max_scroll_beats * 0.75:
+            self._max_scroll_beats = current_beat * self.LOOKAHEAD_FACTOR
+            self.refresh()
+        
+        # Rubber-band: contract if scrolled back and no content far out
+        elif current_beat < self._max_scroll_beats * 0.4:
+            content_extent = self._compute_content_extent()
+            # Only contract if there's no content requiring this much space
+            if content_extent < self._max_scroll_beats * 0.6:
+                self._max_scroll_beats = max(
+                    self.MIN_BEATS,
+                    content_extent * self.LOOKAHEAD_FACTOR
+                )
+                self.refresh()
+                
     def _on_vscroll(self, value):
         # Sync track labels with vertical scroll
         self.trk_scroll.verticalScrollBar().setValue(value)
@@ -98,6 +122,26 @@ class ArrangementView(QFrame):
     def _snap(self, beat):
         return round(beat / self.state.snap) * self.state.snap
 
+    def _compute_content_extent(self):
+        """Calculate the rightmost beat position of any placement."""
+        max_beat = 0
+        
+        # Check melodic placements
+        for pl in self.state.placements:
+            pat = self.state.find_pattern(pl.pattern_id)
+            if pat:
+                end_beat = pl.time + pat.length * (pl.repeats or 1)
+                max_beat = max(max_beat, end_beat)
+        
+        # Check beat placements
+        for bp in self.state.beat_placements:
+            pat = self.state.find_beat_pattern(bp.pattern_id)
+            if pat:
+                end_beat = bp.time + pat.length * (bp.repeats or 1)
+                max_beat = max(max_beat, end_beat)
+        
+        return max_beat
+        
     def _hit_placement(self, x, y):
         """Hit test for melodic placements. Returns (placement, is_resize_handle)."""
         ti = int(y // self.TH)
@@ -138,10 +182,20 @@ class ArrangementView(QFrame):
 
     def refresh(self):
         """Redraw all components."""
+        # Calculate dynamic extent based on content and scroll position
+        content_extent = self._compute_content_extent()
+        
+        # Ensure we have enough space for content plus lookahead
+        self._max_scroll_beats = max(
+            self.MIN_BEATS,
+            self._max_scroll_beats,
+            content_extent * self.LOOKAHEAD_FACTOR
+        )
+        
         total_tracks = len(self.state.tracks) + len(self.state.beat_tracks)
         ch = max(total_tracks * self.TH, 400)
-        cw = self.TOT * self.BW
-        
+        cw = int(self._max_scroll_beats * self.BW)
+                
         self.canvas_widget.setMinimumSize(cw, ch)
         self.trk_widget.setMinimumSize(150, ch)
         
@@ -243,25 +297,26 @@ class TimelineWidget(QWidget):
             loop_color.setAlpha(40)
             painter.fillRect(int(lx1), 0, int(lx2 - lx1), 28, loop_color)
         
-        # Draw beat markers
-        mn = 1
-        for b in range(self.parent_arr.TOT + 1):
+        # Draw beat markers - use dynamic extent
+        total_beats = int(self.parent_arr._max_scroll_beats)
+        for b in range(total_beats + 1):
             x = b * self.parent_arr.BW - self.scroll_offset
             if x < -50 or x > self.width() + 50:
                 continue
                 
             is_measure = (abs(b % bpm_beats) < 0.001) or b == 0
-            if is_measure and b < self.parent_arr.TOT:
+            if is_measure and b < total_beats:
+                # Calculate absolute measure number from beat position
+                measure_num = int(b / bpm_beats) + 1
                 painter.setPen(QColor('#aaa'))
                 painter.setFont(QFont('TkDefaultFont', 8))
-                painter.drawText(x + 3, 16, str(mn))
-                mn += 1
+                painter.drawText(x + 3, 16, str(measure_num))
                 painter.setPen(QColor('#4a4a8a'))
                 painter.drawLine(x, 14, x, 28)
             else:
                 painter.setPen(QPen(QColor('#222244'), 0.5))
                 painter.drawLine(x, 14, x, 28)
-
+                
         # Loop markers
         if s.looping and s.loop_end is not None:
             ls = s.loop_start if s.loop_start is not None else 0.0
@@ -538,9 +593,10 @@ class ArrangementCanvas(QWidget):
             painter.fillRect(0, y, cw, self.parent_arr.TH, color)
             painter.setPen(QColor('#222244'))
             painter.drawLine(0, y + self.parent_arr.TH, cw, y + self.parent_arr.TH)
-
+        
         # Beat grid lines
-        for b in range(self.parent_arr.TOT + 1):
+        total_beats = int(self.parent_arr._max_scroll_beats)
+        for b in range(total_beats + 1):
             x = b * self.parent_arr.BW
             is_measure = (abs(b % bpm_beats) < 0.001) or b == 0
             color = QColor('#3a3a7a') if is_measure else QColor('#1e1e3a')
