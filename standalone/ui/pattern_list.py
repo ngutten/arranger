@@ -1,81 +1,132 @@
 """Left panel - pattern and beat pattern lists with drag support."""
 
-import tkinter as tk
-from tkinter import ttk
+from PySide6.QtWidgets import (QFrame, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, 
+                                QScrollArea, QWidget)
+from PySide6.QtCore import Qt, QMimeData, Signal
+from PySide6.QtGui import QPainter, QColor, QDrag, QFont
 
 from ..state import PALETTE
 
 
-class PatternList(ttk.Frame):
+class PatternList(QFrame):
     """Left panel containing melodic pattern list and beat pattern list."""
 
     def __init__(self, parent, app):
-        super().__init__(parent, width=220)
+        super().__init__(parent)
         self.app = app
         self.state = app.state
-        self.pack_propagate(False)
+        self.setFixedWidth(220)
         self._drag_data = None
         self._build()
 
     def _build(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
         # Melodic patterns section
-        hdr = ttk.Frame(self)
-        hdr.pack(fill=tk.X, padx=4, pady=(4, 0))
-        ttk.Label(hdr, text='Patterns', font=('TkDefaultFont', 10, 'bold')).pack(side=tk.LEFT)
-        ttk.Button(hdr, text='+ New', width=6, command=self._new_pattern).pack(side=tk.RIGHT)
+        hdr = QFrame()
+        hdr_layout = QHBoxLayout(hdr)
+        hdr_layout.setContentsMargins(0, 0, 0, 0)
+        title_label = QLabel('Patterns')
+        font = QFont()
+        font.setPointSize(10)
+        font.setBold(True)
+        title_label.setFont(font)
+        hdr_layout.addWidget(title_label)
+        hdr_layout.addStretch()
+        new_btn = QPushButton('+ New')
+        new_btn.setMaximumWidth(60)
+        new_btn.clicked.connect(self._new_pattern)
+        hdr_layout.addWidget(new_btn)
+        layout.addWidget(hdr)
 
-        self.pat_frame = ttk.Frame(self)
-        self.pat_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
-
-        self.pat_canvas = tk.Canvas(self.pat_frame, bg='#16213e', highlightthickness=0)
-        self.pat_scrollbar = ttk.Scrollbar(self.pat_frame, orient=tk.VERTICAL,
-                                            command=self.pat_canvas.yview)
-        self.pat_inner = ttk.Frame(self.pat_canvas)
-        self.pat_canvas.configure(yscrollcommand=self.pat_scrollbar.set)
-        self.pat_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.pat_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.pat_canvas_window = self.pat_canvas.create_window((0, 0), window=self.pat_inner,
-                                                                 anchor='nw')
-        self.pat_inner.bind('<Configure>',
-                            lambda e: self.pat_canvas.configure(scrollregion=self.pat_canvas.bbox('all')))
-        self.pat_canvas.bind('<Configure>',
-                             lambda e: self.pat_canvas.itemconfig(self.pat_canvas_window, width=e.width))
+        # Pattern scroll area
+        self.pat_scroll = QScrollArea()
+        self.pat_scroll.setWidgetResizable(True)
+        self.pat_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.pat_container = QWidget()
+        self.pat_layout = QVBoxLayout(self.pat_container)
+        self.pat_layout.setContentsMargins(0, 0, 0, 0)
+        self.pat_layout.setSpacing(1)
+        self.pat_layout.addStretch()
+        self.pat_scroll.setWidget(self.pat_container)
+        layout.addWidget(self.pat_scroll, stretch=1)
 
         # Key info label
-        self.key_info = ttk.Label(self, text='', font=('TkDefaultFont', 9))
-        self.key_info.pack(fill=tk.X, padx=8, pady=2)
+        self.key_info = QLabel('')
+        font = QFont()
+        font.setPointSize(9)
+        self.key_info.setFont(font)
+        layout.addWidget(self.key_info)
 
         # Separator
-        ttk.Separator(self, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=4, pady=4)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(sep)
 
         # Beat patterns section
-        bhdr = ttk.Frame(self)
-        bhdr.pack(fill=tk.X, padx=4)
-        ttk.Label(bhdr, text='Beat Patterns', font=('TkDefaultFont', 10, 'bold')).pack(side=tk.LEFT)
-        ttk.Button(bhdr, text='+ New', width=6, command=self._new_beat_pattern).pack(side=tk.RIGHT)
+        bhdr = QFrame()
+        bhdr_layout = QHBoxLayout(bhdr)
+        bhdr_layout.setContentsMargins(0, 0, 0, 0)
+        btitle_label = QLabel('Beat Patterns')
+        btitle_label.setFont(font)
+        bhdr_layout.addWidget(btitle_label)
+        bhdr_layout.addStretch()
+        bnew_btn = QPushButton('+ New')
+        bnew_btn.setMaximumWidth(60)
+        bnew_btn.clicked.connect(self._new_beat_pattern)
+        bhdr_layout.addWidget(bnew_btn)
+        layout.addWidget(bhdr)
 
-        self.beat_frame = ttk.Frame(self)
-        self.beat_frame.pack(fill=tk.BOTH, expand=True, padx=4, pady=2)
-
-        self.beat_canvas = tk.Canvas(self.beat_frame, bg='#16213e', highlightthickness=0)
-        self.beat_scrollbar = ttk.Scrollbar(self.beat_frame, orient=tk.VERTICAL,
-                                             command=self.beat_canvas.yview)
-        self.beat_inner = ttk.Frame(self.beat_canvas)
-        self.beat_canvas.configure(yscrollcommand=self.beat_scrollbar.set)
-        self.beat_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.beat_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.beat_canvas_window = self.beat_canvas.create_window((0, 0), window=self.beat_inner,
-                                                                   anchor='nw')
-        self.beat_inner.bind('<Configure>',
-                              lambda e: self.beat_canvas.configure(scrollregion=self.beat_canvas.bbox('all')))
-        self.beat_canvas.bind('<Configure>',
-                               lambda e: self.beat_canvas.itemconfig(self.beat_canvas_window, width=e.width))
+        # Beat pattern scroll area
+        self.beat_scroll = QScrollArea()
+        self.beat_scroll.setWidgetResizable(True)
+        self.beat_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.beat_container = QWidget()
+        self.beat_layout = QVBoxLayout(self.beat_container)
+        self.beat_layout.setContentsMargins(0, 0, 0, 0)
+        self.beat_layout.setSpacing(1)
+        self.beat_layout.addStretch()
+        self.beat_scroll.setWidget(self.beat_container)
+        layout.addWidget(self.beat_scroll, stretch=1)
 
     def _new_pattern(self):
-        self.app.show_pattern_dialog()
+        from ..state import Pattern
+        # Create pattern with defaults directly
+        pat = Pattern(
+            id=self.state.new_id(), 
+            name=f'Pattern {len(self.state.patterns) + 1}',
+            length=self.state.ts_num,
+            notes=[], 
+            color=PALETTE[len(self.state.patterns) % len(PALETTE)],
+            key='C',
+            scale='major',
+        )
+        self.state.patterns.append(pat)
+        self.state.sel_pat = pat.id
+        self.state.sel_beat_pat = None
+        self.state.notify('pattern_dialog')
 
     def _new_beat_pattern(self):
-        self.app.show_beat_pattern_dialog()
+        from ..state import BeatPattern
+        # Create beat pattern with defaults directly
+        grid = {}
+        for inst in self.state.beat_kit:
+            grid[inst.id] = [0] * (self.state.ts_num * 4)
+        pat = BeatPattern(
+            id=self.state.new_id(),
+            name=f'Beat {len(self.state.beat_patterns) + 1}',
+            length=self.state.ts_num,
+            subdivision=4,
+            color=PALETTE[len(self.state.beat_patterns) % len(PALETTE)],
+            grid=grid,
+        )
+        self.state.beat_patterns.append(pat)
+        self.state.sel_beat_pat = pat.id
+        self.state.sel_pat = None
+        self.state.notify('beat_pattern_dialog')
 
     def refresh(self):
         """Rebuild pattern lists from state."""
@@ -84,108 +135,41 @@ class PatternList(ttk.Frame):
         # Key info
         pat = self.state.find_pattern(self.state.sel_pat)
         if pat:
-            self.key_info.configure(text=f'Key: {pat.key} {pat.scale}')
+            self.key_info.setText(f'Key: {pat.key} {pat.scale}')
         else:
-            self.key_info.configure(text='')
+            self.key_info.setText('')
 
     def _render_patterns(self):
-        for w in self.pat_inner.winfo_children():
-            w.destroy()
+        # Clear existing widgets except stretch
+        while self.pat_layout.count() > 1:
+            item = self.pat_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
         for pat in self.state.patterns:
-            sel = self.state.sel_pat == pat.id
-            f = tk.Frame(self.pat_inner, bg='#1e2a4a' if sel else '#16213e',
-                         highlightbackground='#e94560' if sel else '#16213e',
-                         highlightthickness=1 if sel else 0, cursor='hand2')
-            f.pack(fill=tk.X, pady=1)
-
-            # Color dot
-            dot = tk.Canvas(f, width=12, height=12, bg=f['bg'], highlightthickness=0)
-            dot.pack(side=tk.LEFT, padx=(6, 4), pady=4)
-            dot.create_oval(2, 2, 10, 10, fill=pat.color, outline='')
-
-            # Name label
-            info = f'{pat.length}b {pat.key} {pat.scale[:3]}'
-            lbl = tk.Label(f, text=f'{pat.name}  {info}', bg=f['bg'], fg='#eee',
-                           font=('TkDefaultFont', 9), anchor='w')
-            lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-
-            # Action buttons
-            btn_frame = tk.Frame(f, bg=f['bg'])
-            btn_frame.pack(side=tk.RIGHT, padx=4)
-
-            pid = pat.id
-            dup_btn = tk.Button(btn_frame, text='\u29C9', bg=f['bg'], fg='#aaa',
-                                 relief='flat', font=('TkDefaultFont', 8),
-                                 command=lambda p=pid: self._dup_pat(p))
-            dup_btn.pack(side=tk.LEFT)
-            edit_btn = tk.Button(btn_frame, text='\u270E', bg=f['bg'], fg='#aaa',
-                                  relief='flat', font=('TkDefaultFont', 8),
-                                  command=lambda p=pid: self.app.show_pattern_dialog(p))
-            edit_btn.pack(side=tk.LEFT)
-            del_btn = tk.Button(btn_frame, text='\u2715', bg=f['bg'], fg='#aaa',
-                                 relief='flat', font=('TkDefaultFont', 8),
-                                 command=lambda p=pid: self._del_pat(p))
-            del_btn.pack(side=tk.LEFT)
-
-            # Click to select
-            for widget in [f, dot, lbl]:
-                widget.bind('<Button-1>', lambda e, p=pid: self._select_pat(p))
-
-            # Drag support
-            for widget in [f, lbl]:
-                widget.bind('<B1-Motion>', lambda e, p=pid: self._start_drag('pattern', p, e))
-                widget.bind('<ButtonRelease-1>', self._end_drag)
+            item = PatternItem(self, pat, self.state.sel_pat == pat.id)
+            self.pat_layout.insertWidget(self.pat_layout.count() - 1, item)
 
     def _render_beat_patterns(self):
-        for w in self.beat_inner.winfo_children():
-            w.destroy()
+        # Clear existing widgets except stretch
+        while self.beat_layout.count() > 1:
+            item = self.beat_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
         if not self.state.beat_patterns:
-            lbl = tk.Label(self.beat_inner, text='No beat patterns', bg='#16213e',
-                           fg='#666', font=('TkDefaultFont', 9))
-            lbl.pack(pady=8)
+            lbl = QLabel('No beat patterns')
+            lbl.setStyleSheet('color: #666;')
+            font = QFont()
+            font.setPointSize(9)
+            lbl.setFont(font)
+            lbl.setAlignment(Qt.AlignCenter)
+            self.beat_layout.insertWidget(0, lbl)
             return
 
         for pat in self.state.beat_patterns:
-            sel = self.state.sel_beat_pat == pat.id
-            f = tk.Frame(self.beat_inner, bg='#1e2a4a' if sel else '#16213e',
-                         highlightbackground='#e94560' if sel else '#16213e',
-                         highlightthickness=1 if sel else 0, cursor='hand2')
-            f.pack(fill=tk.X, pady=1)
-
-            dot = tk.Canvas(f, width=12, height=12, bg=f['bg'], highlightthickness=0)
-            dot.pack(side=tk.LEFT, padx=(6, 4), pady=4)
-            dot.create_oval(2, 2, 10, 10, fill=pat.color, outline='')
-
-            info = f'{pat.length}b \u00F7{pat.subdivision}'
-            lbl = tk.Label(f, text=f'{pat.name}  {info}', bg=f['bg'], fg='#eee',
-                           font=('TkDefaultFont', 9), anchor='w')
-            lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
-
-            btn_frame = tk.Frame(f, bg=f['bg'])
-            btn_frame.pack(side=tk.RIGHT, padx=4)
-
-            pid = pat.id
-            dup_btn = tk.Button(btn_frame, text='\u29C9', bg=f['bg'], fg='#aaa',
-                                 relief='flat', font=('TkDefaultFont', 8),
-                                 command=lambda p=pid: self._dup_beat_pat(p))
-            dup_btn.pack(side=tk.LEFT)
-            edit_btn = tk.Button(btn_frame, text='\u270E', bg=f['bg'], fg='#aaa',
-                                  relief='flat', font=('TkDefaultFont', 8),
-                                  command=lambda p=pid: self.app.show_beat_pattern_dialog(p))
-            edit_btn.pack(side=tk.LEFT)
-            del_btn = tk.Button(btn_frame, text='\u2715', bg=f['bg'], fg='#aaa',
-                                 relief='flat', font=('TkDefaultFont', 8),
-                                 command=lambda p=pid: self._del_beat_pat(p))
-            del_btn.pack(side=tk.LEFT)
-
-            for widget in [f, dot, lbl]:
-                widget.bind('<Button-1>', lambda e, p=pid: self._select_beat_pat(p))
-
-            for widget in [f, lbl]:
-                widget.bind('<B1-Motion>', lambda e, p=pid: self._start_drag('beatPattern', p, e))
-                widget.bind('<ButtonRelease-1>', self._end_drag)
+            item = BeatPatternItem(self, pat, self.state.sel_beat_pat == pat.id)
+            self.beat_layout.insertWidget(self.beat_layout.count() - 1, item)
 
     def _select_pat(self, pid):
         self.state.sel_pat = pid
@@ -238,11 +222,152 @@ class PatternList(ttk.Frame):
         self.state.sel_pat = None
         self.state.notify('dup_beat_pat')
 
-    def _start_drag(self, dtype, pid, event):
-        self._drag_data = {'type': dtype, 'pid': pid}
-        self.app.start_drag(dtype, pid, event)
 
-    def _end_drag(self, event):
-        if self._drag_data:
-            self.app.end_drag(event)
-            self._drag_data = None
+class PatternItem(QFrame):
+    """Single pattern item in the list."""
+
+    def __init__(self, parent_list, pattern, selected):
+        super().__init__(parent_list)
+        self.parent_list = parent_list
+        self.pattern = pattern
+        self.setFrameStyle(QFrame.Box if selected else QFrame.NoFrame)
+        self.setCursor(Qt.PointingHandCursor)
+        self.drag_start_pos = None
+        self.drag_timer = None
+        
+        bg_color = '#1e2a4a' if selected else '#16213e'
+        border_color = '#e94560' if selected else '#16213e'
+        self.setStyleSheet(f'background-color: {bg_color}; border: 1px solid {border_color};')
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 4, 4, 4)
+        layout.setSpacing(4)
+
+        # Color dot
+        dot_widget = ColorDot(pattern.color)
+        dot_widget.setAttribute(Qt.WA_TransparentForMouseEvents)
+        layout.addWidget(dot_widget)
+
+        # Name and info
+        info = f'{pattern.length}b {pattern.key} {pattern.scale[:3]}'
+        label = QLabel(f'{pattern.name}  {info}')
+        label.setStyleSheet('color: #eee; background-color: transparent; border: none;')
+        label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        font = QFont()
+        font.setPointSize(9)
+        label.setFont(font)
+        layout.addWidget(label, stretch=1)
+
+        # Action buttons
+        btn_frame = QFrame()
+        btn_frame.setStyleSheet('background-color: transparent; border: none;')
+        btn_layout = QHBoxLayout(btn_frame)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(2)
+
+        dup_btn = QPushButton('⧉')
+        dup_btn.setStyleSheet('background-color: transparent; color: #aaa; border: none;')
+        dup_btn.setMaximumWidth(20)
+        dup_btn.clicked.connect(lambda: parent_list._dup_pat(pattern.id))
+        btn_layout.addWidget(dup_btn)
+
+        edit_btn = QPushButton('✎')
+        edit_btn.setStyleSheet('background-color: transparent; color: #aaa; border: none;')
+        edit_btn.setMaximumWidth(20)
+        edit_btn.clicked.connect(lambda: parent_list.app.show_pattern_dialog(pattern.id))
+        btn_layout.addWidget(edit_btn)
+
+        del_btn = QPushButton('✕')
+        del_btn.setStyleSheet('background-color: transparent; color: #aaa; border: none;')
+        del_btn.setMaximumWidth(20)
+        del_btn.clicked.connect(lambda: parent_list._del_pat(pattern.id))
+        btn_layout.addWidget(del_btn)
+
+        layout.addWidget(btn_frame)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.parent_list._select_pat(self.pattern.id)
+
+
+class BeatPatternItem(QFrame):
+    """Single beat pattern item in the list."""
+
+    def __init__(self, parent_list, pattern, selected):
+        super().__init__(parent_list)
+        self.parent_list = parent_list
+        self.pattern = pattern
+        self.setFrameStyle(QFrame.Box if selected else QFrame.NoFrame)
+        self.setCursor(Qt.PointingHandCursor)
+        self.drag_start_pos = None
+        self.drag_timer = None
+        
+        bg_color = '#1e2a4a' if selected else '#16213e'
+        border_color = '#e94560' if selected else '#16213e'
+        self.setStyleSheet(f'background-color: {bg_color}; border: 1px solid {border_color};')
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 4, 4, 4)
+        layout.setSpacing(4)
+
+        # Color dot
+        dot_widget = ColorDot(pattern.color)
+        dot_widget.setAttribute(Qt.WA_TransparentForMouseEvents)
+        layout.addWidget(dot_widget)
+
+        # Name and info
+        info = f'{pattern.length}b ÷{pattern.subdivision}'
+        label = QLabel(f'{pattern.name}  {info}')
+        label.setStyleSheet('color: #eee; background-color: transparent; border: none;')
+        label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        font = QFont()
+        font.setPointSize(9)
+        label.setFont(font)
+        layout.addWidget(label, stretch=1)
+
+        # Action buttons
+        btn_frame = QFrame()
+        btn_frame.setStyleSheet('background-color: transparent; border: none;')
+        btn_layout = QHBoxLayout(btn_frame)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(2)
+
+        dup_btn = QPushButton('⧉')
+        dup_btn.setStyleSheet('background-color: transparent; color: #aaa; border: none;')
+        dup_btn.setMaximumWidth(20)
+        dup_btn.clicked.connect(lambda: parent_list._dup_beat_pat(pattern.id))
+        btn_layout.addWidget(dup_btn)
+
+        edit_btn = QPushButton('✎')
+        edit_btn.setStyleSheet('background-color: transparent; color: #aaa; border: none;')
+        edit_btn.setMaximumWidth(20)
+        edit_btn.clicked.connect(lambda: parent_list.app.show_beat_pattern_dialog(pattern.id))
+        btn_layout.addWidget(edit_btn)
+
+        del_btn = QPushButton('✕')
+        del_btn.setStyleSheet('background-color: transparent; color: #aaa; border: none;')
+        del_btn.setMaximumWidth(20)
+        del_btn.clicked.connect(lambda: parent_list._del_beat_pat(pattern.id))
+        btn_layout.addWidget(del_btn)
+
+        layout.addWidget(btn_frame)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.parent_list._select_beat_pat(self.pattern.id)
+
+
+class ColorDot(QWidget):
+    """Small circular color indicator."""
+
+    def __init__(self, color):
+        super().__init__()
+        self.color = QColor(color)
+        self.setFixedSize(12, 12)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self.color)
+        painter.drawEllipse(2, 2, 8, 8)

@@ -131,6 +131,7 @@ def render_sample(sf2_path, bank, program, pitch, velocity=100, duration=0.5, ch
     from .midi import _vlq
     tpb = 480
     bpm = 120
+    velocity = int(velocity)  # Ensure velocity is int for bitwise operations
     note_ticks = int(duration * tpb * (bpm / 60))
     ch = channel & 0x0F
     evs = [

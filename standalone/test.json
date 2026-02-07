@@ -1,0 +1,140 @@
+{
+  "v": 3,
+  "bpm": 120,
+  "snap": 0.5,
+  "tsNum": 4,
+  "tsDen": 4,
+  "patterns": [
+    {
+      "id": 1,
+      "name": "Pattern 1",
+      "length": 4,
+      "notes": [
+        {
+          "pitch": 83,
+          "start": 0.0,
+          "duration": 0.5,
+          "velocity": 100
+        },
+        {
+          "pitch": 81,
+          "start": 0.5,
+          "duration": 0.25,
+          "velocity": 100
+        },
+        {
+          "pitch": 79,
+          "start": 0.5,
+          "duration": 0.25,
+          "velocity": 100
+        },
+        {
+          "pitch": 77,
+          "start": 1.0,
+          "duration": 0.5,
+          "velocity": 100
+        },
+        {
+          "pitch": 74,
+          "start": 1.5,
+          "duration": 0.5,
+          "velocity": 100
+        },
+        {
+          "pitch": 72,
+          "start": 2.0,
+          "duration": 0.25,
+          "velocity": 100
+        },
+        {
+          "pitch": 70,
+          "start": 3.0,
+          "duration": 0.25,
+          "velocity": 100
+        },
+        {
+          "pitch": 69,
+          "start": 3.5,
+          "duration": 0.5,
+          "velocity": 100
+        },
+        {
+          "pitch": 71,
+          "start": 2.5,
+          "duration": 0.25,
+          "velocity": 100
+        }
+      ],
+      "color": "#e94560",
+      "key": "C",
+      "scale": "major",
+      "previewMode": "sine"
+    }
+  ],
+  "tracks": [
+    {
+      "id": 2,
+      "name": "Track 1",
+      "channel": 0,
+      "bank": 0,
+      "program": 0,
+      "volume": 100
+    }
+  ],
+  "placements": [
+    {
+      "id": 5,
+      "trackId": 2,
+      "patternId": 1,
+      "time": 0,
+      "transpose": 0,
+      "repeats": 1,
+      "targetKey": "C",
+      "targetScale": "major"
+    }
+  ],
+  "beatKit": [
+    {
+      "id": 4,
+      "name": "Inst 1",
+      "channel": 9,
+      "bank": 0,
+      "program": 0,
+      "pitch": 36,
+      "velocity": 100
+    }
+  ],
+  "beatPatterns": [
+    {
+      "id": 3,
+      "name": "Beat 1",
+      "length": 4,
+      "subdivision": 4,
+      "color": "#e94560",
+      "grid": {
+        "4": [
+          100,
+          0,
+          0,
+          100,
+          0,
+          100,
+          100,
+          100,
+          0,
+          0,
+          100,
+          0,
+          0,
+          0,
+          100,
+          0
+        ]
+      }
+    }
+  ],
+  "beatTracks": [],
+  "beatPlacements": [],
+  "sf2Path": "/home/nichg/Dropbox/llmexpts/arranger/arranger/instruments/GeneralUser-GS.sf2",
+  "nextId": 6
+}

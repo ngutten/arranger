@@ -2,7 +2,7 @@
 """Music Arranger - Standalone Desktop Application.
 
 A pattern-based MIDI sequencer with piano roll editor, beat grid editor,
-and arrangement timeline. Built with tkinter.
+and arrangement timeline. Built with PySide6.
 
 Usage:
     python -m standalone.main [--instruments DIR]
@@ -11,8 +11,9 @@ Usage:
 
 import argparse
 import sys
-import tkinter as tk
 from pathlib import Path
+
+from PySide6.QtWidgets import QApplication
 
 # Allow running as a script (python standalone/main.py) in addition to
 # running as a module (python -m standalone.main).  When executed directly,
@@ -36,13 +37,17 @@ def main():
         # Default: instruments/ directory next to the project root
         instruments_dir = str(Path(__file__).parent.parent / 'instruments')
 
-    root = tk.Tk()
-
+    app = QApplication(sys.argv)
+    
+    # Set application style
+    app.setStyle('Fusion')
+    
     # Import here to avoid circular imports
     from .app import App
-    app = App(root, instruments_dir=instruments_dir)
+    main_window = App(instruments_dir=instruments_dir)
+    main_window.show()
 
-    root.mainloop()
+    sys.exit(app.exec())
 
 
 if __name__ == '__main__':

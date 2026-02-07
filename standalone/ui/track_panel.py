@@ -1,54 +1,61 @@
 """Right panel - track settings, soundfont info, placement settings, beat kit."""
 
-import tkinter as tk
-from tkinter import ttk
+from PySide6.QtWidgets import (QFrame, QWidget, QScrollArea, QLabel, QPushButton,
+                                QLineEdit, QSpinBox, QComboBox, QSlider, QListWidget,
+                                QVBoxLayout, QHBoxLayout, QGroupBox)
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPainter, QColor, QFont
 
 from ..state import NOTE_NAMES, SCALES, PALETTE, preset_name, BeatInstrument
 
 
-class TrackPanel(ttk.Frame):
+class TrackPanel(QFrame):
     """Right panel with track settings, SF2 info, placement settings, and beat kit."""
 
     def __init__(self, parent, app):
-        super().__init__(parent, width=250)
+        super().__init__(parent)
         self.app = app
         self.state = app.state
-        self.pack_propagate(False)
+        self.setFixedWidth(250)
         self._build()
 
     def _build(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
         # Scrollable container
-        self.canvas = tk.Canvas(self, bg='#16213e', highlightthickness=0)
-        self.scrollbar = ttk.Scrollbar(self, orient=tk.VERTICAL, command=self.canvas.yview)
-        self.inner = ttk.Frame(self.canvas)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        self.inner = QWidget()
+        self.inner_layout = QVBoxLayout(self.inner)
+        self.inner_layout.setSpacing(4)
+        
+        # Sections with size policies to prevent unwanted expansion
+        from PySide6.QtWidgets import QSizePolicy
+        
+        self.trk_frame = QGroupBox('Track Settings')
+        self.trk_frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self.inner_layout.addWidget(self.trk_frame)
 
-        self.canvas.configure(yscrollcommand=self.scrollbar.set)
-        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.canvas_window = self.canvas.create_window((0, 0), window=self.inner, anchor='nw')
+        self.sf2_frame = QGroupBox('Soundfont')
+        self.sf2_frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self.inner_layout.addWidget(self.sf2_frame)
 
-        self.inner.bind('<Configure>',
-                         lambda e: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
-        self.canvas.bind('<Configure>',
-                          lambda e: self.canvas.itemconfig(self.canvas_window, width=e.width))
+        self.pl_frame = QGroupBox('Placement')
+        self.pl_frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self.inner_layout.addWidget(self.pl_frame)
 
-        # Sections will be built in refresh()
-        self.trk_frame = ttk.LabelFrame(self.inner, text='Track Settings', padding=4)
-        self.trk_frame.pack(fill=tk.X, padx=4, pady=4)
+        self.kit_frame = QGroupBox('Beat Kit')
+        self.kit_frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self.inner_layout.addWidget(self.kit_frame)
 
-        self.sf2_frame = ttk.LabelFrame(self.inner, text='Soundfont', padding=4)
-        self.sf2_frame.pack(fill=tk.X, padx=4, pady=4)
+        self.inner_layout.addStretch()
 
-        self.pl_frame = ttk.LabelFrame(self.inner, text='Placement', padding=4)
-        self.pl_frame.pack(fill=tk.X, padx=4, pady=4)
-
-        self.kit_frame = ttk.LabelFrame(self.inner, text='Beat Kit', padding=4)
-        self.kit_frame.pack(fill=tk.X, padx=4, pady=4)
-
-        # Add instrument button
-        self.add_inst_btn = ttk.Button(self.kit_frame, text='+ Instrument',
-                                        command=self.app.add_beat_instrument)
-        self.add_inst_btn.pack(anchor='w', pady=2)
+        self.scroll_area.setWidget(self.inner)
+        layout.addWidget(self.scroll_area)
 
     def refresh(self):
         """Rebuild all sections from state."""
@@ -57,57 +64,57 @@ class TrackPanel(ttk.Frame):
         self._render_placement_settings()
         self._render_beat_kit()
 
-    def _clear_frame(self, frame, keep_btn=False):
-        for w in frame.winfo_children():
-            if keep_btn and w == self.add_inst_btn:
-                continue
-            w.destroy()
+    def _clear_frame(self, frame, keep_widget=None):
+        if not frame.layout():
+            # Create layout if it doesn't exist yet (first time)
+            QVBoxLayout(frame)
+        # Clear all widgets from the layout
+        while frame.layout().count():
+            item = frame.layout().takeAt(0)
+            if item.widget() and item.widget() != keep_widget:
+                item.widget().deleteLater()
 
     def _render_track_settings(self):
         self._clear_frame(self.trk_frame)
+        layout = self.trk_frame.layout()
         s = self.state
 
         # Check for beat track selection first
         bt = s.find_beat_track(s.sel_beat_trk) if s.sel_beat_trk else None
         if bt:
-            self._row(self.trk_frame, 'Name', bt.name,
-                       lambda v, bt=bt: self._update_beat_track(bt, 'name', v))
-            ttk.Label(self.trk_frame, text='Beat Track', foreground='#e94560',
-                       font=('TkDefaultFont', 9)).pack(anchor='w', pady=2)
-            ttk.Button(self.trk_frame, text='Delete Track',
-                        command=lambda: self.app.delete_beat_track(bt.id)).pack(
-                anchor='w', pady=4)
+            self._row(layout, 'Name', bt.name,
+                      lambda v, bt=bt: self._update_beat_track(bt, 'name', v))
+            label = QLabel('Beat Track')
+            label.setStyleSheet('color: #e94560;')
+            label.setFont(QFont('TkDefaultFont', 9))
+            layout.addWidget(label)
+            
+            del_btn = QPushButton('Delete Track')
+            del_btn.clicked.connect(lambda: self.app.delete_beat_track(bt.id))
+            layout.addWidget(del_btn)
             return
 
         t = s.find_track(s.sel_trk) if s.sel_trk else None
         if not t:
-            ttk.Label(self.trk_frame, text='Select a track',
-                       foreground='#888').pack(anchor='w')
+            label = QLabel('Select a track')
+            label.setStyleSheet('color: #888;')
+            layout.addWidget(label)
             return
 
-        self._row(self.trk_frame, 'Name', t.name,
-                   lambda v, t=t: self._update_track(t, 'name', v))
+        self._row(layout, 'Name', t.name,
+                  lambda v, t=t: self._update_track(t, 'name', v))
 
         # Channel
-        ch_frame = ttk.Frame(self.trk_frame)
-        ch_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(ch_frame, text='Channel', width=8).pack(side=tk.LEFT)
-        ch_var = tk.StringVar(value=str(t.channel))
-        ch_cb = ttk.Combobox(ch_frame, textvariable=ch_var, width=12, state='readonly',
-                              values=[f'Ch {i+1}' + (' (Drums)' if i == 9 else '')
-                                      for i in range(16)])
-        ch_cb.current(t.channel)
-        ch_cb.pack(side=tk.LEFT, padx=4)
-        ch_cb.bind('<<ComboboxSelected>>',
-                    lambda e, t=t: self._update_track(t, 'channel', ch_cb.current()))
-
-        # Bank
-        self._num_row(self.trk_frame, 'Bank', t.bank, 0, 16383,
-                       lambda v, t=t: self._update_track(t, 'bank', v))
-
-        # Program
-        self._num_row(self.trk_frame, 'Program', t.program, 0, 127,
-                       lambda v, t=t: self._update_track(t, 'program', v))
+        ch_layout = QHBoxLayout()
+        ch_layout.addWidget(QLabel('Channel'))
+        ch_cb = QComboBox()
+        ch_cb.addItems([f'Ch {i+1}' + (' (Drums)' if i == 9 else '')
+                        for i in range(16)])
+        ch_cb.setCurrentIndex(t.channel)
+        ch_cb.currentIndexChanged.connect(
+            lambda idx, t=t: self._update_track(t, 'channel', idx))
+        ch_layout.addWidget(ch_cb)
+        layout.addLayout(ch_layout)
 
         # Preset name display
         presets = None
@@ -116,36 +123,46 @@ class TrackPanel(ttk.Frame):
         elif s.sf2 and isinstance(s.sf2, dict):
             presets = s.sf2.get('presets')
         pn = preset_name(t.bank, t.program, presets)
-        ttk.Label(self.trk_frame, text=f'Preset: {pn}', foreground='#e94560',
-                   font=('TkDefaultFont', 8)).pack(anchor='w', pady=2)
+        preset_label = QLabel(f'Preset: {pn}')
+        preset_label.setStyleSheet('color: #e94560;')
+        preset_label.setFont(QFont('TkDefaultFont', 8))
+        layout.addWidget(preset_label)
 
         # Volume
-        vol_frame = ttk.Frame(self.trk_frame)
-        vol_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(vol_frame, text='Volume', width=8).pack(side=tk.LEFT)
-        vol_var = tk.IntVar(value=t.volume)
-        ttk.Scale(vol_frame, from_=0, to=127, variable=vol_var,
-                   orient=tk.HORIZONTAL, length=100,
-                   command=lambda v, t=t: self._update_track(t, 'volume', int(float(v)))).pack(
-            side=tk.LEFT, padx=4)
-        ttk.Label(vol_frame, textvariable=vol_var, width=3).pack(side=tk.LEFT)
+        vol_layout = QHBoxLayout()
+        vol_layout.addWidget(QLabel('Volume'))
+        vol_slider = QSlider(Qt.Horizontal)
+        vol_slider.setRange(0, 127)
+        vol_slider.setValue(t.volume)
+        vol_slider.valueChanged.connect(
+            lambda v, t=t: self._update_track(t, 'volume', v))
+        vol_layout.addWidget(vol_slider)
+        vol_label = QLabel(str(t.volume))
+        vol_slider.valueChanged.connect(lambda v: vol_label.setText(str(v)))
+        vol_layout.addWidget(vol_label)
+        layout.addLayout(vol_layout)
 
-        ttk.Button(self.trk_frame, text='Delete Track',
-                    command=lambda: self.app.delete_track(t.id)).pack(anchor='w', pady=4)
+        del_btn = QPushButton('Delete Track')
+        del_btn.clicked.connect(lambda: self.app.delete_track(t.id))
+        layout.addWidget(del_btn)
 
     def _render_sf2_info(self):
         self._clear_frame(self.sf2_frame)
+        layout = self.sf2_frame.layout()
         s = self.state
 
         if not s.sf2:
-            ttk.Label(self.sf2_frame, text='No soundfont loaded',
-                       foreground='#888').pack(anchor='w')
+            label = QLabel('No soundfont loaded')
+            label.setStyleSheet('color: #888;')
+            layout.addWidget(label)
             return
 
         sf2_name = s.sf2.name if hasattr(s.sf2, 'name') else (
             s.sf2.get('name', 'Unknown') if isinstance(s.sf2, dict) else 'Unknown')
-        ttk.Label(self.sf2_frame, text=sf2_name, font=('TkDefaultFont', 8)).pack(
-            anchor='w', pady=2)
+        name_label = QLabel(sf2_name)
+        name_label.setFont(QFont('TkDefaultFont', 8))
+        name_label.setWordWrap(True)
+        layout.addWidget(name_label)
 
         presets = s.sf2.presets if hasattr(s.sf2, 'presets') else (
             s.sf2.get('presets', []) if isinstance(s.sf2, dict) else [])
@@ -157,238 +174,384 @@ class TrackPanel(ttk.Frame):
         current_bank = t.bank if t else 0
         banks = sorted(set(p['bank'] for p in presets))
 
-        bank_frame = ttk.Frame(self.sf2_frame)
-        bank_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(bank_frame, text='Bank', width=6).pack(side=tk.LEFT)
-        bank_var = tk.StringVar(value=str(current_bank))
-        bank_cb = ttk.Combobox(bank_frame, textvariable=bank_var, width=8, state='readonly',
-                                values=[f'Bank {b}' for b in banks])
+        bank_layout = QHBoxLayout()
+        bank_layout.addWidget(QLabel('Bank'))
+        bank_cb = QComboBox()
+        bank_cb.addItems([f'Bank {b}' for b in banks])
         try:
-            bank_cb.current(banks.index(current_bank))
+            bank_cb.setCurrentIndex(banks.index(current_bank))
         except ValueError:
             if banks:
-                bank_cb.current(0)
-        bank_cb.pack(side=tk.LEFT, padx=4)
-        bank_cb.bind('<<ComboboxSelected>>',
-                      lambda e: self._on_bank_change(banks[bank_cb.current()]))
+                bank_cb.setCurrentIndex(0)
+        bank_cb.currentIndexChanged.connect(
+            lambda idx: self._on_bank_change(banks[idx]))
+        bank_layout.addWidget(bank_cb)
+        layout.addLayout(bank_layout)
 
-        # Preset list
+        # Preset list - reduced max height to prevent expansion
         filtered = [p for p in presets if p['bank'] == current_bank]
-        list_frame = ttk.Frame(self.sf2_frame)
-        list_frame.pack(fill=tk.BOTH, expand=True, pady=2)
-
-        self.preset_listbox = tk.Listbox(list_frame, bg='#1a1a30', fg='#eee',
-                                          selectbackground='#e94560',
-                                          font=('TkDefaultFont', 8), height=8,
-                                          highlightthickness=0, borderwidth=1)
-        preset_scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL,
-                                       command=self.preset_listbox.yview)
-        self.preset_listbox.configure(yscrollcommand=preset_scroll.set)
-        self.preset_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        preset_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-
+        # Sort by program number
+        filtered.sort(key=lambda p: p['program'])
+        self.preset_listbox = QListWidget()
+        self.preset_listbox.setMaximumHeight(120)
+        self.preset_listbox.setMinimumHeight(80)
         for p in filtered:
-            marker = ' *' if (t and t.bank == p['bank'] and t.program == p['program']) else ''
-            self.preset_listbox.insert(tk.END, f"{p['program']}: {p['name']}{marker}")
-
-        self.preset_listbox.bind('<<ListboxSelect>>',
-                                  lambda e: self._on_preset_select(filtered))
+            self.preset_listbox.addItem(f"{p['program']:3d}  {p['name']}")
+        # Single click to select
+        self.preset_listbox.itemClicked.connect(
+            lambda: self._on_preset_select(filtered))
+        # Double-click also works
+        self.preset_listbox.itemDoubleClicked.connect(
+            lambda: self._on_preset_select(filtered))
+        layout.addWidget(self.preset_listbox)
 
     def _render_placement_settings(self):
         self._clear_frame(self.pl_frame)
+        layout = self.pl_frame.layout()
         s = self.state
 
-        # Check beat placement first
+        # Check for beat placement first
         bp = s.find_beat_placement(s.sel_beat_pl) if s.sel_beat_pl else None
         if bp:
-            pat = s.find_beat_pattern(bp.pattern_id)
-            ttk.Label(self.pl_frame,
-                       text=f'Pattern: {pat.name if pat else "?"}',
-                       foreground='#e94560').pack(anchor='w', pady=2)
-            self._num_row(self.pl_frame, 'Time', bp.time, 0, 999,
-                           lambda v, bp=bp: self._update_beat_pl(bp, 'time', v),
-                           step=s.snap, is_float=True)
-            self._num_row(self.pl_frame, 'Repeats', bp.repeats, 1, 128,
-                           lambda v, bp=bp: self._update_beat_pl(bp, 'repeats', v))
-            ttk.Button(self.pl_frame, text='Remove',
-                        command=lambda: self._del_beat_pl(bp.id)).pack(anchor='w', pady=4)
+            label = QLabel('Beat Placement')
+            label.setStyleSheet('color: #e94560;')
+            label.setFont(QFont('TkDefaultFont', 8))
+            layout.addWidget(label)
+
+            self._num_row(layout, 'Repeats', bp.repeats, 1, 128,
+                          lambda v, bp=bp: self._update_beat_pl(bp, 'repeats', v))
+
+            del_btn = QPushButton('Remove')
+            del_btn.clicked.connect(lambda: self._del_beat_pl(bp.id))
+            layout.addWidget(del_btn)
             return
 
         pl = s.find_placement(s.sel_pl) if s.sel_pl else None
         if not pl:
-            ttk.Label(self.pl_frame, text='Click a placement',
-                       foreground='#888').pack(anchor='w')
+            label = QLabel('Select a placement')
+            label.setStyleSheet('color: #888;')
+            layout.addWidget(label)
             return
 
-        pat = s.find_pattern(pl.pattern_id)
-        ttk.Label(self.pl_frame,
-                   text=f'Pattern: {pat.name if pat else "?"}').pack(anchor='w', pady=2)
-
-        self._num_row(self.pl_frame, 'Time', pl.time, 0, 999,
-                       lambda v, pl=pl: self._update_pl(pl, 'time', v),
-                       step=s.snap, is_float=True)
-
-        self._num_row(self.pl_frame, 'Transpose', pl.transpose, -48, 48,
-                       lambda v, pl=pl: self._update_pl(pl, 'transpose', v))
-
         # Target key
-        key_frame = ttk.Frame(self.pl_frame)
-        key_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(key_frame, text='Target Key', width=10).pack(side=tk.LEFT)
-        key_var = tk.StringVar(value=pl.target_key or (pat.key if pat else 'C'))
-        key_cb = ttk.Combobox(key_frame, textvariable=key_var, values=NOTE_NAMES,
-                               state='readonly', width=4)
-        key_cb.pack(side=tk.LEFT, padx=2)
-        key_cb.bind('<<ComboboxSelected>>',
-                      lambda e, pl=pl: self._update_pl(pl, 'target_key', key_var.get()))
+        key_layout = QHBoxLayout()
+        key_layout.addWidget(QLabel('To Key'))
+        key_cb = QComboBox()
+        key_cb.addItems(['(none)'] + NOTE_NAMES[:12])
+        if pl.target_key:
+            try:
+                key_cb.setCurrentText(pl.target_key)
+            except:
+                key_cb.setCurrentIndex(0)
+        else:
+            key_cb.setCurrentIndex(0)
+        
+        def on_key_change(idx):
+            if idx == 0:
+                pl.target_key = None
+            else:
+                pl.target_key = key_cb.currentText()
+            self.state.notify('placement_settings')
+        
+        key_cb.currentIndexChanged.connect(on_key_change)
+        key_layout.addWidget(key_cb)
+        layout.addLayout(key_layout)
 
-        scale_var = tk.StringVar(value=pl.target_scale or (pat.scale if pat else 'major'))
-        scale_cb = ttk.Combobox(key_frame, textvariable=scale_var,
-                                 values=list(SCALES.keys()), state='readonly', width=10)
-        scale_cb.pack(side=tk.LEFT, padx=2)
-        scale_cb.bind('<<ComboboxSelected>>',
-                        lambda e, pl=pl: self._update_pl(pl, 'target_scale', scale_var.get()))
+        # Manual transpose
+        self._num_row(layout, 'Shift', pl.transpose, -48, 48,
+                      lambda v, pl=pl: self._update_pl(pl, 'transpose', v))
 
-        # Total shift info
+        # Show computed transpose
+        pat = s.find_pattern(pl.pattern_id)
         ts = s.compute_transpose(pl)
         pk = pat.key if pat else 'C'
         ps = pat.scale if pat else 'major'
-        ttk.Label(self.pl_frame,
-                   text=f'Base: {pk} {ps} -> total shift: {ts} semi',
-                   foreground='#888', font=('TkDefaultFont', 7)).pack(anchor='w', pady=2)
+        info_label = QLabel(f'Base: {pk} {ps} -> total shift: {ts} semi')
+        info_label.setStyleSheet('color: #888;')
+        info_label.setFont(QFont('TkDefaultFont', 7))
+        layout.addWidget(info_label)
 
-        self._num_row(self.pl_frame, 'Repeats', pl.repeats, 1, 128,
-                       lambda v, pl=pl: self._update_pl(pl, 'repeats', v))
+        self._num_row(layout, 'Repeats', pl.repeats, 1, 128,
+                      lambda v, pl=pl: self._update_pl(pl, 'repeats', v))
 
-        ttk.Button(self.pl_frame, text='Remove',
-                    command=lambda: self._del_pl(pl.id)).pack(anchor='w', pady=4)
+        del_btn = QPushButton('Remove')
+        del_btn.clicked.connect(lambda: self._del_pl(pl.id))
+        layout.addWidget(del_btn)
 
     def _render_beat_kit(self):
-        self._clear_frame(self.kit_frame, keep_btn=True)
+        self._clear_frame(self.kit_frame)
+        layout = self.kit_frame.layout()
 
         if not self.state.beat_kit:
-            ttk.Label(self.kit_frame, text='No instruments. Click + to add.',
-                       foreground='#888', font=('TkDefaultFont', 8)).pack(
-                anchor='w', pady=2, before=self.add_inst_btn)
-            return
+            label = QLabel('No instruments. Click + to add.')
+            label.setStyleSheet('color: #888;')
+            label.setFont(QFont('TkDefaultFont', 8))
+            layout.addWidget(label)
+        else:
+            for i, inst in enumerate(self.state.beat_kit):
+                color = PALETTE[i % len(PALETTE)]
+                inst_widget = self._create_inst_widget(inst, color)
+                layout.addWidget(inst_widget)
 
-        for i, inst in enumerate(self.state.beat_kit):
-            color = PALETTE[i % len(PALETTE)]
-            inst_frame = ttk.Frame(self.kit_frame)
-            inst_frame.pack(fill=tk.X, pady=2, before=self.add_inst_btn)
+        add_btn = QPushButton('+ Instrument')
+        add_btn.clicked.connect(self.app.add_beat_instrument)
+        layout.addWidget(add_btn)
 
-            # Header row
-            hdr = ttk.Frame(inst_frame)
-            hdr.pack(fill=tk.X)
+    def _create_inst_widget(self, inst, color):
+        widget = QFrame()
+        widget_layout = QVBoxLayout(widget)
+        widget_layout.setContentsMargins(4, 4, 4, 4)
+        widget_layout.setSpacing(0)
 
-            # Color indicator
-            dot = tk.Canvas(hdr, width=10, height=10, highlightthickness=0)
-            dot.pack(side=tk.LEFT, padx=2)
-            dot.create_oval(1, 1, 9, 9, fill=color, outline='')
+        # Header row (clickable to expand/collapse)
+        hdr_frame = QFrame()
+        hdr_frame.setCursor(Qt.PointingHandCursor)
+        hdr_layout = QHBoxLayout(hdr_frame)
+        hdr_layout.setContentsMargins(0, 0, 0, 4)
+        
+        # Color indicator
+        color_widget = ColorDot(color)
+        hdr_layout.addWidget(color_widget)
+        
+        name_label = QLabel(inst.name)
+        name_label.setFont(QFont('TkDefaultFont', 8, QFont.Bold))
+        hdr_layout.addWidget(name_label, 1)
 
-            ttk.Label(hdr, text=inst.name, font=('TkDefaultFont', 8, 'bold')).pack(
-                side=tk.LEFT, padx=4)
+        play_btn = QPushButton('▶')
+        play_btn.setMaximumWidth(30)
+        play_btn.clicked.connect(lambda: self.app.play_beat_hit(inst.id))
+        hdr_layout.addWidget(play_btn)
 
-            ttk.Button(hdr, text='\u25B6', width=2,
-                        command=lambda iid=inst.id: self.app.play_beat_hit(iid)).pack(
-                side=tk.RIGHT, padx=1)
-            ttk.Button(hdr, text='\u2715', width=2,
-                        command=lambda iid=inst.id: self.app.delete_beat_instrument(iid)).pack(
-                side=tk.RIGHT, padx=1)
+        del_btn = QPushButton('✕')
+        del_btn.setMaximumWidth(30)
+        del_btn.clicked.connect(lambda: self.app.delete_beat_instrument(inst.id))
+        hdr_layout.addWidget(del_btn)
 
-            # Detail rows
-            det = ttk.Frame(inst_frame)
-            det.pack(fill=tk.X, padx=12, pady=2)
+        widget_layout.addWidget(hdr_frame)
 
-            # Name
-            self._small_row(det, 'Name', inst.name,
-                             lambda v, inst=inst: self._update_inst(inst, 'name', v))
+        # Detail rows (collapsible)
+        det_frame = QFrame()
+        det_layout = QVBoxLayout(det_frame)
+        det_layout.setContentsMargins(12, 0, 0, 0)
 
-            # Channel
-            ch_frame = ttk.Frame(det)
-            ch_frame.pack(fill=tk.X, pady=1)
-            ttk.Label(ch_frame, text='Ch', width=5, font=('TkDefaultFont', 7)).pack(side=tk.LEFT)
-            ch_var = tk.StringVar(value=str(inst.channel))
-            ch_cb = ttk.Combobox(ch_frame, textvariable=ch_var, width=10, state='readonly',
-                                  values=[f'Ch {i+1}' + (' (Drums)' if i == 9 else '')
-                                          for i in range(16)])
-            ch_cb.current(inst.channel)
-            ch_cb.pack(side=tk.LEFT, padx=2)
-            ch_cb.bind('<<ComboboxSelected>>',
-                        lambda e, inst=inst, cb=ch_cb: self._update_inst(inst, 'channel',
-                                                                          cb.current()))
+        # Name
+        self._small_row(det_layout, 'Name', inst.name,
+                        lambda v, inst=inst: self._update_inst(inst, 'name', v))
 
+        # Channel
+        ch_layout = QHBoxLayout()
+        ch_label = QLabel('Ch')
+        ch_label.setMinimumWidth(40)
+        ch_label.setFont(QFont('TkDefaultFont', 7))
+        ch_layout.addWidget(ch_label)
+        
+        ch_cb = QComboBox()
+        ch_cb.addItems([f'Ch {i+1}' + (' (Drums)' if i == 9 else '')
+                        for i in range(16)])
+        ch_cb.setCurrentIndex(inst.channel)
+        ch_cb.currentIndexChanged.connect(
+            lambda idx, inst=inst: self._update_inst(inst, 'channel', idx))
+        ch_layout.addWidget(ch_cb)
+        det_layout.addLayout(ch_layout)
+
+        # For drum channel (9/Ch 10), only show pitch
+        # For other channels, show bank and program dropdowns
+        if inst.channel == 9:  # Drum channel
             # Pitch
-            pitch_frame = ttk.Frame(det)
-            pitch_frame.pack(fill=tk.X, pady=1)
-            ttk.Label(pitch_frame, text='Pitch', width=5, font=('TkDefaultFont', 7)).pack(
-                side=tk.LEFT)
-            p_var = tk.IntVar(value=inst.pitch)
-            ttk.Spinbox(pitch_frame, from_=0, to=127, width=5, textvariable=p_var,
-                          command=lambda inst=inst, v=p_var: self._update_inst(
-                              inst, 'pitch', v.get())).pack(side=tk.LEFT, padx=2)
-            from ..state import NOTE_NAMES
+            pitch_layout = QHBoxLayout()
+            pitch_label = QLabel('Pitch')
+            pitch_label.setMinimumWidth(40)
+            pitch_label.setFont(QFont('TkDefaultFont', 7))
+            pitch_layout.addWidget(pitch_label)
+            
+            pitch_spin = QSpinBox()
+            pitch_spin.setRange(0, 127)
+            pitch_spin.setValue(inst.pitch)
+            pitch_spin.valueChanged.connect(
+                lambda v, inst=inst: self._update_inst(inst, 'pitch', v))
+            pitch_layout.addWidget(pitch_spin)
+            
             nn = NOTE_NAMES[inst.pitch % 12]
             octave = inst.pitch // 12 - 1
-            ttk.Label(pitch_frame, text=f'{nn}{octave}',
-                       font=('TkDefaultFont', 7), foreground='#888').pack(side=tk.LEFT, padx=2)
+            pitch_note = QLabel(f'{nn}{octave}')
+            pitch_note.setStyleSheet('color: #888;')
+            pitch_note.setFont(QFont('TkDefaultFont', 7))
+            pitch_layout.addWidget(pitch_note)
+            det_layout.addLayout(pitch_layout)
+        else:
+            # Get presets from soundfont if available
+            presets = None
+            if self.state.sf2 and hasattr(self.state.sf2, 'presets'):
+                presets = self.state.sf2.presets
+            elif self.state.sf2 and isinstance(self.state.sf2, dict):
+                presets = self.state.sf2.get('presets')
 
-            # Velocity
-            vel_frame = ttk.Frame(det)
-            vel_frame.pack(fill=tk.X, pady=1)
-            ttk.Label(vel_frame, text='Vel', width=5, font=('TkDefaultFont', 7)).pack(
-                side=tk.LEFT)
-            v_var = tk.IntVar(value=inst.velocity)
-            ttk.Scale(vel_frame, from_=1, to=127, variable=v_var, orient=tk.HORIZONTAL,
-                       length=80,
-                       command=lambda v, inst=inst: self._update_inst(
-                           inst, 'velocity', int(float(v)))).pack(side=tk.LEFT, padx=2)
-            ttk.Label(vel_frame, textvariable=v_var, width=3,
-                       font=('TkDefaultFont', 7)).pack(side=tk.LEFT)
+            if presets:
+                # Bank dropdown
+                banks = sorted(set(p['bank'] for p in presets))
+                bank_layout = QHBoxLayout()
+                bank_label = QLabel('Bank')
+                bank_label.setMinimumWidth(40)
+                bank_label.setFont(QFont('TkDefaultFont', 7))
+                bank_layout.addWidget(bank_label)
+                
+                bank_cb = QComboBox()
+                bank_cb.addItems([f'{b}' for b in banks])
+                try:
+                    bank_cb.setCurrentIndex(banks.index(inst.bank))
+                except ValueError:
+                    if banks:
+                        bank_cb.setCurrentIndex(0)
+                bank_cb.currentIndexChanged.connect(
+                    lambda idx, inst=inst, banks=banks: self._update_inst_bank_and_refresh(inst, banks[idx]))
+                bank_layout.addWidget(bank_cb)
+                det_layout.addLayout(bank_layout)
+
+                # Program dropdown with names
+                current_bank = inst.bank
+                filtered = [p for p in presets if p['bank'] == current_bank]
+                filtered.sort(key=lambda p: p['program'])
+                
+                prog_layout = QHBoxLayout()
+                prog_label = QLabel('Prog')
+                prog_label.setMinimumWidth(40)
+                prog_label.setFont(QFont('TkDefaultFont', 7))
+                prog_layout.addWidget(prog_label)
+                
+                prog_cb = QComboBox()
+                prog_cb.setMaximumHeight(200)
+                for p in filtered:
+                    prog_cb.addItem(f"{p['program']:3d} {p['name']}", p['program'])
+                # Find current program
+                try:
+                    current_idx = next(i for i, p in enumerate(filtered) if p['program'] == inst.program)
+                    prog_cb.setCurrentIndex(current_idx)
+                except StopIteration:
+                    pass
+                prog_cb.currentIndexChanged.connect(
+                    lambda idx, inst=inst, filtered=filtered: 
+                        self._update_inst(inst, 'program', filtered[idx]['program']) if idx < len(filtered) else None)
+                prog_layout.addWidget(prog_cb)
+                det_layout.addLayout(prog_layout)
+            else:
+                # No soundfont - show numeric spinners
+                bank_layout = QHBoxLayout()
+                bank_label = QLabel('Bank')
+                bank_label.setMinimumWidth(40)
+                bank_label.setFont(QFont('TkDefaultFont', 7))
+                bank_layout.addWidget(bank_label)
+                
+                bank_spin = QSpinBox()
+                bank_spin.setRange(0, 16383)
+                bank_spin.setValue(inst.bank)
+                bank_spin.valueChanged.connect(
+                    lambda v, inst=inst: self._update_inst(inst, 'bank', v))
+                bank_layout.addWidget(bank_spin)
+                det_layout.addLayout(bank_layout)
+
+                prog_layout = QHBoxLayout()
+                prog_label = QLabel('Prog')
+                prog_label.setMinimumWidth(40)
+                prog_label.setFont(QFont('TkDefaultFont', 7))
+                prog_layout.addWidget(prog_label)
+                
+                prog_spin = QSpinBox()
+                prog_spin.setRange(0, 127)
+                prog_spin.setValue(inst.program)
+                prog_spin.valueChanged.connect(
+                    lambda v, inst=inst: self._update_inst(inst, 'program', v))
+                prog_layout.addWidget(prog_spin)
+                det_layout.addLayout(prog_layout)
+
+            # Pitch (still shown for non-drum channels)
+            pitch_layout = QHBoxLayout()
+            pitch_label = QLabel('Pitch')
+            pitch_label.setMinimumWidth(40)
+            pitch_label.setFont(QFont('TkDefaultFont', 7))
+            pitch_layout.addWidget(pitch_label)
+            
+            pitch_spin = QSpinBox()
+            pitch_spin.setRange(0, 127)
+            pitch_spin.setValue(inst.pitch)
+            pitch_spin.valueChanged.connect(
+                lambda v, inst=inst: self._update_inst(inst, 'pitch', v))
+            pitch_layout.addWidget(pitch_spin)
+            
+            nn = NOTE_NAMES[inst.pitch % 12]
+            octave = inst.pitch // 12 - 1
+            pitch_note = QLabel(f'{nn}{octave}')
+            pitch_note.setStyleSheet('color: #888;')
+            pitch_note.setFont(QFont('TkDefaultFont', 7))
+            pitch_layout.addWidget(pitch_note)
+            det_layout.addLayout(pitch_layout)
+
+        # Velocity
+        vel_layout = QHBoxLayout()
+        vel_label = QLabel('Vel')
+        vel_label.setMinimumWidth(40)
+        vel_label.setFont(QFont('TkDefaultFont', 7))
+        vel_layout.addWidget(vel_label)
+        
+        vel_slider = QSlider(Qt.Horizontal)
+        vel_slider.setRange(1, 127)
+        vel_slider.setValue(inst.velocity)
+        vel_slider.valueChanged.connect(
+            lambda v, inst=inst: self._update_inst(inst, 'velocity', v))
+        vel_layout.addWidget(vel_slider)
+        
+        vel_num = QLabel(str(inst.velocity))
+        vel_slider.valueChanged.connect(lambda v: vel_num.setText(str(v)))
+        vel_layout.addWidget(vel_num)
+        det_layout.addLayout(vel_layout)
+
+        widget_layout.addWidget(det_frame)
+        
+        # Store collapsed state on widget itself
+        if not hasattr(inst, '_ui_collapsed'):
+            inst._ui_collapsed = False
+        det_frame.setVisible(not inst._ui_collapsed)
+        
+        # Click handler for header to toggle collapse
+        def toggle_collapse(event):
+            inst._ui_collapsed = not inst._ui_collapsed
+            det_frame.setVisible(not inst._ui_collapsed)
+        
+        hdr_frame.mousePressEvent = toggle_collapse
+        
+        return widget
 
     # Helpers
-    def _row(self, parent, label, value, on_change):
-        f = ttk.Frame(parent)
-        f.pack(fill=tk.X, pady=2)
-        ttk.Label(f, text=label, width=8).pack(side=tk.LEFT)
-        var = tk.StringVar(value=value)
-        entry = ttk.Entry(f, textvariable=var, width=16)
-        entry.pack(side=tk.LEFT, padx=4)
-        entry.bind('<Return>', lambda e: on_change(var.get()))
-        entry.bind('<FocusOut>', lambda e: on_change(var.get()))
+    def _row(self, layout, label, value, on_change):
+        row = QHBoxLayout()
+        row.addWidget(QLabel(label))
+        entry = QLineEdit(value)
+        entry.editingFinished.connect(lambda: on_change(entry.text()))
+        row.addWidget(entry)
+        layout.addLayout(row)
 
-    def _small_row(self, parent, label, value, on_change):
-        f = ttk.Frame(parent)
-        f.pack(fill=tk.X, pady=1)
-        ttk.Label(f, text=label, width=5, font=('TkDefaultFont', 7)).pack(side=tk.LEFT)
-        var = tk.StringVar(value=value)
-        entry = ttk.Entry(f, textvariable=var, width=12, font=('TkDefaultFont', 7))
-        entry.pack(side=tk.LEFT, padx=2)
-        entry.bind('<Return>', lambda e: on_change(var.get()))
-        entry.bind('<FocusOut>', lambda e: on_change(var.get()))
+    def _small_row(self, layout, label, value, on_change):
+        row = QHBoxLayout()
+        lbl = QLabel(label)
+        lbl.setFont(QFont('TkDefaultFont', 7))
+        lbl.setMinimumWidth(40)
+        row.addWidget(lbl)
+        entry = QLineEdit(value)
+        entry.setFont(QFont('TkDefaultFont', 7))
+        entry.editingFinished.connect(lambda: on_change(entry.text()))
+        row.addWidget(entry)
+        layout.addLayout(row)
 
-    def _num_row(self, parent, label, value, min_val, max_val, on_change,
-                  step=1, is_float=False):
-        f = ttk.Frame(parent)
-        f.pack(fill=tk.X, pady=2)
-        ttk.Label(f, text=label, width=10).pack(side=tk.LEFT)
-        if is_float:
-            var = tk.DoubleVar(value=value)
-        else:
-            var = tk.IntVar(value=int(value))
-        spin = ttk.Spinbox(f, from_=min_val, to=max_val, increment=step,
-                            textvariable=var, width=8)
-        spin.pack(side=tk.LEFT, padx=4)
-
-        def commit(*args):
-            try:
-                v = var.get()
-                on_change(int(v) if not is_float else v)
-            except Exception:
-                pass
-
-        spin.configure(command=commit)
-        spin.bind('<Return>', commit)
+    def _num_row(self, layout, label, value, min_val, max_val, on_change,
+                 step=1, is_float=False):
+        row = QHBoxLayout()
+        row.addWidget(QLabel(label))
+        spin = QSpinBox()
+        spin.setRange(min_val, max_val)
+        spin.setSingleStep(step)
+        spin.setValue(int(value))
+        spin.valueChanged.connect(lambda v: on_change(int(v)))
+        row.addWidget(spin)
+        layout.addLayout(row)
 
     def _update_track(self, track, key, value):
         setattr(track, key, value)
@@ -410,6 +573,11 @@ class TrackPanel(ttk.Frame):
         setattr(inst, key, value)
         self.state.notify('beat_kit')
 
+    def _update_inst_bank_and_refresh(self, inst, bank):
+        """Update bank and refresh to reload program dropdown."""
+        inst.bank = bank
+        self.state.notify('beat_kit')
+
     def _del_pl(self, plid):
         self.state.placements = [p for p in self.state.placements if p.id != plid]
         self.state.sel_pl = None
@@ -427,14 +595,35 @@ class TrackPanel(ttk.Frame):
             self.state.notify('track_settings')
 
     def _on_preset_select(self, filtered_presets):
-        sel = self.preset_listbox.curselection()
-        if not sel:
-            return
-        idx = sel[0]
-        if idx < len(filtered_presets):
+        idx = self.preset_listbox.currentRow()
+        print(f"[DEBUG] Preset selected: index={idx}")
+        if idx >= 0 and idx < len(filtered_presets):
             p = filtered_presets[idx]
             t = self.state.find_track(self.state.sel_trk)
+            print(f"[DEBUG] Selected preset: {p['name']}, bank={p['bank']}, program={p['program']}")
+            print(f"[DEBUG] Track found: {t.name if t else 'None'}")
             if t:
+                print(f"[DEBUG] Setting track {t.name} to bank={p['bank']}, program={p['program']}")
                 t.bank = p['bank']
                 t.program = p['program']
-                self.state.notify('track_settings')
+                # Only refresh track settings section, not the whole panel
+                self._render_track_settings()
+                print(f"[DEBUG] Refreshed track settings")
+            else:
+                print(f"[DEBUG] No track selected (sel_trk={self.state.sel_trk})")
+
+
+class ColorDot(QWidget):
+    """Small colored circle indicator."""
+
+    def __init__(self, color, parent=None):
+        super().__init__(parent)
+        self.color = QColor(color)
+        self.setFixedSize(10, 10)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setBrush(self.color)
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(1, 1, 8, 8)

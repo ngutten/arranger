@@ -2,9 +2,12 @@
 
 import os
 import threading
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
+
+from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxLayout,
+                                QSplitter, QFileDialog, QMessageBox)
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QKeySequence, QShortcut, QPalette, QColor
 
 from .state import (
     AppState, Pattern, Track, BeatTrack, BeatInstrument, BeatPlacement,
@@ -25,11 +28,14 @@ from .ui.track_panel import TrackPanel
 from .ui.dialogs import PatternDialog, BeatPatternDialog, SF2Dialog
 
 
-class App:
+class App(QMainWindow):
     """Main application - owns the state, creates the window, coordinates UI."""
+    
+    # Signal to communicate from background thread to main thread
+    start_playback_animation = Signal()
 
-    def __init__(self, root, instruments_dir=None):
-        self.root = root
+    def __init__(self, instruments_dir=None):
+        super().__init__()
         self.state = AppState()
         self.player = AudioPlayer()
         self.instruments_dir = instruments_dir or str(
@@ -40,7 +46,11 @@ class App:
         self._drag_pid = None
 
         # Playback state
-        self._play_after_id = None
+        self._play_timer = None
+        self._playback_max_beat = 0
+        
+        # Connect the playback signal
+        self.start_playback_animation.connect(self._start_playhead_animation)
 
         self._setup_theme()
         self._build_ui()
@@ -51,103 +61,195 @@ class App:
         self.state.on_change(self._on_state_change)
 
     def _setup_theme(self):
-        """Configure ttk theme for dark mode."""
-        style = ttk.Style()
-        style.theme_use('clam')
-
-        # Dark color scheme
-        bg = '#1a1a2e'
-        bg2 = '#16213e'
-        bg3 = '#0f3460'
-        accent = '#e94560'
-        text = '#eeeeee'
-        text2 = '#aaaaaa'
-        grid_color = '#2a2a4a'
-
-        style.configure('.', background=bg2, foreground=text, borderwidth=0,
-                         font=('TkDefaultFont', 9))
-        style.configure('TFrame', background=bg2)
-        style.configure('TLabel', background=bg2, foreground=text)
-        style.configure('TButton', background=bg, foreground=text, borderwidth=1,
-                         padding=(4, 2))
-        style.map('TButton',
-                   background=[('active', accent), ('pressed', accent)],
-                   foreground=[('active', '#fff'), ('pressed', '#fff')])
-        style.configure('TEntry', fieldbackground=bg, foreground=text,
-                         borderwidth=1)
-        style.configure('TSpinbox', fieldbackground=bg, foreground=text,
-                         borderwidth=1, arrowsize=12)
-        style.configure('TCombobox', fieldbackground=bg, foreground=text,
-                         borderwidth=1)
-        style.map('TCombobox', fieldbackground=[('readonly', bg)])
-        style.configure('TLabelframe', background=bg2, foreground=accent,
-                         borderwidth=1)
-        style.configure('TLabelframe.Label', background=bg2, foreground=accent,
-                         font=('TkDefaultFont', 9, 'bold'))
-        style.configure('TSeparator', background=grid_color)
-        style.configure('TScrollbar', background=bg, troughcolor=bg2,
-                         borderwidth=0, arrowsize=12)
-        style.configure('TScale', background=bg2, troughcolor=bg)
-
-        # Configure root window
-        self.root.configure(bg=bg)
+        """Configure Qt stylesheet for dark mode."""
+        self.setStyleSheet("""
+            QMainWindow, QWidget {
+                background-color: #16213e;
+                color: #eeeeee;
+            }
+            QFrame {
+                background-color: #16213e;
+            }
+            QPushButton {
+                background-color: #1a1a2e;
+                color: #eeeeee;
+                border: 1px solid #2a2a4a;
+                padding: 4px 8px;
+                border-radius: 2px;
+            }
+            QPushButton:hover {
+                background-color: #e94560;
+                color: #ffffff;
+            }
+            QPushButton:pressed {
+                background-color: #d63850;
+            }
+            QPushButton:checked {
+                background-color: #e94560;
+                color: #ffffff;
+            }
+            QLineEdit, QSpinBox, QComboBox {
+                background-color: #1a1a2e;
+                color: #eeeeee;
+                border: 1px solid #2a2a4a;
+                padding: 2px 4px;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 4px solid #eeeeee;
+                width: 0;
+                height: 0;
+            }
+            QGroupBox {
+                border: 1px solid #2a2a4a;
+                margin-top: 8px;
+                padding-top: 8px;
+            }
+            QGroupBox::title {
+                color: #e94560;
+                subcontrol-origin: margin;
+                left: 8px;
+                padding: 0 4px;
+            }
+            QScrollBar:vertical {
+                background: #16213e;
+                width: 12px;
+                border: none;
+            }
+            QScrollBar::handle:vertical {
+                background: #2a2a4a;
+                min-height: 20px;
+                border-radius: 2px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #3a3a6a;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar:horizontal {
+                background: #16213e;
+                height: 12px;
+                border: none;
+            }
+            QScrollBar::handle:horizontal {
+                background: #2a2a4a;
+                min-width: 20px;
+                border-radius: 2px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #3a3a6a;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+            }
+            QSlider::groove:horizontal {
+                background: #1a1a2e;
+                height: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: #e94560;
+                width: 12px;
+                margin: -4px 0;
+                border-radius: 6px;
+            }
+            QListWidget {
+                background-color: #1a1a30;
+                color: #eeeeee;
+                border: 1px solid #2a2a4a;
+            }
+            QListWidget::item:selected {
+                background-color: #e94560;
+            }
+        """)
 
     def _build_ui(self):
         """Build the main UI layout."""
-        self.root.title('Music Arranger')
-        self.root.geometry('1200x750')
-        self.root.minsize(800, 500)
+        self.setWindowTitle('Music Arranger')
+        self.resize(1200, 750)
+        self.setMinimumSize(800, 500)
+        self.showMaximized()
+
+        # Central widget
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         # Top bar
-        self.topbar = TopBar(self.root, self)
-        self.topbar.pack(fill=tk.X, side=tk.TOP)
+        self.topbar = TopBar(central, self)
+        layout.addWidget(self.topbar)
 
-        ttk.Separator(self.root, orient=tk.HORIZONTAL).pack(fill=tk.X)
+        # Separator
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("background-color: #2a2a4a;")
+        sep.setFixedHeight(1)
+        layout.addWidget(sep)
 
         # Main area
-        main = ttk.Frame(self.root)
-        main.pack(fill=tk.BOTH, expand=True)
+        main = QWidget()
+        main_layout = QHBoxLayout(main)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
         # Left panel (pattern list)
         self.pattern_list = PatternList(main, self)
-        self.pattern_list.pack(side=tk.LEFT, fill=tk.Y)
+        main_layout.addWidget(self.pattern_list)
+
+        # Center area (arrangement + piano roll / beat grid)
+        self.splitter = QSplitter(Qt.Vertical)
+        self.splitter.setHandleWidth(4)
+        self.splitter.setStyleSheet("""
+            QSplitter::handle {
+                background-color: #e94560;
+            }
+        """)
+
+        # Arrangement view (top)
+        self.arrangement = ArrangementView(self.splitter, self)
+        self.splitter.addWidget(self.arrangement)
+
+        # Editor area (bottom) - switches between piano roll and beat grid
+        self.editor_container = QWidget()
+        self.editor_layout = QVBoxLayout(self.editor_container)
+        self.editor_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.piano_roll = PianoRoll(self.editor_container, self)
+        self.beat_grid = BeatGrid(self.editor_container, self)
+
+        # Start with piano roll visible
+        self.editor_layout.addWidget(self.piano_roll)
+        self.editor_layout.addWidget(self.beat_grid)
+        self.piano_roll.show()
+        self.beat_grid.hide()
+        self._current_editor = 'piano_roll'
+
+        self.splitter.addWidget(self.editor_container)
+        self.splitter.setSizes([400, 280])
+
+        main_layout.addWidget(self.splitter, 1)
 
         # Right panel (track settings)
         self.track_panel = TrackPanel(main, self)
-        self.track_panel.pack(side=tk.RIGHT, fill=tk.Y)
+        main_layout.addWidget(self.track_panel)
 
-        # Center area (arrangement + piano roll / beat grid)
-        center = ttk.Frame(main)
-        center.pack(fill=tk.BOTH, expand=True)
-
-        # Use PanedWindow for resizable split
-        self.paned = tk.PanedWindow(center, orient=tk.VERTICAL, bg='#e94560',
-                                      sashwidth=4, sashrelief=tk.FLAT)
-        self.paned.pack(fill=tk.BOTH, expand=True)
-
-        # Arrangement view (top)
-        self.arrangement = ArrangementView(self.paned, self)
-        self.paned.add(self.arrangement, minsize=100, stretch='always')
-
-        # Editor area (bottom) - switches between piano roll and beat grid
-        self.editor_frame = ttk.Frame(self.paned)
-        self.paned.add(self.editor_frame, minsize=100, height=280)
-
-        self.piano_roll = PianoRoll(self.editor_frame, self)
-        self.beat_grid = BeatGrid(self.editor_frame, self)
-
-        # Start with piano roll visible
-        self.piano_roll.pack(fill=tk.BOTH, expand=True)
-        self._current_editor = 'piano_roll'
+        layout.addWidget(main)
 
     def _bind_keys(self):
         """Bind keyboard shortcuts."""
-        self.root.bind('<space>', self._on_space)
-        self.root.bind('<Control-c>', self._on_copy)
-        self.root.bind('<Control-v>', self._on_paste)
-        self.root.bind('<Control-a>', self._on_select_all)
-        self.root.bind('<Delete>', self._on_delete)
-        self.root.bind('<BackSpace>', self._on_delete)
+        QShortcut(Qt.Key_Space, self, self._on_space)
+        QShortcut(QKeySequence.Copy, self, self._on_copy)
+        QShortcut(QKeySequence.Paste, self, self._on_paste)
+        QShortcut(QKeySequence.SelectAll, self, self._on_select_all)
+        QShortcut(QKeySequence.Delete, self, self._on_delete)
+        QShortcut(Qt.Key_Backspace, self, self._on_delete)
 
     def _init_state(self):
         """Set up initial state with one pattern and one track."""
@@ -195,279 +297,348 @@ class App:
     def _switch_editor(self):
         """Switch between piano roll and beat grid based on selection."""
         if self.state.sel_beat_pat and self._current_editor != 'beat_grid':
-            self.piano_roll.pack_forget()
-            self.beat_grid.pack(fill=tk.BOTH, expand=True)
+            self.piano_roll.hide()
+            if self.beat_grid.parent() != self.editor_container:
+                self.editor_layout.addWidget(self.beat_grid)
+            self.beat_grid.show()
             self._current_editor = 'beat_grid'
         elif not self.state.sel_beat_pat and self._current_editor != 'piano_roll':
-            self.beat_grid.pack_forget()
-            self.piano_roll.pack(fill=tk.BOTH, expand=True)
+            self.beat_grid.hide()
+            if self.piano_roll.parent() != self.editor_container:
+                self.editor_layout.addWidget(self.piano_roll)
+            self.piano_roll.show()
             self._current_editor = 'piano_roll'
 
     # ---- Keyboard handlers ----
 
-    def _on_space(self, event):
-        if event.widget.winfo_class() in ('Entry', 'TEntry', 'Spinbox', 'TSpinbox',
-                                            'Combobox', 'TCombobox'):
+    def _on_space(self):
+        focused = self.focusWidget()
+        if focused and focused.__class__.__name__ in ('QLineEdit', 'QSpinBox', 'QComboBox'):
             return
         self.toggle_play()
 
-    def _on_copy(self, event):
-        pat = self.state.find_pattern(self.state.sel_pat)
+    def _on_copy(self):
+        # Copy functionality would go here
+        pass
+
+    def _on_paste(self):
+        # Paste functionality would go here
+        pass
+
+    def _on_select_all(self):
+        # Select all functionality would go here
+        pass
+
+    def _on_delete(self):
+        # Delete functionality would go here
+        pass
+
+    # ---- Pattern management ----
+
+    def add_pattern(self):
+        """Create a new melodic pattern."""
+        dlg = PatternDialog(self, self.state)
+        if dlg.exec():
+            pat = Pattern(
+                id=self.state.new_id(),
+                name=dlg.name,
+                length=dlg.length,
+                notes=[],
+                color=dlg.color,
+                key=dlg.key,
+                scale=dlg.scale,
+            )
+            self.state.patterns.append(pat)
+            self.state.sel_pat = pat.id
+            self.state.notify('add_pattern')
+
+    def edit_pattern(self, pid):
+        """Edit an existing pattern's metadata."""
+        pat = self.state.find_pattern(pid)
         if not pat:
             return
-        sel = self.piano_roll._selected
-        if sel:
-            self._clipboard = [pat.notes[i].to_dict() for i in sel if i < len(pat.notes)]
-        else:
-            self._clipboard = [n.to_dict() for n in pat.notes]
+        dlg = PatternDialog(self, self.state, pat)
+        if dlg.exec():
+            pat.name = dlg.name
+            pat.length = dlg.length
+            pat.color = dlg.color
+            pat.key = dlg.key
+            pat.scale = dlg.scale
+            self.state.notify('edit_pattern')
 
-    def _on_paste(self, event):
-        pat = self.state.find_pattern(self.state.sel_pat)
-        if not pat or not hasattr(self, '_clipboard') or not self._clipboard:
-            return
-        from .state import Note
-        mx = max((n.start + n.duration for n in pat.notes), default=0)
-        cm = min(n['start'] for n in self._clipboard)
-        off = mx - cm
-        self.piano_roll.clear_selection()
-        for nd in self._clipboard:
-            note = Note.from_dict(nd)
-            note.start += off
-            pat.notes.append(note)
-            self.piano_roll._selected.add(len(pat.notes) - 1)
-        ne = max(n.start + n.duration for n in pat.notes)
-        if ne > pat.length:
-            pat.length = int(ne) + 1
-        self.state.notify('paste')
-
-    def _on_select_all(self, event):
-        if event.widget.winfo_class() in ('Entry', 'TEntry'):
-            return
-        pat = self.state.find_pattern(self.state.sel_pat)
+    def duplicate_pattern(self, pid):
+        """Duplicate a pattern."""
+        pat = self.state.find_pattern(pid)
         if not pat:
             return
-        self.piano_roll._selected = set(range(len(pat.notes)))
-        self.piano_roll.refresh()
+        new_pat = Pattern(
+            id=self.state.new_id(),
+            name=f'{pat.name} (copy)',
+            length=pat.length,
+            notes=[n.copy() for n in pat.notes],
+            color=pat.color,
+            key=pat.key,
+            scale=pat.scale,
+        )
+        self.state.patterns.append(new_pat)
+        self.state.sel_pat = new_pat.id
+        self.state.notify('duplicate_pattern')
 
-    def _on_delete(self, event):
-        if event.widget.winfo_class() in ('Entry', 'TEntry'):
+    def delete_pattern(self, pid):
+        """Delete a pattern and its placements."""
+        self.state.patterns = [p for p in self.state.patterns if p.id != pid]
+        self.state.placements = [p for p in self.state.placements if p.pattern_id != pid]
+        if self.state.sel_pat == pid:
+            self.state.sel_pat = self.state.patterns[0].id if self.state.patterns else None
+        self.state.notify('delete_pattern')
+
+    def add_beat_pattern(self):
+        """Create a new beat pattern."""
+        dlg = BeatPatternDialog(self, self.state)
+        if dlg.exec():
+            from .state import BeatPattern
+            pat = BeatPattern(
+                id=self.state.new_id(),
+                name=dlg.name,
+                length=dlg.length,
+                steps={},
+                color=dlg.color,
+            )
+            self.state.beat_patterns.append(pat)
+            self.state.sel_beat_pat = pat.id
+            self.state.notify('add_beat_pattern')
+
+    def edit_beat_pattern(self, pid):
+        """Edit an existing beat pattern's metadata."""
+        pat = self.state.find_beat_pattern(pid)
+        if not pat:
             return
-        pat = self.state.find_pattern(self.state.sel_pat)
-        if not pat or not self.piano_roll._selected:
+        dlg = BeatPatternDialog(self, self.state, pat)
+        if dlg.exec():
+            pat.name = dlg.name
+            pat.length = dlg.length
+            pat.color = dlg.color
+            self.state.notify('edit_beat_pattern')
+
+    def duplicate_beat_pattern(self, pid):
+        """Duplicate a beat pattern."""
+        from .state import BeatPattern
+        pat = self.state.find_beat_pattern(pid)
+        if not pat:
             return
-        if self.state.tool == 'select':
-            keep = [n for i, n in enumerate(pat.notes) if i not in self.piano_roll._selected]
-            pat.notes.clear()
-            pat.notes.extend(keep)
-            self.piano_roll.clear_selection()
-            self.state.notify('delete_notes')
+        new_pat = BeatPattern(
+            id=self.state.new_id(),
+            name=f'{pat.name} (copy)',
+            length=pat.length,
+            steps={k: list(v) for k, v in pat.steps.items()},
+            color=pat.color,
+        )
+        self.state.beat_patterns.append(new_pat)
+        self.state.sel_beat_pat = new_pat.id
+        self.state.notify('duplicate_beat_pattern')
 
-    # ---- Drag and drop ----
+    def delete_beat_pattern(self, pid):
+        """Delete a beat pattern and its placements."""
+        self.state.beat_patterns = [p for p in self.state.beat_patterns if p.id != pid]
+        self.state.beat_placements = [p for p in self.state.beat_placements if p.pattern_id != pid]
+        if self.state.sel_beat_pat == pid:
+            self.state.sel_beat_pat = (self.state.beat_patterns[0].id
+                                       if self.state.beat_patterns else None)
+        self.state.notify('delete_beat_pattern')
 
-    def start_drag(self, dtype, pid, event):
-        self._drag_type = dtype
-        self._drag_pid = pid
-
-    def end_drag(self, event):
-        if self._drag_type and self._drag_pid is not None:
-            # Get root coordinates
-            x = event.x_root
-            y = event.y_root
-            self.arrangement.handle_drop(self._drag_type, self._drag_pid, x, y)
-        self._drag_type = None
-        self._drag_pid = None
-
-    # ---- Actions ----
+    # ---- Track management ----
 
     def add_track(self):
-        trk = Track(
-            id=self.state.new_id(),
-            name=f'Track {len(self.state.tracks) + 1}',
-            channel=len(self.state.tracks) % 16,
-        )
-        self.state.tracks.append(trk)
-        if not self.state.sel_trk:
-            self.state.sel_trk = trk.id
+        """Create a new track."""
+        t = Track(id=self.state.new_id(), name=f'Track {len(self.state.tracks) + 1}',
+                  channel=len(self.state.tracks) % 16)
+        self.state.tracks.append(t)
+        self.state.sel_trk = t.id
         self.state.notify('add_track')
 
+    def delete_track(self, tid):
+        """Delete a track and its placements."""
+        self.state.tracks = [t for t in self.state.tracks if t.id != tid]
+        self.state.placements = [p for p in self.state.placements if p.track_id != tid]
+        if self.state.sel_trk == tid:
+            self.state.sel_trk = self.state.tracks[0].id if self.state.tracks else None
+        self.state.notify('delete_track')
+
     def add_beat_track(self):
-        bt = BeatTrack(
-            id=self.state.new_id(),
-            name=f'Beat {len(self.state.beat_tracks) + 1}',
-        )
+        """Create a new beat track."""
+        bt = BeatTrack(id=self.state.new_id(),
+                       name=f'Beat {len(self.state.beat_tracks) + 1}')
         self.state.beat_tracks.append(bt)
-        if not self.state.sel_beat_trk:
-            self.state.sel_beat_trk = bt.id
+        self.state.sel_beat_trk = bt.id
         self.state.notify('add_beat_track')
 
-    def delete_track(self, tid):
-        if messagebox.askyesno('Delete Track', 'Delete this track and all its placements?'):
-            self.state.tracks = [t for t in self.state.tracks if t.id != tid]
-            self.state.placements = [p for p in self.state.placements if p.track_id != tid]
-            if self.state.sel_trk == tid:
-                self.state.sel_trk = self.state.tracks[0].id if self.state.tracks else None
-            self.state.notify('del_track')
-
     def delete_beat_track(self, btid):
-        if messagebox.askyesno('Delete Beat Track', 'Delete this beat track?'):
-            self.state.beat_tracks = [t for t in self.state.beat_tracks if t.id != btid]
-            self.state.beat_placements = [p for p in self.state.beat_placements
-                                           if p.track_id != btid]
-            if self.state.sel_beat_trk == btid:
-                self.state.sel_beat_trk = (self.state.beat_tracks[0].id
-                                            if self.state.beat_tracks else None)
-            self.state.notify('del_beat_track')
+        """Delete a beat track and its placements."""
+        self.state.beat_tracks = [t for t in self.state.beat_tracks if t.id != btid]
+        self.state.beat_placements = [p for p in self.state.beat_placements
+                                       if p.track_id != btid]
+        if self.state.sel_beat_trk == btid:
+            self.state.sel_beat_trk = (self.state.beat_tracks[0].id
+                                       if self.state.beat_tracks else None)
+        self.state.notify('delete_beat_track')
 
     def add_beat_instrument(self):
-        last = self.state.beat_kit[-1] if self.state.beat_kit else None
-        ch = last.channel if last else 9
-        pitch = 36
-        if last and last.channel == 9:
-            used = {i.pitch for i in self.state.beat_kit}
-            pitch = last.pitch + 1
-            while pitch in used and pitch < 128:
-                pitch += 1
-
+        """Add an instrument to the beat kit."""
         inst = BeatInstrument(
             id=self.state.new_id(),
             name=f'Inst {len(self.state.beat_kit) + 1}',
-            channel=ch, pitch=pitch,
+            channel=9,  # Drum channel
+            pitch=36,   # Bass drum
+            velocity=100,
         )
         self.state.beat_kit.append(inst)
-
-        # Initialize grid in all existing beat patterns
-        for pat in self.state.beat_patterns:
-            pat.grid[inst.id] = [0] * int(pat.length * pat.subdivision)
-
-        self.state.notify('add_beat_inst')
+        self.state.notify('beat_kit')
 
     def delete_beat_instrument(self, iid):
-        if messagebox.askyesno('Delete Instrument',
-                                'Delete this instrument from all beat patterns?'):
-            self.state.beat_kit = [i for i in self.state.beat_kit if i.id != iid]
-            for pat in self.state.beat_patterns:
-                pat.grid.pop(iid, None)
-            self.state.notify('del_beat_inst')
+        """Remove an instrument from the beat kit."""
+        self.state.beat_kit = [i for i in self.state.beat_kit if i.id != iid]
+        # Remove steps using this instrument from all beat patterns
+        for pat in self.state.beat_patterns:
+            if iid in pat.steps:
+                del pat.steps[iid]
+        self.state.notify('beat_kit')
 
-    def show_pattern_dialog(self, pattern_id=None):
-        PatternDialog(self.root, self, pattern_id)
-
-    def show_beat_pattern_dialog(self, pattern_id=None):
-        BeatPatternDialog(self.root, self, pattern_id)
+    # ---- Soundfont ----
 
     def load_sf2(self):
+        """Open dialog to select and load a soundfont."""
         sf2_list = scan_directory(self.instruments_dir)
-        if not sf2_list:
-            # Fallback to file dialog
-            path = filedialog.askopenfilename(
-                title='Load SoundFont',
-                filetypes=[('SoundFont files', '*.sf2'), ('All files', '*.*')],
-                initialdir=self.instruments_dir,
-            )
-            if path:
-                try:
-                    self.state.sf2 = SF2Info(path)
-                    self.state.notify('sf2')
-                except Exception as e:
-                    messagebox.showerror('Error', f'Failed to load SF2: {e}')
-            return
-
-        dlg = SF2Dialog(self.root, self, sf2_list)
-        self.root.wait_window(dlg)
-        if dlg.result:
+        dlg = SF2Dialog(self, self, sf2_list if sf2_list else [])
+        if dlg.exec():
             self.state.sf2 = dlg.result
-            self.state.notify('sf2')
+            self.state.notify('sf2_loaded')
 
-    # ---- Audio ----
+    # ---- Playback helpers ----
 
-    def play_note(self, pitch, velocity=100, duration=0.15):
-        """Play a note preview."""
-        wav = generate_preview_tone(pitch, velocity, duration)
-        self.player.play_async(wav)
-
-    def play_beat_hit(self, inst_id):
-        """Play a beat instrument preview."""
-        inst = self.state.find_beat_instrument(inst_id)
-        if not inst:
-            return
+    def play_note(self, pitch, velocity, track_id=None):
+        """Play a single note preview, using track instrument if available."""
+        # Get track instrument info if track_id provided
+        bank, program, channel = 0, 0, 0
+        if track_id:
+            t = self.state.find_track(track_id)
+            if t:
+                bank, program, channel = t.bank, t.program, t.channel
+        
         # Try SF2 rendering if available
         if self.state.sf2:
             sf2_path = (self.state.sf2.path if hasattr(self.state.sf2, 'path')
                         else self.state.sf2.get('path'))
             if sf2_path:
-                is_drums = inst.channel == 9
-                bank = 128 if is_drums else inst.bank
-                program = 0 if is_drums else inst.program
-
-                def render_and_play():
-                    wav = render_sample(sf2_path, bank, program, inst.pitch,
-                                         inst.velocity, 0.3, inst.channel)
+                try:
+                    wav = render_sample(sf2_path, bank, program, pitch, velocity, 
+                                       duration=0.5, channel=channel)
                     if wav:
                         self.player.play_async(wav)
-                    else:
-                        wav = generate_preview_tone(inst.pitch, inst.velocity, 0.15)
-                        self.player.play_async(wav)
-
-                threading.Thread(target=render_and_play, daemon=True).start()
-                return
-
-        # Fallback to sine
-        wav = generate_preview_tone(inst.pitch, inst.velocity, 0.15)
+                        return
+                except Exception:
+                    pass  # Fall through to basic tone
+        
+        # Fallback to basic tone
+        wav = generate_preview_tone(pitch, velocity, 0.3)
         self.player.play_async(wav)
 
+    def play_beat_hit(self, inst_id):
+        """Play a single beat instrument hit."""
+        inst = next((i for i in self.state.beat_kit if i.id == inst_id), None)
+        if not inst:
+            return
+        sf2_path = None
+        if self.state.sf2:
+            sf2_path = (self.state.sf2.path if hasattr(self.state.sf2, 'path')
+                        else self.state.sf2.get('path'))
+        if sf2_path:
+            # For beat instruments, use bank/program/pitch with channel (usually 9 for drums)
+            wav = render_sample(sf2_path, inst.bank, inst.program, inst.pitch, 
+                              inst.velocity, duration=0.5, channel=inst.channel)
+            if wav:
+                self.player.play_async(wav)
+        else:
+            wav = generate_preview_tone(inst.pitch, inst.velocity, 0.3)
+            self.player.play_async(wav)
+
     def preview_pattern(self):
-        """Preview the selected melodic pattern."""
+        """Preview the currently selected pattern."""
         pat = self.state.find_pattern(self.state.sel_pat)
-        trk = self.state.find_track(self.state.sel_trk)
-        if not pat or not trk or not pat.notes:
+        if not pat or not pat.notes:
             return
 
-        arr = {
-            'bpm': self.state.bpm, 'tsNum': self.state.ts_num,
-            'tsDen': self.state.ts_den,
-            'tracks': [{
-                'name': trk.name, 'channel': trk.channel,
-                'bank': trk.bank, 'program': trk.program,
-                'volume': trk.volume,
-                'placements': [{
-                    'pattern': {
-                        'notes': [n.to_dict() for n in pat.notes],
-                        'length': pat.length
-                    },
-                    'time': 0, 'transpose': 0, 'repeats': 1,
-                }]
-            }]
+        t = self.state.find_track(self.state.sel_trk)
+        if not t:
+            t = Track(id='preview', name='Preview', channel=0,
+                      bank=0, program=0, volume=100)
+
+        inst = {
+            'name': t.name, 'channel': t.channel,
+            'bank': t.bank, 'program': t.program,
+            'volume': t.volume,
         }
+
+        notes = [{'pitch': n.pitch, 'start': n.start, 'duration': n.duration,
+                  'velocity': n.velocity} for n in pat.notes]
+
+        tracks = [{
+            **inst,
+            'placements': [{
+                'pattern': {'notes': notes, 'length': pat.length},
+                'time': 0, 'transpose': 0, 'repeats': 1,
+            }]
+        }]
+
+        arr = {'bpm': self.state.bpm, 'tsNum': self.state.ts_num,
+               'tsDen': self.state.ts_den, 'tracks': tracks}
         self._render_and_play(arr)
 
+    # ---- Pattern/Beat Pattern Dialogs ----
+    
+    def show_pattern_dialog(self, pattern_id=None):
+        """Show pattern creation/edit dialog."""
+        dialog = PatternDialog(self, self, pattern_id)
+        dialog.exec()
+        self._refresh_all()
+    
+    def show_beat_pattern_dialog(self, pattern_id=None):
+        """Show beat pattern creation/edit dialog."""
+        dialog = BeatPatternDialog(self, self, pattern_id)
+        dialog.exec()
+        self._refresh_all()
+
     def preview_beat_pattern(self):
-        """Preview the selected beat pattern."""
+        """Preview the currently selected beat pattern."""
         pat = self.state.find_beat_pattern(self.state.sel_beat_pat)
-        if not pat or not self.state.beat_kit:
+        if not pat or not pat.grid:
             return
 
         tracks = []
         for inst in self.state.beat_kit:
             grid = pat.grid.get(inst.id)
-            if not grid or not any(v > 0 for v in grid):
+            if not grid:
                 continue
-            step_dur = pat.length / len(grid)
             notes = []
-            for i, v in enumerate(grid):
-                if v > 0:
+            # Convert grid to notes
+            for step_idx, vel in enumerate(grid):
+                if vel > 0:
+                    step_pos = step_idx / pat.subdivision
                     notes.append({
-                        'pitch': inst.pitch, 'velocity': v,
-                        'start': i * step_dur, 'duration': step_dur * 0.8,
+                        'pitch': inst.pitch,
+                        'start': step_pos,
+                        'duration': 0.25,
+                        'velocity': vel,
                     })
-            tracks.append({
-                'name': inst.name, 'channel': inst.channel,
-                'bank': inst.bank, 'program': inst.program,
-                'volume': 100,
-                'placements': [{
-                    'pattern': {'notes': notes, 'length': pat.length},
-                    'time': 0, 'transpose': 0, 'repeats': 1,
-                }]
-            })
+            if notes:
+                tracks.append({
+                    'name': inst.name, 'channel': inst.channel,
+                    'bank': inst.bank, 'program': inst.program,
+                    'volume': 100,
+                    'placements': [{
+                        'pattern': {'notes': notes, 'length': pat.length},
+                        'time': 0, 'transpose': 0, 'repeats': 1,
+                    }]
+                })
 
         if not tracks:
             return
@@ -516,8 +687,26 @@ class App:
         if not has_notes:
             return
 
+        # Calculate total duration in beats
+        max_beat = 0
+        for pl in self.state.placements:
+            pat = self.state.find_pattern(pl.pattern_id)
+            if pat:
+                max_beat = max(max_beat, pl.time + pat.length * (pl.repeats or 1))
+        for bp in self.state.beat_placements:
+            pat = self.state.find_beat_pattern(bp.pattern_id)
+            if pat:
+                max_beat = max(max_beat, bp.time + pat.length * (bp.repeats or 1))
+        
+        if max_beat == 0:
+            return  # Nothing to play
+        
         self.state.playing = True
+        self.state.playhead = 0
         self.topbar.refresh()
+
+        # Store max_beat as instance variable for the animation function
+        self._playback_max_beat = max_beat
 
         def render_and_start():
             midi = create_midi(arr)
@@ -531,51 +720,47 @@ class App:
                 wav = render_basic(arr)
             if wav:
                 self.player.play_wav(wav)
-                # Calculate total duration
-                max_beat = 0
-                for pl in self.state.placements:
-                    pat = self.state.find_pattern(pl.pattern_id)
-                    if pat:
-                        max_beat = max(max_beat,
-                                       pl.time + pat.length * (pl.repeats or 1))
-                for bp in self.state.beat_placements:
-                    pat = self.state.find_beat_pattern(bp.pattern_id)
-                    if pat:
-                        max_beat = max(max_beat,
-                                       bp.time + pat.length * (bp.repeats or 1))
-
-                beat_dur = 60.0 / self.state.bpm
-                total_dur = max_beat * beat_dur
-                # Start playhead animation on main thread
-                self.root.after(0, lambda: self._animate_playhead(0, total_dur, beat_dur))
+                # Emit signal to start animation on main thread
+                self.start_playback_animation.emit()
 
         threading.Thread(target=render_and_start, daemon=True).start()
 
-    def _animate_playhead(self, elapsed, total_dur, beat_dur):
-        """Animate the playhead during playback."""
-        if not self.state.playing:
-            return
-        t = elapsed
-        if self.state.looping and total_dur > 0:
-            t = t % total_dur
-        self.state.playhead = t / beat_dur
-        self.arrangement.refresh()
-
-        if not self.state.looping and elapsed >= total_dur:
-            self.stop_play()
-            return
-
-        # Update every ~30ms
-        self._play_after_id = self.root.after(
-            30, lambda: self._animate_playhead(elapsed + 0.03, total_dur, beat_dur))
+    def _start_playhead_animation(self):
+        """Start playhead animation on the main thread."""
+        max_beat = self._playback_max_beat
+        import time
+        beat_duration = 60.0 / self.state.bpm
+        start_time = time.time()
+        
+        def update_playhead():
+            if not self.state.playing:
+                return
+            
+            current_time = time.time() - start_time
+            current_beat = current_time / beat_duration
+            
+            if self.state.looping:
+                # Loop back to start
+                self.state.playhead = current_beat % max_beat
+                QTimer.singleShot(30, update_playhead)
+            else:
+                # Check if we've reached the end
+                if current_beat >= max_beat:
+                    self.stop_play()
+                else:
+                    self.state.playhead = current_beat
+                    QTimer.singleShot(30, update_playhead)
+            
+            # Force refresh on main thread
+            self.arrangement.refresh()
+        
+        # Start the update loop
+        update_playhead()
 
     def stop_play(self):
         self.state.playing = False
         self.state.playhead = None
         self.player.stop()
-        if self._play_after_id:
-            self.root.after_cancel(self._play_after_id)
-            self._play_after_id = None
         self.topbar.refresh()
         self.arrangement.refresh()
 
@@ -587,14 +772,23 @@ class App:
         midi = create_midi(arr)
 
         if fmt == 'midi':
-            path = filedialog.asksaveasfilename(
-                title='Export MIDI', defaultextension='.mid',
-                filetypes=[('MIDI files', '*.mid'), ('All files', '*.*')],
-            )
+            path, _ = QFileDialog.getSaveFileName(
+                self, 'Export MIDI', '', 'MIDI files (*.mid);;All files (*.*)')
             if path:
                 with open(path, 'wb') as f:
                     f.write(midi)
-                messagebox.showinfo('Export', f'MIDI exported to {path}')
+                QMessageBox.information(self, 'Export', f'MIDI exported to {path}')
+            return
+
+        # Get file path BEFORE starting background thread
+        if fmt == 'mp3':
+            path, _ = QFileDialog.getSaveFileName(
+                self, 'Export MP3', '', 'MP3 files (*.mp3);;All files (*.*)')
+        else:
+            path, _ = QFileDialog.getSaveFileName(
+                self, 'Export WAV', '', 'WAV files (*.wav);;All files (*.*)')
+        
+        if not path:
             return
 
         def render_work():
@@ -607,56 +801,39 @@ class App:
             if wav is None:
                 wav = render_basic(arr)
             if wav is None:
-                self.root.after(0, lambda: messagebox.showerror('Error', 'No notes to render'))
+                QTimer.singleShot(0, lambda: QMessageBox.critical(
+                    self, 'Error', 'No notes to render'))
                 return
 
             if fmt == 'mp3':
                 mp3 = wav_to_mp3(wav)
                 if mp3:
-                    def save():
-                        path = filedialog.asksaveasfilename(
-                            title='Export MP3', defaultextension='.mp3',
-                            filetypes=[('MP3 files', '*.mp3'), ('All files', '*.*')],
-                        )
-                        if path:
-                            with open(path, 'wb') as f:
-                                f.write(mp3)
-                            messagebox.showinfo('Export', f'MP3 exported to {path}')
-                    self.root.after(0, save)
+                    with open(path, 'wb') as f:
+                        f.write(mp3)
+                    # Item 10: Don't show success message
                 else:
-                    self.root.after(0, lambda: messagebox.showerror(
-                        'Error', 'ffmpeg not available for MP3 conversion'))
+                    QTimer.singleShot(0, lambda: QMessageBox.critical(
+                        self, 'Error', 'ffmpeg not available for MP3 conversion'))
             else:
-                def save():
-                    path = filedialog.asksaveasfilename(
-                        title='Export WAV', defaultextension='.wav',
-                        filetypes=[('WAV files', '*.wav'), ('All files', '*.*')],
-                    )
-                    if path:
-                        with open(path, 'wb') as f:
-                            f.write(wav)
-                        messagebox.showinfo('Export', f'WAV exported to {path}')
-                self.root.after(0, save)
+                with open(path, 'wb') as f:
+                    f.write(wav)
+                # Item 10: Don't show success message
 
         threading.Thread(target=render_work, daemon=True).start()
 
     # ---- Save/Load ----
 
     def save_project(self):
-        path = filedialog.asksaveasfilename(
-            title='Save Project', defaultextension='.json',
-            filetypes=[('JSON files', '*.json'), ('All files', '*.*')],
-        )
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Save Project', '', 'JSON files (*.json);;All files (*.*)')
         if path:
             with open(path, 'w') as f:
                 f.write(self.state.to_json())
             self.state._project_path = path
 
     def load_project(self):
-        path = filedialog.askopenfilename(
-            title='Load Project',
-            filetypes=[('JSON files', '*.json'), ('All files', '*.*')],
-        )
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Load Project', '', 'JSON files (*.json);;All files (*.*)')
         if path:
             try:
                 with open(path) as f:
@@ -672,4 +849,4 @@ class App:
                 self.topbar.refresh()
                 self._refresh_all()
             except Exception as e:
-                messagebox.showerror('Error', f'Failed to load project: {e}')
+                QMessageBox.critical(self, 'Error', f'Failed to load project: {e}')
