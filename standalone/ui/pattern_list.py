@@ -15,7 +15,7 @@ class PatternList(QFrame):
         super().__init__(parent)
         self.app = app
         self.state = app.state
-        self.setFixedWidth(220)
+        self.setFixedWidth(260)
         self._drag_data = None
         self._build()
 
@@ -248,38 +248,68 @@ class PatternItem(QFrame):
         dot_widget.setAttribute(Qt.WA_TransparentForMouseEvents)
         layout.addWidget(dot_widget)
 
-        # Name and info
-        info = f'{pattern.length}b {pattern.key} {pattern.scale[:3]}'
-        label = QLabel(f'{pattern.name}  {info}')
-        label.setStyleSheet('color: #eee; background-color: transparent; border: none;')
-        label.setAttribute(Qt.WA_TransparentForMouseEvents)
-        font = QFont()
-        font.setPointSize(9)
-        label.setFont(font)
-        layout.addWidget(label, stretch=1)
+        # Text container with two lines
+        text_container = QWidget()
+        text_container.setStyleSheet('background-color: transparent; border: none;')
+        text_container.setAttribute(Qt.WA_TransparentForMouseEvents)
+        text_layout = QVBoxLayout(text_container)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(0)
+        
+        # Name on first line
+        name_label = QLabel(pattern.name)
+        name_label.setStyleSheet('color: #eee; background-color: transparent; border: none;')
+        name_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        # Prevent text from expanding and enable elision
+        name_label.setWordWrap(False)
+        from PySide6.QtWidgets import QSizePolicy
+        name_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        name_font = QFont()
+        name_font.setPointSize(9)
+        name_label.setFont(name_font)
+        text_layout.addWidget(name_label)
+        
+        # Details on second line (smaller font)
+        info = f'{pattern.length}b · {pattern.key} {pattern.scale}'
+        info_label = QLabel(info)
+        info_label.setStyleSheet('color: #888; background-color: transparent; border: none;')
+        info_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        info_font = QFont()
+        info_font.setPointSize(7)
+        info_label.setFont(info_font)
+        text_layout.addWidget(info_label)
+        
+        layout.addWidget(text_container, stretch=1)
 
-        # Action buttons
+        # Action buttons - fixed width container so buttons don't get pushed off
         btn_frame = QFrame()
         btn_frame.setStyleSheet('background-color: transparent; border: none;')
+        btn_frame.setFixedWidth(84)
         btn_layout = QHBoxLayout(btn_frame)
         btn_layout.setContentsMargins(0, 0, 0, 0)
         btn_layout.setSpacing(2)
 
+        # Copy button (overlapping squares icon) - with visible border for debugging
         dup_btn = QPushButton('⧉')
-        dup_btn.setStyleSheet('background-color: transparent; color: #aaa; border: none;')
-        dup_btn.setMaximumWidth(20)
+        dup_btn.setStyleSheet('background-color: transparent; color: #aaa; border: 1px solid #555; font-size: 16px; padding: 2px;')
+        dup_btn.setFixedWidth(26)
+        dup_btn.setToolTip('Duplicate pattern')
         dup_btn.clicked.connect(lambda: parent_list._dup_pat(pattern.id))
         btn_layout.addWidget(dup_btn)
 
+        # Edit button (quill/pen icon)
         edit_btn = QPushButton('✎')
-        edit_btn.setStyleSheet('background-color: transparent; color: #aaa; border: none;')
-        edit_btn.setMaximumWidth(20)
+        edit_btn.setStyleSheet('background-color: transparent; color: #aaa; border: 1px solid #555; font-size: 16px; padding: 2px;')
+        edit_btn.setFixedWidth(26)
+        edit_btn.setToolTip('Edit pattern')
         edit_btn.clicked.connect(lambda: parent_list.app.show_pattern_dialog(pattern.id))
         btn_layout.addWidget(edit_btn)
 
+        # Delete button
         del_btn = QPushButton('✕')
-        del_btn.setStyleSheet('background-color: transparent; color: #aaa; border: none;')
-        del_btn.setMaximumWidth(20)
+        del_btn.setStyleSheet('background-color: transparent; color: #aaa; border: 1px solid #555; font-size: 16px; padding: 2px;')
+        del_btn.setFixedWidth(26)
+        del_btn.setToolTip('Delete pattern')
         del_btn.clicked.connect(lambda: parent_list._del_pat(pattern.id))
         btn_layout.addWidget(del_btn)
 
@@ -315,38 +345,68 @@ class BeatPatternItem(QFrame):
         dot_widget.setAttribute(Qt.WA_TransparentForMouseEvents)
         layout.addWidget(dot_widget)
 
-        # Name and info
-        info = f'{pattern.length}b ÷{pattern.subdivision}'
-        label = QLabel(f'{pattern.name}  {info}')
-        label.setStyleSheet('color: #eee; background-color: transparent; border: none;')
-        label.setAttribute(Qt.WA_TransparentForMouseEvents)
-        font = QFont()
-        font.setPointSize(9)
-        label.setFont(font)
-        layout.addWidget(label, stretch=1)
+        # Text container with two lines
+        text_container = QWidget()
+        text_container.setStyleSheet('background-color: transparent; border: none;')
+        text_container.setAttribute(Qt.WA_TransparentForMouseEvents)
+        text_layout = QVBoxLayout(text_container)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(0)
+        
+        # Name on first line
+        name_label = QLabel(pattern.name)
+        name_label.setStyleSheet('color: #eee; background-color: transparent; border: none;')
+        name_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        # Prevent text from expanding and enable elision
+        name_label.setWordWrap(False)
+        from PySide6.QtWidgets import QSizePolicy
+        name_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        name_font = QFont()
+        name_font.setPointSize(9)
+        name_label.setFont(name_font)
+        text_layout.addWidget(name_label)
+        
+        # Details on second line (smaller font)
+        info = f'{pattern.length}b · ÷{pattern.subdivision}'
+        info_label = QLabel(info)
+        info_label.setStyleSheet('color: #888; background-color: transparent; border: none;')
+        info_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        info_font = QFont()
+        info_font.setPointSize(7)
+        info_label.setFont(info_font)
+        text_layout.addWidget(info_label)
+        
+        layout.addWidget(text_container, stretch=1)
 
-        # Action buttons
+        # Action buttons - fixed width container so buttons don't get pushed off
         btn_frame = QFrame()
         btn_frame.setStyleSheet('background-color: transparent; border: none;')
+        btn_frame.setFixedWidth(84)
         btn_layout = QHBoxLayout(btn_frame)
         btn_layout.setContentsMargins(0, 0, 0, 0)
         btn_layout.setSpacing(2)
 
+        # Copy button (overlapping squares icon) - with visible border for debugging
         dup_btn = QPushButton('⧉')
-        dup_btn.setStyleSheet('background-color: transparent; color: #aaa; border: none;')
-        dup_btn.setMaximumWidth(20)
+        dup_btn.setStyleSheet('background-color: transparent; color: #aaa; border: 1px solid #555; font-size: 16px; padding: 2px;')
+        dup_btn.setFixedWidth(26)
+        dup_btn.setToolTip('Duplicate pattern')
         dup_btn.clicked.connect(lambda: parent_list._dup_beat_pat(pattern.id))
         btn_layout.addWidget(dup_btn)
 
+        # Edit button (quill/pen icon)
         edit_btn = QPushButton('✎')
-        edit_btn.setStyleSheet('background-color: transparent; color: #aaa; border: none;')
-        edit_btn.setMaximumWidth(20)
+        edit_btn.setStyleSheet('background-color: transparent; color: #aaa; border: 1px solid #555; font-size: 16px; padding: 2px;')
+        edit_btn.setFixedWidth(26)
+        edit_btn.setToolTip('Edit pattern')
         edit_btn.clicked.connect(lambda: parent_list.app.show_beat_pattern_dialog(pattern.id))
         btn_layout.addWidget(edit_btn)
 
+        # Delete button
         del_btn = QPushButton('✕')
-        del_btn.setStyleSheet('background-color: transparent; color: #aaa; border: none;')
-        del_btn.setMaximumWidth(20)
+        del_btn.setStyleSheet('background-color: transparent; color: #aaa; border: 1px solid #555; font-size: 16px; padding: 2px;')
+        del_btn.setFixedWidth(26)
+        del_btn.setToolTip('Delete pattern')
         del_btn.clicked.connect(lambda: parent_list._del_beat_pat(pattern.id))
         btn_layout.addWidget(del_btn)
 

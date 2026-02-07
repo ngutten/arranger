@@ -596,21 +596,16 @@ class TrackPanel(QFrame):
 
     def _on_preset_select(self, filtered_presets):
         idx = self.preset_listbox.currentRow()
-        print(f"[DEBUG] Preset selected: index={idx}")
         if idx >= 0 and idx < len(filtered_presets):
             p = filtered_presets[idx]
             t = self.state.find_track(self.state.sel_trk)
-            print(f"[DEBUG] Selected preset: {p['name']}, bank={p['bank']}, program={p['program']}")
-            print(f"[DEBUG] Track found: {t.name if t else 'None'}")
             if t:
-                print(f"[DEBUG] Setting track {t.name} to bank={p['bank']}, program={p['program']}")
                 t.bank = p['bank']
                 t.program = p['program']
-                # Only refresh track settings section, not the whole panel
+                # Notify state change so other components update
+                self.state.notify('track_settings')
+                # Refresh track settings section
                 self._render_track_settings()
-                print(f"[DEBUG] Refreshed track settings")
-            else:
-                print(f"[DEBUG] No track selected (sel_trk={self.state.sel_trk})")
 
 
 class ColorDot(QWidget):
