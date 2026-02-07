@@ -465,12 +465,14 @@ def _on_click(self, event):
             # Don't set _resize_note - prevents changing length on initial click (item 8)
             self.state.last_note_len = dur
             self.app.play_note(pitch, vel, track_id=self.state.sel_trk)
+            self.state.notify('note_add')
             self.refresh()
     elif self.state.tool == 'erase':
         n, i, _ = self._hit_note(x, y)
         if n:
             pat.notes.pop(i)
             self._selected.discard(i)
+            self.state.notify('note_erase')
             self.refresh()
     elif self.state.tool == 'select':
         n, i, is_resize = self._hit_note(x, y)

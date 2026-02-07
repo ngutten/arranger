@@ -14,8 +14,7 @@ class ArrangementView(QFrame):
     # Layout constants
     TH = 56    # track height
     BW = 30    # pixels per beat
-    MIN_BEATS = 64  # minimum visible beats
-    LOOKAHEAD_FACTOR = 1.5  # show 50% extra beyond current content
+    TOT = 64   # total beats shown
 
     def __init__(self, parent, app):
         super().__init__(parent)
@@ -28,9 +27,9 @@ class ArrangementView(QFrame):
         self._resize_pl = None
         self._drag_beat_pl = None
         self._resize_beat_pl = None
-        
-        # Dynamic extent tracking
-        self._max_scroll_beats = self.MIN_BEATS
+
+        # Loop marker drag state
+        self._drag_loop_marker = None  # 'start' or 'end'
 
         self._build()
 
@@ -91,26 +90,6 @@ class ArrangementView(QFrame):
         # Sync timeline with horizontal scroll
         self.timeline_widget.scroll_offset = value
         self.timeline_widget.update()
-        
-        # Dynamic expansion: if scrolled past 75% of current extent, expand
-        scrollbar = self.scroll_area.horizontalScrollBar()
-        current_beat = value / self.BW
-        
-        # Expand if we're in the lookahead zone
-        if current_beat > self._max_scroll_beats * 0.75:
-            self._max_scroll_beats = current_beat * self.LOOKAHEAD_FACTOR
-            self.refresh()
-        
-        # Rubber-band: contract if scrolled back and no content far out
-        elif current_beat < self._max_scroll_beats * 0.4:
-            content_extent = self._compute_content_extent()
-            # Only contract if there's no content requiring this much space
-            if content_extent < self._max_scroll_beats * 0.6:
-                self._max_scroll_beats = max(
-                    self.MIN_BEATS,
-                    content_extent * self.LOOKAHEAD_FACTOR
-                )
-                self.refresh()
 
     def _on_vscroll(self, value):
         # Sync track labels with vertical scroll
@@ -118,26 +97,6 @@ class ArrangementView(QFrame):
 
     def _snap(self, beat):
         return round(beat / self.state.snap) * self.state.snap
-
-    def _compute_content_extent(self):
-        """Calculate the rightmost beat position of any placement."""
-        max_beat = 0
-        
-        # Check melodic placements
-        for pl in self.state.placements:
-            pat = self.state.find_pattern(pl.pattern_id)
-            if pat:
-                end_beat = pl.time + pat.length * (pl.repeats or 1)
-                max_beat = max(max_beat, end_beat)
-        
-        # Check beat placements
-        for bp in self.state.beat_placements:
-            pat = self.state.find_beat_pattern(bp.pattern_id)
-            if pat:
-                end_beat = bp.time + pat.length * (bp.repeats or 1)
-                max_beat = max(max_beat, end_beat)
-        
-        return max_beat
 
     def _hit_placement(self, x, y):
         """Hit test for melodic placements. Returns (placement, is_resize_handle)."""
@@ -179,19 +138,9 @@ class ArrangementView(QFrame):
 
     def refresh(self):
         """Redraw all components."""
-        # Calculate dynamic extent based on content and scroll position
-        content_extent = self._compute_content_extent()
-        
-        # Ensure we have enough space for content plus lookahead
-        self._max_scroll_beats = max(
-            self.MIN_BEATS,
-            self._max_scroll_beats,
-            content_extent * self.LOOKAHEAD_FACTOR
-        )
-        
         total_tracks = len(self.state.tracks) + len(self.state.beat_tracks)
         ch = max(total_tracks * self.TH, 400)
-        cw = int(self._max_scroll_beats * self.BW)
+        cw = self.TOT * self.BW
         
         self.canvas_widget.setMinimumSize(cw, ch)
         self.trk_widget.setMinimumSize(150, ch)
@@ -202,13 +151,77 @@ class ArrangementView(QFrame):
 
 
 class TimelineWidget(QWidget):
-    """Timeline header showing beat numbers."""
+    """Timeline header showing beat numbers and loop markers."""
+
+    MARKER_W = 8  # width of loop marker handle
 
     def __init__(self, parent):
         super().__init__(parent)
         self.parent_arr = parent
         self.scroll_offset = 0
         self.setMinimumHeight(28)
+        self.setMouseTracking(True)
+        self._drag_marker = None  # 'start', 'end', or None
+
+    def _beat_to_x(self, beat):
+        return beat * self.parent_arr.BW - self.scroll_offset
+
+    def _x_to_beat(self, x):
+        return (x + self.scroll_offset) / self.parent_arr.BW
+
+    def _hit_loop_marker(self, x):
+        """Return 'start', 'end', or None."""
+        s = self.parent_arr.state
+        if not s.looping:
+            return None
+        ls = s.loop_start if s.loop_start is not None else 0.0
+        le = s.loop_end
+        if le is None:
+            return None
+        lx_start = self._beat_to_x(ls)
+        lx_end = self._beat_to_x(le)
+        if abs(x - lx_start) < self.MARKER_W + 2:
+            return 'start'
+        if abs(x - lx_end) < self.MARKER_W + 2:
+            return 'end'
+        return None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            marker = self._hit_loop_marker(event.pos().x())
+            if marker:
+                self._drag_marker = marker
+                return
+            # Click on timeline to set playhead position (seek)
+            if self.parent_arr.state.playing and self.parent_arr.app.engine:
+                beat = max(0, self._x_to_beat(event.pos().x()))
+                self.parent_arr.app.engine.seek(beat)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_marker:
+            s = self.parent_arr.state
+            beat = max(0, self.parent_arr._snap(self._x_to_beat(event.pos().x())))
+            if self._drag_marker == 'start':
+                le = s.loop_end if s.loop_end is not None else self.parent_arr.TOT
+                s.loop_start = min(beat, le - s.snap)
+            elif self._drag_marker == 'end':
+                ls = s.loop_start if s.loop_start is not None else 0.0
+                s.loop_end = max(beat, ls + s.snap)
+            # Update engine loop points live
+            self.parent_arr.app._sync_loop_to_engine()
+            self.parent_arr.refresh()
+            return
+        # Update cursor
+        marker = self._hit_loop_marker(event.pos().x())
+        if marker:
+            self.setCursor(Qt.SizeHorCursor)
+        else:
+            self.setCursor(Qt.ArrowCursor)
+
+    def mouseReleaseEvent(self, event):
+        if self._drag_marker:
+            self._drag_marker = None
+            self.parent_arr.state.notify('loop_markers')
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -219,27 +232,63 @@ class TimelineWidget(QWidget):
         
         # Background
         painter.fillRect(self.rect(), QColor('#16213e'))
+
+        # Loop region highlight on timeline
+        if s.looping and s.loop_end is not None:
+            ls = s.loop_start if s.loop_start is not None else 0.0
+            le = s.loop_end
+            lx1 = self._beat_to_x(ls)
+            lx2 = self._beat_to_x(le)
+            loop_color = QColor('#00b4d8')
+            loop_color.setAlpha(40)
+            painter.fillRect(int(lx1), 0, int(lx2 - lx1), 28, loop_color)
         
-        # Draw beat markers - use dynamic extent
-        total_beats = int(self.parent_arr._max_scroll_beats)
-        for b in range(total_beats + 1):
+        # Draw beat markers
+        mn = 1
+        for b in range(self.parent_arr.TOT + 1):
             x = b * self.parent_arr.BW - self.scroll_offset
             if x < -50 or x > self.width() + 50:
                 continue
                 
             is_measure = (abs(b % bpm_beats) < 0.001) or b == 0
-            if is_measure and b < total_beats:
-                # Calculate absolute measure number from beat position
-                measure_num = int(b / bpm_beats) + 1
+            if is_measure and b < self.parent_arr.TOT:
                 painter.setPen(QColor('#aaa'))
                 painter.setFont(QFont('TkDefaultFont', 8))
-                painter.drawText(x + 3, 16, str(measure_num))
+                painter.drawText(x + 3, 16, str(mn))
+                mn += 1
                 painter.setPen(QColor('#4a4a8a'))
                 painter.drawLine(x, 14, x, 28)
             else:
                 painter.setPen(QPen(QColor('#222244'), 0.5))
                 painter.drawLine(x, 14, x, 28)
-        
+
+        # Loop markers
+        if s.looping and s.loop_end is not None:
+            ls = s.loop_start if s.loop_start is not None else 0.0
+            le = s.loop_end
+            loop_color = QColor('#00b4d8')
+
+            for beat, is_start in [(ls, True), (le, False)]:
+                mx = int(self._beat_to_x(beat))
+                # Vertical line
+                painter.setPen(QPen(loop_color, 2))
+                painter.drawLine(mx, 0, mx, 28)
+                # Triangle marker
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(loop_color)
+                if is_start:
+                    # Right-pointing triangle at top
+                    from PySide6.QtGui import QPolygon
+                    painter.drawPolygon(QPolygon([
+                        QPoint(mx, 0), QPoint(mx + 8, 6), QPoint(mx, 12)
+                    ]))
+                else:
+                    # Left-pointing triangle at top
+                    from PySide6.QtGui import QPolygon
+                    painter.drawPolygon(QPolygon([
+                        QPoint(mx, 0), QPoint(mx - 8, 6), QPoint(mx, 12)
+                    ]))
+
         # Draw playhead indicator on timeline
         if s.playing and s.playhead is not None:
             px = s.playhead * self.parent_arr.BW - self.scroll_offset
@@ -491,8 +540,7 @@ class ArrangementCanvas(QWidget):
             painter.drawLine(0, y + self.parent_arr.TH, cw, y + self.parent_arr.TH)
 
         # Beat grid lines
-        total_beats = int(self.parent_arr._max_scroll_beats)
-        for b in range(total_beats + 1):
+        for b in range(self.parent_arr.TOT + 1):
             x = b * self.parent_arr.BW
             is_measure = (abs(b % bpm_beats) < 0.001) or b == 0
             color = QColor('#3a3a7a') if is_measure else QColor('#1e1e3a')
@@ -594,6 +642,26 @@ class ArrangementCanvas(QWidget):
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(255, 255, 255, 68))
             painter.drawRect(int(x + w - 5), y + 2, 4, self.parent_arr.TH - 4)
+
+        # Loop region shading on canvas
+        if s.looping and s.loop_end is not None:
+            ls = s.loop_start if s.loop_start is not None else 0.0
+            le = s.loop_end
+            lx1 = int(ls * self.parent_arr.BW)
+            lx2 = int(le * self.parent_arr.BW)
+
+            # Dim areas outside the loop
+            outside_color = QColor(0, 0, 0, 60)
+            if lx1 > 0:
+                painter.fillRect(0, 0, lx1, ch, outside_color)
+            if lx2 < cw:
+                painter.fillRect(lx2, 0, cw - lx2, ch, outside_color)
+
+            # Loop boundary lines
+            loop_color = QColor('#00b4d8')
+            painter.setPen(QPen(loop_color, 1.5, Qt.DashLine))
+            painter.drawLine(lx1, 0, lx1, ch)
+            painter.drawLine(lx2, 0, lx2, ch)
 
         # Playhead
         if s.playing and s.playhead is not None:

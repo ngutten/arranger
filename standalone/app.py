@@ -19,6 +19,14 @@ from .core.audio import (
     render_fluidsynth, render_basic, wav_to_mp3,
     generate_preview_tone, render_sample, AudioPlayer,
 )
+from .core.settings import Settings
+
+try:
+    from .core.engine import AudioEngine
+    _HAS_ENGINE = True
+except ImportError:
+    _HAS_ENGINE = False
+
 from .ui.topbar import TopBar
 from .ui.pattern_list import PatternList
 from .ui.arrangement import ArrangementView
@@ -30,16 +38,16 @@ from .ui.dialogs import PatternDialog, BeatPatternDialog, SF2Dialog
 
 class App(QMainWindow):
     """Main application - owns the state, creates the window, coordinates UI."""
-    
-    # Signal to communicate from background thread to main thread
-    start_playback_animation = Signal()
 
     def __init__(self, instruments_dir=None):
         super().__init__()
         self.state = AppState()
-        self.player = AudioPlayer()
+        self.player = AudioPlayer()  # kept for legacy preview fallback
         self.instruments_dir = instruments_dir or str(
             Path(__file__).parent.parent / 'instruments')
+
+        # Realtime audio engine
+        self.engine = None  # initialized in _init_engine()
 
         # Drag-and-drop state
         self._drag_type = None
@@ -48,16 +56,13 @@ class App(QMainWindow):
         # Playback state
         self._play_timer = None
         self._playback_max_beat = 0
-        
-        # Connect the playback signal
-        self.start_playback_animation.connect(self._start_playhead_animation)
 
         self._setup_theme()
         self._build_ui()
         self._bind_keys()
         self._init_state()
 
-        # Connect state observer
+        # Connect state observer — must be after _init_state so engine exists
         self.state.on_change(self._on_state_change)
 
     def _setup_theme(self):
@@ -266,20 +271,43 @@ class App(QMainWindow):
         self.state.tracks.append(trk)
         self.state.sel_trk = trk.id
 
+        # Initialize realtime audio engine
+        self._init_engine()
+
         # Auto-load first SF2
         self._auto_load_sf2()
 
         # Initial render
         self._refresh_all()
 
+    def _init_engine(self):
+        """Initialize the realtime audio engine."""
+        if not _HAS_ENGINE:
+            print("[App] AudioEngine not available (missing sounddevice/pyfluidsynth?)")
+            return
+        try:
+            settings = Settings()
+            self.engine = AudioEngine(self.state, settings)
+        except Exception as e:
+            print(f"[App] Failed to initialize AudioEngine: {e}")
+            self.engine = None
+
     def _auto_load_sf2(self):
         """Try to load the first SF2 file from the instruments directory."""
         sf2_list = scan_directory(self.instruments_dir)
         if sf2_list:
             self.state.sf2 = sf2_list[0]
+            # Load into realtime engine
+            if self.engine:
+                sf2_path = sf2_list[0].path if hasattr(sf2_list[0], 'path') else sf2_list[0].get('path')
+                if sf2_path:
+                    self.engine.load_sf2(sf2_path)
 
     def _on_state_change(self, source=None):
         """Called whenever state changes. Refreshes relevant UI components."""
+        # Mark engine dirty so schedule rebuilds on next audio callback
+        if self.engine and self.state.playing:
+            self.engine.mark_dirty()
         self._refresh_all()
 
     def _refresh_all(self):
@@ -511,34 +539,47 @@ class App(QMainWindow):
         dlg = SF2Dialog(self, self, sf2_list if sf2_list else [])
         if dlg.exec():
             self.state.sf2 = dlg.result
+            # Load into realtime engine
+            if self.engine and dlg.result:
+                sf2_path = (dlg.result.path if hasattr(dlg.result, 'path')
+                            else dlg.result.get('path'))
+                if sf2_path:
+                    self.engine.load_sf2(sf2_path)
             self.state.notify('sf2_loaded')
 
     # ---- Playback helpers ----
 
     def play_note(self, pitch, velocity, track_id=None):
         """Play a single note preview, using track instrument if available."""
-        # Get track instrument info if track_id provided
-        bank, program, channel = 0, 0, 0
+        channel = 0
         if track_id:
             t = self.state.find_track(track_id)
             if t:
-                bank, program, channel = t.bank, t.program, t.channel
-        
-        # Try SF2 rendering if available
+                channel = t.channel
+
+        # Use engine if available
+        if self.engine:
+            self.engine.play_single_note(pitch, velocity, channel, duration=0.5)
+            return
+
+        # Legacy fallback
+        bank, program = 0, 0
+        if track_id:
+            t = self.state.find_track(track_id)
+            if t:
+                bank, program = t.bank, t.program
         if self.state.sf2:
             sf2_path = (self.state.sf2.path if hasattr(self.state.sf2, 'path')
                         else self.state.sf2.get('path'))
             if sf2_path:
                 try:
-                    wav = render_sample(sf2_path, bank, program, pitch, velocity, 
+                    wav = render_sample(sf2_path, bank, program, pitch, velocity,
                                        duration=0.5, channel=channel)
                     if wav:
                         self.player.play_async(wav)
                         return
                 except Exception:
-                    pass  # Fall through to basic tone
-        
-        # Fallback to basic tone
+                    pass
         wav = generate_preview_tone(pitch, velocity, 0.3)
         self.player.play_async(wav)
 
@@ -547,13 +588,20 @@ class App(QMainWindow):
         inst = next((i for i in self.state.beat_kit if i.id == inst_id), None)
         if not inst:
             return
+
+        # Use engine if available
+        if self.engine:
+            self.engine.play_single_note(inst.pitch, inst.velocity,
+                                         inst.channel, duration=0.5)
+            return
+
+        # Legacy fallback
         sf2_path = None
         if self.state.sf2:
             sf2_path = (self.state.sf2.path if hasattr(self.state.sf2, 'path')
                         else self.state.sf2.get('path'))
         if sf2_path:
-            # For beat instruments, use bank/program/pitch with channel (usually 9 for drums)
-            wav = render_sample(sf2_path, inst.bank, inst.program, inst.pitch, 
+            wav = render_sample(sf2_path, inst.bank, inst.program, inst.pitch,
                               inst.velocity, duration=0.5, channel=inst.channel)
             if wav:
                 self.player.play_async(wav)
@@ -674,12 +722,99 @@ class App(QMainWindow):
 
     def toggle_loop(self):
         self.state.looping = not self.state.looping
+        if self.state.looping:
+            # Initialize loop markers if not set
+            if self.state.loop_end is None:
+                from .core.engine import compute_arrangement_length
+                length = compute_arrangement_length(self.state)
+                if length > 0:
+                    self.state.loop_start = 0.0
+                    self.state.loop_end = length
+                else:
+                    # Default to first 4 beats
+                    self.state.loop_start = 0.0
+                    self.state.loop_end = float(self.state.ts_num)
+        self._sync_loop_to_engine()
         self.topbar.refresh()
+        self.arrangement.refresh()
+
+    def _sync_loop_to_engine(self):
+        """Push current loop state to the engine."""
+        if not self.engine:
+            return
+        if self.state.looping and self.state.loop_end is not None:
+            ls = self.state.loop_start if self.state.loop_start is not None else 0.0
+            self.engine.set_loop(ls, self.state.loop_end)
+        else:
+            self.engine.set_loop(None, None)
 
     def start_play(self):
         """Start full arrangement playback."""
+        # Use realtime engine if available
+        if self.engine:
+            self._start_play_engine()
+            return
+        # Legacy fallback
+        self._start_play_legacy()
+
+    def _start_play_engine(self):
+        """Start playback via the realtime audio engine."""
+        from .core.engine import compute_arrangement_length
+
+        max_beat = compute_arrangement_length(self.state)
+        if max_beat == 0:
+            return
+
+        self.state.playing = True
+        self.state.playhead = 0
+        self._playback_max_beat = max_beat
+        self.topbar.refresh()
+
+        # Sync loop state
+        self._sync_loop_to_engine()
+
+        # Build schedule and start
+        self.engine.mark_dirty()
+        self.engine.seek(0.0)
+        self.engine.play()
+
+        # Start playhead animation timer
+        self._start_playhead_timer()
+
+    def _start_playhead_timer(self):
+        """Start a QTimer to poll engine.current_beat and update the UI playhead."""
+        if self._play_timer:
+            self._play_timer.stop()
+
+        self._play_timer = QTimer(self)
+        self._play_timer.setInterval(30)  # ~33fps
+        self._play_timer.timeout.connect(self._update_playhead)
+        self._play_timer.start()
+
+    def _update_playhead(self):
+        """Poll engine beat position and update UI."""
+        if not self.engine or not self.state.playing:
+            self._stop_playhead_timer()
+            return
+
+        beat = self.engine.current_beat
+
+        # Check if engine stopped itself (reached end of arrangement)
+        if not self.engine.is_playing:
+            self.stop_play()
+            return
+
+        self.state.playhead = beat
+        self.arrangement.refresh()
+
+    def _stop_playhead_timer(self):
+        if self._play_timer:
+            self._play_timer.stop()
+            self._play_timer = None
+
+    def _start_play_legacy(self):
+        """Legacy offline-render playback (fallback when engine unavailable)."""
         arr = self.state.build_arrangement()
-        # Check if there are any notes
         has_notes = any(
             any(n for p in t.get('placements', []) for n in p.get('pattern', {}).get('notes', []))
             for t in arr.get('tracks', [])
@@ -687,7 +822,6 @@ class App(QMainWindow):
         if not has_notes:
             return
 
-        # Calculate total duration in beats
         max_beat = 0
         for pl in self.state.placements:
             pat = self.state.find_pattern(pl.pattern_id)
@@ -697,16 +831,14 @@ class App(QMainWindow):
             pat = self.state.find_beat_pattern(bp.pattern_id)
             if pat:
                 max_beat = max(max_beat, bp.time + pat.length * (bp.repeats or 1))
-        
+
         if max_beat == 0:
-            return  # Nothing to play
-        
+            return
+
         self.state.playing = True
         self.state.playhead = 0
-        self.topbar.refresh()
-
-        # Store max_beat as instance variable for the animation function
         self._playback_max_beat = max_beat
+        self.topbar.refresh()
 
         def render_and_start():
             midi = create_midi(arr)
@@ -720,46 +852,41 @@ class App(QMainWindow):
                 wav = render_basic(arr)
             if wav:
                 self.player.play_wav(wav)
-                # Emit signal to start animation on main thread
-                self.start_playback_animation.emit()
+                # Start wall-clock playhead animation
+                QTimer.singleShot(0, self._start_legacy_playhead)
 
         threading.Thread(target=render_and_start, daemon=True).start()
 
-    def _start_playhead_animation(self):
-        """Start playhead animation on the main thread."""
-        max_beat = self._playback_max_beat
-        import time
+    def _start_legacy_playhead(self):
+        """Wall-clock playhead animation for legacy playback."""
+        import time as _time
         beat_duration = 60.0 / self.state.bpm
-        start_time = time.time()
-        
-        def update_playhead():
+        max_beat = self._playback_max_beat
+        start_time = _time.time()
+
+        def update():
             if not self.state.playing:
                 return
-            
-            current_time = time.time() - start_time
-            current_beat = current_time / beat_duration
-            
+            elapsed = _time.time() - start_time
+            current_beat = elapsed / beat_duration
             if self.state.looping:
-                # Loop back to start
                 self.state.playhead = current_beat % max_beat
-                QTimer.singleShot(30, update_playhead)
+                QTimer.singleShot(30, update)
+            elif current_beat >= max_beat:
+                self.stop_play()
             else:
-                # Check if we've reached the end
-                if current_beat >= max_beat:
-                    self.stop_play()
-                else:
-                    self.state.playhead = current_beat
-                    QTimer.singleShot(30, update_playhead)
-            
-            # Force refresh on main thread
+                self.state.playhead = current_beat
+                QTimer.singleShot(30, update)
             self.arrangement.refresh()
-        
-        # Start the update loop
-        update_playhead()
+
+        update()
 
     def stop_play(self):
         self.state.playing = False
         self.state.playhead = None
+        self._stop_playhead_timer()
+        if self.engine:
+            self.engine.stop()
         self.player.stop()
         self.topbar.refresh()
         self.arrangement.refresh()
@@ -787,19 +914,27 @@ class App(QMainWindow):
         else:
             path, _ = QFileDialog.getSaveFileName(
                 self, 'Export WAV', '', 'WAV files (*.wav);;All files (*.*)')
-        
+
         if not path:
             return
 
         def render_work():
             wav = None
-            if self.state.sf2:
-                sf2_path = (self.state.sf2.path if hasattr(self.state.sf2, 'path')
-                            else self.state.sf2.get('path'))
-                if sf2_path:
-                    wav = render_fluidsynth(midi, sf2_path)
+
+            # Use engine offline rendering if available (guarantees preview == export)
+            if self.engine:
+                wav = self.engine.render_offline_wav()
+
+            # Legacy fallback
             if wav is None:
-                wav = render_basic(arr)
+                if self.state.sf2:
+                    sf2_path = (self.state.sf2.path if hasattr(self.state.sf2, 'path')
+                                else self.state.sf2.get('path'))
+                    if sf2_path:
+                        wav = render_fluidsynth(midi, sf2_path)
+                if wav is None:
+                    wav = render_basic(arr)
+
             if wav is None:
                 QTimer.singleShot(0, lambda: QMessageBox.critical(
                     self, 'Error', 'No notes to render'))
@@ -810,14 +945,12 @@ class App(QMainWindow):
                 if mp3:
                     with open(path, 'wb') as f:
                         f.write(mp3)
-                    # Item 10: Don't show success message
                 else:
                     QTimer.singleShot(0, lambda: QMessageBox.critical(
                         self, 'Error', 'ffmpeg not available for MP3 conversion'))
             else:
                 with open(path, 'wb') as f:
                     f.write(wav)
-                # Item 10: Don't show success message
 
         threading.Thread(target=render_work, daemon=True).start()
 
@@ -843,6 +976,9 @@ class App(QMainWindow):
                 if hasattr(self.state, '_sf2_path_hint') and self.state._sf2_path_hint:
                     try:
                         self.state.sf2 = SF2Info(self.state._sf2_path_hint)
+                        # Load into engine
+                        if self.engine:
+                            self.engine.load_sf2(self.state._sf2_path_hint)
                     except Exception:
                         pass
                 self.piano_roll.clear_selection()
@@ -850,3 +986,11 @@ class App(QMainWindow):
                 self._refresh_all()
             except Exception as e:
                 QMessageBox.critical(self, 'Error', f'Failed to load project: {e}')
+
+    def closeEvent(self, event):
+        """Clean up audio engine on window close."""
+        self._stop_playhead_timer()
+        if self.engine:
+            self.engine.shutdown()
+        self.player.stop()
+        super().closeEvent(event)

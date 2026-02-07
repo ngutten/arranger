@@ -337,6 +337,8 @@ class AppState:
         self.playing: bool = False
         self.looping: bool = False
         self.playhead: Optional[float] = None
+        self.loop_start: Optional[float] = None   # beat position, None = start of arrangement
+        self.loop_end: Optional[float] = None     # beat position, None = end of arrangement
 
         # Internal
         self._next_id: int = 1

@@ -271,4 +271,5 @@ class GridWidget(QWidget):
         elif event.button() == Qt.RightButton:
             grid[col] = 0
 
+        self.parent_grid.state.notify('beat_grid_edit')
         self.update()
