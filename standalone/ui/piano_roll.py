@@ -224,9 +224,9 @@ class PianoKeysWidget(QWidget):
             oct = p // 12 - 1
 
             if is_black:
-                bg = QColor('#1a1530') if ik else QColor('#111')
+                bg = QColor('#2a1a50') if ik else QColor('#111')
             else:
-                bg = QColor('#1e1a35') if ik else QColor('#16213e')
+                bg = QColor('#2e2450') if ik else QColor('#16213e')
 
             painter.fillRect(0, y, 44, self.parent_roll.NH, bg)
             painter.setPen(QColor('#1a1a2e'))
@@ -252,6 +252,7 @@ class PianoGridWidget(QWidget):
     def __init__(self, parent):
         super().__init__(parent)
         self.parent_roll = parent
+        self._bg_note_fade = {}  # (pitch, pattern_id) -> fade_level (0.0-1.0)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -290,9 +291,9 @@ class PianoGridWidget(QWidget):
             ik = (p % 12) in in_key
             
             if is_black:
-                bg = QColor('#1a1530') if ik else QColor('#15152a')
+                bg = QColor('#1e1a40') if ik else QColor('#15152a')
             else:
-                bg = QColor('#1e1a35') if ik else QColor('#1a1a30')
+                bg = QColor('#252050') if ik else QColor('#1a1a30')
             
             painter.fillRect(0, y, total_w, self.parent_roll.NH, bg)
             
@@ -324,7 +325,201 @@ class PianoGridWidget(QWidget):
         if not pat:
             return
 
-        # Notes
+        # Background notes (other patterns) - with three-state overlay control
+        active_notes = set()  # (pitch, pattern_id)
+        bg_notes = []
+        
+        # Smart placement: find first overlap between current pattern and other patterns
+        def find_smart_offset(current_pat_id, other_pat_id):
+            """
+            Find the offset to align first overlap in pattern-relative coordinates.
+            
+            Returns the position in the current pattern's timeline where the other 
+            pattern's t=0 should appear. Returns 0.0 if no overlap found.
+            
+            Example: If Pattern 1 is at arr[4-16] and Pattern 2 is at arr[8-12],
+            then when viewing Pattern 1, we want Pattern 2's t=0 to appear at 
+            Pattern 1's t=4 (since arr_8 - arr_4 = 4).
+            """
+            curr_pls = [pl for pl in s.placements if pl.pattern_id == current_pat_id]
+            other_pls = [pl for pl in s.placements if pl.pattern_id == other_pat_id]
+            
+            if not curr_pls or not other_pls:
+                return 0.0  # No placements, use t=0
+            
+            curr_pat = s.find_pattern(current_pat_id)
+            other_pat = s.find_pattern(other_pat_id)
+            if not curr_pat or not other_pat:
+                return 0.0
+            
+            # Find first overlapping region
+            for curr_pl in sorted(curr_pls, key=lambda p: p.time):
+                curr_reps = curr_pl.repeats or 1
+                for curr_rep in range(curr_reps):
+                    curr_arr_start = curr_pl.time + curr_rep * curr_pat.length
+                    curr_arr_end = curr_arr_start + curr_pat.length
+                    
+                    for other_pl in sorted(other_pls, key=lambda p: p.time):
+                        other_reps = other_pl.repeats or 1
+                        for other_rep in range(other_reps):
+                            other_arr_start = other_pl.time + other_rep * other_pat.length
+                            other_arr_end = other_arr_start + other_pat.length
+                            
+                            # Check for overlap
+                            if not (curr_arr_end <= other_arr_start or other_arr_end <= curr_arr_start):
+                                # Found overlap!
+                                # other_pattern's t=0 is at arrangement beat other_arr_start
+                                # current_pattern's t=0 is at arrangement beat curr_arr_start
+                                # In pattern coordinates: (other_arr_start - curr_arr_start)
+                                return other_arr_start - curr_arr_start
+            
+            return 0.0  # No overlap found, use t=0
+        
+        # Collect notes to display based on each pattern's overlay_mode
+        for pl in s.placements:
+            if pl.pattern_id == pat.id:
+                continue  # Skip the current pattern
+            other_pat = s.find_pattern(pl.pattern_id)
+            if not other_pat:
+                continue
+            
+            # Check overlay mode
+            if other_pat.overlay_mode == 'off':
+                continue  # Skip this pattern entirely
+            
+            t = s.find_track(pl.track_id)
+            if not t:
+                continue
+            
+            transpose = s.compute_transpose(pl)
+            
+            # Calculate smart offset (where other pattern's t=0 appears in current pattern's timeline)
+            pattern_offset = find_smart_offset(pat.id, other_pat.id)
+            
+            if other_pat.overlay_mode == 'always':
+                # Show all notes from all placements/repeats at their relative positions
+                reps = pl.repeats or 1
+                for rep in range(reps):
+                    # Calculate where this repeat instance starts in arrangement
+                    arr_start = pl.time + rep * other_pat.length
+                    
+                    # Find the first placement of current pattern for reference
+                    curr_placements = [p for p in s.placements if p.pattern_id == pat.id]
+                    if curr_placements:
+                        curr_first = min(curr_placements, key=lambda p: p.time)
+                        curr_arr_start = curr_first.time
+                        # Position relative to current pattern's first placement
+                        display_offset = arr_start - curr_arr_start
+                    else:
+                        display_offset = arr_start  # Fallback to absolute if no placements
+                    
+                    for n in other_pat.notes:
+                        pitch = n.pitch + transpose
+                        display_start = display_offset + n.start
+                        # Make key unique per repeat instance
+                        key = (pitch, pl.pattern_id, rep, n.start)
+                        bg_notes.append({
+                            'pitch': pitch,
+                            'start': display_start,
+                            'duration': n.duration,
+                            'key': key,
+                            'fade': 1.0,  # Always full opacity
+                        })
+                        
+            elif other_pat.overlay_mode == 'playing' and s.playing and s.playhead is not None:
+                # For playing mode, use current overlaps based on playhead position
+                # Find which placement instances are currently overlapping
+                curr_placements = [p for p in s.placements if p.pattern_id == pat.id]
+                if not curr_placements:
+                    continue
+                
+                # Find current pattern instance that playhead is in
+                curr_pat = s.find_pattern(pat.id)
+                if not curr_pat:
+                    continue
+                    
+                curr_arr_start = None
+                for curr_pl in curr_placements:
+                    curr_reps = curr_pl.repeats or 1
+                    for curr_rep in range(curr_reps):
+                        cstart = curr_pl.time + curr_rep * curr_pat.length
+                        cend = cstart + curr_pat.length
+                        if cstart <= s.playhead < cend:
+                            curr_arr_start = cstart
+                            break
+                    if curr_arr_start is not None:
+                        break
+                
+                if curr_arr_start is None:
+                    continue  # Playhead not in current pattern
+                
+                # Now check other pattern's instances for overlap with current instance
+                reps = pl.repeats or 1
+                for rep in range(reps):
+                    other_arr_start = pl.time + rep * other_pat.length
+                    other_arr_end = other_arr_start + other_pat.length
+                    
+                    # Check if this other pattern instance overlaps current pattern instance
+                    curr_arr_end = curr_arr_start + curr_pat.length
+                    if not (curr_arr_end <= other_arr_start or other_arr_end <= curr_arr_start):
+                        # They overlap - check if notes are currently playing
+                        for n in other_pat.notes:
+                            note_arr_start = other_arr_start + n.start
+                            note_arr_end = note_arr_start + n.duration
+                            if note_arr_start <= s.playhead < note_arr_end:
+                                pitch = n.pitch + transpose
+                                # Display relative to current pattern instance
+                                display_start = (other_arr_start - curr_arr_start) + n.start
+                                key = (pitch, pl.pattern_id, rep)
+                                active_notes.add(key)
+                                bg_notes.append({
+                                    'pitch': pitch,
+                                    'start': display_start,
+                                    'duration': n.duration,
+                                    'key': key,
+                                    'fade': None,  # Will use animated fade
+                                })
+        
+        # Update fade levels for 'playing' mode notes (those with fade=None)
+        fade_speed = 0.15
+        
+        # Fade in currently active notes
+        for key in active_notes:
+            self._bg_note_fade[key] = min(1.0, self._bg_note_fade.get(key, 0.0) + fade_speed)
+        
+        # Fade out inactive notes
+        for key in list(self._bg_note_fade.keys()):
+            if key not in active_notes:
+                self._bg_note_fade[key] = max(0.0, self._bg_note_fade[key] - fade_speed)
+                if self._bg_note_fade[key] <= 0:
+                    del self._bg_note_fade[key]
+        
+        # Draw background notes
+        for n in bg_notes:
+            if self.parent_roll.LO <= n['pitch'] <= self.parent_roll.HI:
+                x = n['start'] * self.parent_roll.BW
+                y = (self.parent_roll.HI - n['pitch']) * self.parent_roll.NH
+                w = n['duration'] * self.parent_roll.BW
+                
+                # Use provided fade or get from animation dict
+                if n['fade'] is not None:
+                    fade = n['fade']
+                else:
+                    fade = self._bg_note_fade.get(n['key'], 0.0)
+                
+                if fade > 0:
+                    painter.setPen(Qt.NoPen)
+                    color = QColor('#cccccc')  # Grey-white
+                    color.setAlpha(int(40 * fade))  # Fade from 0 to 40
+                    painter.setBrush(color)
+                    painter.drawRect(int(x), y + 1, int(w - 1), self.parent_roll.NH - 2)
+        
+        # Continue animating if we have fading notes (only for 'playing' mode)
+        if self._bg_note_fade:
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(33, self.update)  # ~30fps animation
+
+        # Notes from current pattern
         for i, n in enumerate(pat.notes):
             x = n.start * self.parent_roll.BW
             y = (self.parent_roll.HI - n.pitch) * self.parent_roll.NH

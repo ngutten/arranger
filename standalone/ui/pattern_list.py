@@ -281,6 +281,15 @@ class PatternItem(QFrame):
         
         layout.addWidget(text_container, stretch=1)
 
+        # Overlay mode button
+        overlay_btn = QPushButton(self._overlay_symbol(pattern.overlay_mode))
+        overlay_btn.setStyleSheet('background-color: transparent; color: #aaa; border: 1px solid #555; font-size: 14px; padding: 2px;')
+        overlay_btn.setFixedWidth(26)
+        overlay_btn.setToolTip(self._overlay_tooltip(pattern.overlay_mode))
+        overlay_btn.clicked.connect(lambda: self._toggle_overlay(pattern.id))
+        layout.addWidget(overlay_btn)
+        self.overlay_btn = overlay_btn
+
         # Action buttons - fixed width container so buttons don't get pushed off
         btn_frame = QFrame()
         btn_frame.setStyleSheet('background-color: transparent; border: none;')
@@ -318,6 +327,43 @@ class PatternItem(QFrame):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.parent_list._select_pat(self.pattern.id)
+
+    def _overlay_symbol(self, mode):
+        """Get symbol for overlay mode."""
+        if mode == 'off':
+            return '○'  # Empty circle
+        elif mode == 'playing':
+            return '◐'  # Half-filled circle
+        else:  # 'always'
+            return '●'  # Filled circle
+    
+    def _overlay_tooltip(self, mode):
+        """Get tooltip for overlay mode."""
+        if mode == 'off':
+            return 'Overlay: Off (click to set Playing)'
+        elif mode == 'playing':
+            return 'Overlay: When Playing (click to set Always)'
+        else:  # 'always'
+            return 'Overlay: Always On (click to set Off)'
+    
+    def _toggle_overlay(self, pattern_id):
+        """Cycle through overlay modes."""
+        pat = self.parent_list.state.find_pattern(pattern_id)
+        if not pat:
+            return
+        
+        # Cycle: off -> playing -> always -> off
+        modes = ['off', 'playing', 'always']
+        current_idx = modes.index(pat.overlay_mode) if pat.overlay_mode in modes else 1
+        next_idx = (current_idx + 1) % len(modes)
+        pat.overlay_mode = modes[next_idx]
+        
+        # Update button
+        self.overlay_btn.setText(self._overlay_symbol(pat.overlay_mode))
+        self.overlay_btn.setToolTip(self._overlay_tooltip(pat.overlay_mode))
+        
+        # Notify state change to trigger piano roll refresh
+        self.parent_list.state.notify('overlay_mode')
 
 
 class BeatPatternItem(QFrame):

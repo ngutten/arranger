@@ -273,3 +273,38 @@ class GridWidget(QWidget):
 
         self.parent_grid.state.notify('beat_grid_edit')
         self.update()
+
+    def wheelEvent(self, event):
+        """Change velocity of beat under cursor with mouse wheel."""
+        state = self.parent_grid.state
+        pat = state.find_beat_pattern(state.sel_beat_pat)
+        
+        if not pat or not state.beat_kit:
+            return
+
+        RH = self.parent_grid.RH
+        CW = self.parent_grid.CW
+        
+        x, y = event.position().x(), event.position().y()
+        row = int(y // RH)
+        col = int(x // CW)
+
+        if row < 0 or row >= len(state.beat_kit):
+            return
+
+        num_cols = int(pat.length * pat.subdivision)
+        if col < 0 or col >= num_cols:
+            return
+
+        inst = state.beat_kit[row]
+        grid = pat.grid.get(inst.id)
+        if grid is None or grid[col] == 0:
+            return
+
+        # Change velocity by 5 per wheel tick
+        delta = 5 if event.angleDelta().y() > 0 else -5
+        grid[col] = max(1, min(127, grid[col] + delta))
+        
+        self.parent_grid.state.notify('beat_grid_edit')
+        self.update()
+        event.accept()

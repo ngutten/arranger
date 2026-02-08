@@ -591,6 +591,10 @@ class App(QMainWindow):
 
         # Use engine if available
         if self.engine:
+            # Ensure the instrument's bank/program is set up for non-drum channels
+            if inst.channel != 9:
+                # For non-drum channels, explicitly set the bank/program before playing
+                self.engine._send_cmd('_setup_program', inst.channel, inst.bank, inst.program)
             self.engine.play_single_note(inst.pitch, inst.velocity,
                                          inst.channel, duration=0.5)
             return
@@ -806,6 +810,7 @@ class App(QMainWindow):
 
         self.state.playhead = beat
         self.arrangement.refresh()
+        self.piano_roll.grid_widget.update()  # Update piano roll for background notes
 
     def _stop_playhead_timer(self):
         if self._play_timer:

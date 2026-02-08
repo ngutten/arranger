@@ -136,6 +136,7 @@ class Pattern:
     key: str = 'C'
     scale: str = 'major'
     preview_mode: str = 'sine'
+    overlay_mode: str = 'playing'  # 'off', 'playing', 'always'
 
     def to_dict(self):
         return {
@@ -143,6 +144,7 @@ class Pattern:
             'notes': [n.to_dict() for n in self.notes],
             'color': self.color, 'key': self.key, 'scale': self.scale,
             'previewMode': self.preview_mode,
+            'overlayMode': self.overlay_mode,
         }
 
     @staticmethod
@@ -153,6 +155,7 @@ class Pattern:
             color=d.get('color', PALETTE[0]),
             key=d.get('key', 'C'), scale=d.get('scale', 'major'),
             preview_mode=d.get('previewMode', 'sine'),
+            overlay_mode=d.get('overlayMode', 'playing'),
         )
 
 
