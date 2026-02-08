@@ -5,6 +5,7 @@ from PySide6.QtCore import Qt, QRect, QPoint, QSize
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont
 
 from ..state import preset_name
+from ..clipboard import MarqueeSelection, ArrangementClipboard, select_placements_in_rect
 
 
 
@@ -34,6 +35,17 @@ class ArrangementView(QFrame):
         
         # Loop marker drag state
         self._drag_loop_marker = None  # 'start' or 'end'
+        
+        # Selection and clipboard
+        self.marquee = MarqueeSelection()
+        self.clipboard = ArrangementClipboard()
+        self.selected_placements = []
+        self.selected_beat_placements = []
+        
+        # Ghost placement state (for paste preview)
+        self._ghost_placements = []  # List of dicts with placement data
+        self._ghost_beat_placements = []
+        self._ghost_offset = 0.0  # Time offset from clipboard min_time
 
         self._build()
 
@@ -202,6 +214,102 @@ class ArrangementView(QFrame):
         self.canvas_widget.update()
         self.trk_widget.update()
         self.timeline_widget.update()
+    
+    def copy_selection(self):
+        """Copy selected placements to clipboard."""
+        if not self.selected_placements and not self.selected_beat_placements:
+            return
+        self.clipboard.copy(self.selected_placements, 
+                           self.selected_beat_placements, self.state)
+        # Don't activate ghost mode yet - wait for paste
+    
+    def cut_selection(self):
+        """Cut selected placements to clipboard."""
+        if not self.selected_placements and not self.selected_beat_placements:
+            return
+        self.copy_selection()
+        for pl in self.selected_placements:
+            self.state.placements.remove(pl)
+        for bp in self.selected_beat_placements:
+            self.state.beat_placements.remove(bp)
+        self.selected_placements = []
+        self.selected_beat_placements = []
+        self.state.notify('cut_placements')
+        self.refresh()
+        # Activate ghost mode immediately after cut for quick repositioning
+        self._activate_ghost_mode()
+    
+    def paste_at_playhead(self):
+        """Activate ghost mode for paste preview."""
+        if not self.clipboard.has_data():
+            return
+        # Activate ghost mode - user will click to commit
+        self._activate_ghost_mode()
+    
+    def _activate_ghost_mode(self):
+        """Activate ghost placement preview mode."""
+        if not self.clipboard.has_data():
+            return
+        
+        # Store ghost data from clipboard
+        self._ghost_placements = list(self.clipboard.data.placements)
+        self._ghost_beat_placements = list(self.clipboard.data.beat_placements)
+        self._ghost_offset = 0.0
+        
+        # Update display
+        self.canvas_widget.update()
+    
+    def _commit_ghost_placements(self, paste_time: float):
+        """Commit ghost placements to actual state."""
+        if not self._ghost_placements and not self._ghost_beat_placements:
+            return
+        
+        new_pls, new_bps = self.clipboard.paste(paste_time, self.state)
+        
+        # Add to state
+        self.state.placements.extend(new_pls)
+        self.state.beat_placements.extend(new_bps)
+        
+        # Select the pasted items
+        self.selected_placements = new_pls
+        self.selected_beat_placements = new_bps
+        
+        # Clear ghost mode
+        self._ghost_placements = []
+        self._ghost_beat_placements = []
+        self._ghost_offset = 0.0
+        
+        self.state.notify('paste_placements')
+        self.refresh()
+    
+    def _cancel_ghost_mode(self):
+        """Cancel ghost placement mode without pasting."""
+        self._ghost_placements = []
+        self._ghost_beat_placements = []
+        self._ghost_offset = 0.0
+        self.canvas_widget.update()
+    
+    def delete_selection(self):
+        """Delete selected placements."""
+        if not self.selected_placements and not self.selected_beat_placements:
+            return
+        for pl in self.selected_placements:
+            if pl in self.state.placements:
+                self.state.placements.remove(pl)
+        for bp in self.selected_beat_placements:
+            if bp in self.state.beat_placements:
+                self.state.beat_placements.remove(bp)
+        self.selected_placements = []
+        self.selected_beat_placements = []
+        self.state.notify('delete_placements')
+        self.refresh()
+    
+    def select_all(self):
+        """Select all placements."""
+        self.selected_placements = list(self.state.placements)
+        self.selected_beat_placements = list(self.state.beat_placements)
+        self.state.notify('selection_changed')
+        self.canvas_widget.update()
 
 
 class TimelineWidget(QWidget):
@@ -459,22 +567,85 @@ class ArrangementCanvas(QWidget):
     def __init__(self, parent):
         super().__init__(parent)
         self.parent_arr = parent
+        # Enable keyboard events
+        self.setFocusPolicy(Qt.StrongFocus)
+        # Enable mouse tracking for ghost placement updates
+        self.setMouseTracking(True)
+    
+    def keyPressEvent(self, event):
+        """Handle keyboard events."""
+        if event.key() == Qt.Key_Escape:
+            # Cancel ghost mode
+            if self.parent_arr._ghost_placements or self.parent_arr._ghost_beat_placements:
+                self.parent_arr._cancel_ghost_mode()
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
     def mousePressEvent(self, event):
+        x, y = event.pos().x(), event.pos().y()
+        ctrl_held = event.modifiers() & Qt.ControlModifier
+        shift_held = event.modifiers() & Qt.ShiftModifier
+        
         if event.button() == Qt.LeftButton:
-            # Check if we're clicking on an existing placement first
-            x, y = event.pos().x(), event.pos().y()
+            # If in ghost mode, commit the paste
+            if self.parent_arr._ghost_placements or self.parent_arr._ghost_beat_placements:
+                beat_pos = max(0, self.parent_arr._snap(x / self.parent_arr.BW))
+                self.parent_arr._commit_ghost_placements(beat_pos)
+                return
             
-            # Try to select existing placement
+            # Check existing placement click
             pl, is_resize = self.parent_arr._hit_placement(x, y)
             if pl:
+                # Clear piano roll selection when selecting placement
+                self.parent_arr.app.piano_roll.clear_selection()
+                
+                # Shift or Ctrl for multi-select
+                if shift_held or ctrl_held:
+                    # Toggle selection
+                    if pl in self.parent_arr.selected_placements:
+                        self.parent_arr.selected_placements.remove(pl)
+                    else:
+                        self.parent_arr.selected_placements.append(pl)
+                    self.update()
+                    return
+                # Regular click - select this placement only
+                self.parent_arr.selected_placements = [pl]
+                self.parent_arr.selected_beat_placements = []
                 self.parent_arr._on_click(event)
                 return
             
+            # Check beat placement
             bp, is_resize = self.parent_arr._hit_beat_placement(x, y)
             if bp:
+                # Clear piano roll selection when selecting beat placement
+                self.parent_arr.app.piano_roll.clear_selection()
+                
+                # Shift or Ctrl for multi-select
+                if shift_held or ctrl_held:
+                    if bp in self.parent_arr.selected_beat_placements:
+                        self.parent_arr.selected_beat_placements.remove(bp)
+                    else:
+                        self.parent_arr.selected_beat_placements.append(bp)
+                    self.update()
+                    return
+                # Regular click - select this placement only
+                self.parent_arr.selected_placements = []
+                self.parent_arr.selected_beat_placements = [bp]
                 self.parent_arr._on_click(event)
                 return
+            
+            # Shift+drag starts marquee selection (no placement hit)
+            if shift_held:
+                self.parent_arr.marquee.start(x, y)
+                # Clear piano roll selection when starting marquee in arranger
+                self.parent_arr.app.piano_roll.clear_selection()
+                return
+            
+            # Clear selection if not ctrl/shift-clicking
+            if not ctrl_held and not shift_held:
+                self.parent_arr.selected_placements = []
+                self.parent_arr.selected_beat_placements = []
             
             # No existing placement clicked - place selected pattern
             state = self.parent_arr.state
@@ -486,8 +657,6 @@ class ArrangementCanvas(QWidget):
             # Place selected melodic pattern
             if state.sel_pat and not state.sel_beat_pat:
                 from ..state import Placement, Track
-                
-                print(f"[DEBUG] Placing pattern {state.sel_pat} at beat {beat_pos}, track {track_idx}")
                 
                 # Get or create track
                 if track_idx >= len(state.tracks):
@@ -521,8 +690,6 @@ class ArrangementCanvas(QWidget):
             # Place selected beat pattern
             elif state.sel_beat_pat and not state.sel_pat:
                 from ..state import BeatPlacement, BeatTrack
-                
-                print(f"[DEBUG] Placing beat pattern {state.sel_beat_pat} at beat {beat_pos}, track {track_idx}")
                 
                 # Adjust for beat tracks (they come after melodic tracks)
                 beat_track_idx = track_idx - len(state.tracks)
@@ -564,13 +731,39 @@ class ArrangementCanvas(QWidget):
                 self.parent_arr._on_click(event)
                 
         elif event.button() == Qt.RightButton:
+            # Right click cancels ghost mode
+            if self.parent_arr._ghost_placements or self.parent_arr._ghost_beat_placements:
+                self.parent_arr._cancel_ghost_mode()
+                return
             self.parent_arr._on_right_click(event)
 
     def mouseMoveEvent(self, event):
+        # Update ghost placement position if in ghost mode
+        if self.parent_arr._ghost_placements or self.parent_arr._ghost_beat_placements:
+            x = event.pos().x()
+            beat_pos = max(0, self.parent_arr._snap(x / self.parent_arr.BW))
+            self.parent_arr._ghost_offset = beat_pos - self.parent_arr.clipboard.data.min_time
+            self.update()
+            return
+        
+        if self.parent_arr.marquee.is_active:
+            self.parent_arr.marquee.update(event.pos().x(), event.pos().y())
+            self.update()
+            return
         if event.buttons() & Qt.LeftButton:
             self.parent_arr._on_drag(event)
 
     def mouseReleaseEvent(self, event):
+        if self.parent_arr.marquee.is_active:
+            rect = self.parent_arr.marquee.finish()
+            pls, bps = select_placements_in_rect(
+                rect, self.parent_arr.state,
+                self.parent_arr.BW, self.parent_arr.TH
+            )
+            self.parent_arr.selected_placements = pls
+            self.parent_arr.selected_beat_placements = bps
+            self.update()
+            return
         self.parent_arr._on_release(event)
 
     def paintEvent(self, event):
@@ -725,6 +918,89 @@ class ArrangementCanvas(QWidget):
             # Draw playhead as a bright red line
             painter.setPen(QPen(QColor('#ff3355'), 2))
             painter.drawLine(int(px), 0, int(px), ch)
+        
+        # Draw ghost placements (paste preview)
+        if self.parent_arr._ghost_placements or self.parent_arr._ghost_beat_placements:
+            time_offset = self.parent_arr._ghost_offset
+            
+            # Draw ghost melodic placements
+            for pl_dict in self.parent_arr._ghost_placements:
+                ti = next((i for i, t in enumerate(s.tracks) if t.id == pl_dict['trackId']), -1)
+                pat = s.find_pattern(pl_dict['patternId'])
+                if ti < 0 or not pat:
+                    continue
+                
+                y = ti * self.parent_arr.TH
+                ghost_time = pl_dict['time'] + time_offset
+                x = ghost_time * self.parent_arr.BW
+                w = pat.length * pl_dict.get('repeats', 1) * self.parent_arr.BW
+                
+                # Semi-transparent ghost appearance
+                ghost_color = QColor(pat.color)
+                ghost_color.setAlpha(80)
+                painter.setPen(QPen(QColor('#fff'), 1, Qt.DashLine))
+                painter.setBrush(ghost_color)
+                painter.drawRect(int(x), y + 2, int(w - 1), self.parent_arr.TH - 4)
+                
+                # Label
+                painter.setPen(QColor(255, 255, 255, 120))
+                painter.setFont(QFont('TkDefaultFont', 8))
+                painter.drawText(int(x + 4), y + 20, pat.name)
+            
+            # Draw ghost beat placements
+            for bp_dict in self.parent_arr._ghost_beat_placements:
+                ti = next((i for i, t in enumerate(s.beat_tracks) if t.id == bp_dict['trackId']), -1)
+                pat = s.find_beat_pattern(bp_dict['patternId'])
+                if ti < 0 or not pat:
+                    continue
+                
+                y = (len(s.tracks) + ti) * self.parent_arr.TH
+                ghost_time = bp_dict['time'] + time_offset
+                x = ghost_time * self.parent_arr.BW
+                w = pat.length * bp_dict.get('repeats', 1) * self.parent_arr.BW
+                
+                # Semi-transparent ghost appearance
+                ghost_color = QColor(pat.color)
+                ghost_color.setAlpha(80)
+                painter.setPen(QPen(QColor('#fff'), 1, Qt.DashLine))
+                painter.setBrush(ghost_color)
+                painter.drawRect(int(x), y + 2, int(w - 1), self.parent_arr.TH - 4)
+                
+                painter.setPen(QColor(255, 255, 255, 120))
+                painter.setFont(QFont('TkDefaultFont', 8))
+                painter.drawText(int(x + 4), y + 20, pat.name)
+        
+        # Draw selection highlights
+        for pl in self.parent_arr.selected_placements:
+            ti = next((i for i, t in enumerate(s.tracks) if t.id == pl.track_id), -1)
+            pat = s.find_pattern(pl.pattern_id)
+            if ti >= 0 and pat:
+                y = ti * self.parent_arr.TH
+                x = pl.time * self.parent_arr.BW
+                w = pat.length * (pl.repeats or 1) * self.parent_arr.BW
+                painter.setPen(QPen(QColor('#00ff88'), 2))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(int(x), y + 2, int(w - 1), self.parent_arr.TH - 4)
+        
+        for bp in self.parent_arr.selected_beat_placements:
+            ti = next((i for i, t in enumerate(s.beat_tracks) if t.id == bp.track_id), -1)
+            pat = s.find_beat_pattern(bp.pattern_id)
+            if ti >= 0 and pat:
+                y = (len(s.tracks) + ti) * self.parent_arr.TH
+                x = bp.time * self.parent_arr.BW
+                w = pat.length * (bp.repeats or 1) * self.parent_arr.BW
+                painter.setPen(QPen(QColor('#00ff88'), 2))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(int(x), y + 2, int(w - 1), self.parent_arr.TH - 4)
+        
+        # Draw marquee rectangle
+        if self.parent_arr.marquee.is_active:
+            rect = self.parent_arr.marquee.get_rect()
+            painter.setPen(QPen(QColor('#00ff88'), 1, Qt.DashLine))
+            fill = QColor('#00ff88')
+            fill.setAlpha(30)
+            painter.setBrush(fill)
+            painter.drawRect(rect)
 
 
 # Add missing methods to ArrangementView

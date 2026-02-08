@@ -13,6 +13,7 @@ from .state import (
     AppState, Pattern, Track, BeatTrack, BeatInstrument, BeatPlacement,
     Placement, PALETTE, NOTE_NAMES,
 )
+from .undo import UndoStack, capture_state, restore_state
 from .core.sf2 import SF2Info, scan_directory
 from .core.midi import create_midi
 from .core.audio import (
@@ -46,6 +47,19 @@ class App(QMainWindow):
         self.instruments_dir = instruments_dir or str(
             Path(__file__).parent.parent / 'instruments')
 
+        # Undo/redo system
+        self.undo_stack = UndoStack(max_size=100)
+        self._undo_triggers = {
+            'pattern_dialog', 'beat_pattern_dialog',
+            'placement_edit', 'beat_placement_edit', 
+            'del_pl', 'del_beat_pl',
+            'placement_added', 'beat_placement_added',
+            'note_edit', 'note_add',  # Piano roll edits
+            'piano_roll_edit', 'beat_grid_edit',
+            'track_deleted', 'beat_track_deleted',
+            'ts', 'cut_placements', 'paste_placements', 'delete_placements',
+        }
+
         # Realtime audio engine
         self.engine = None  # initialized in _init_engine()
 
@@ -64,6 +78,9 @@ class App(QMainWindow):
 
         # Connect state observer — must be after _init_state so engine exists
         self.state.on_change(self._on_state_change)
+        
+        # Capture initial state for undo
+        self._push_undo("init")
 
     def _setup_theme(self):
         """Configure Qt stylesheet for dark mode."""
@@ -257,6 +274,13 @@ class App(QMainWindow):
         QShortcut(QKeySequence.Delete, self, self._on_delete)
         QShortcut(Qt.Key_Backspace, self, self._on_delete)
         QShortcut(QKeySequence('Ctrl+D'), self, self._on_duplicate)
+        
+        # Undo/Redo shortcuts
+        undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
+        undo_shortcut.activated.connect(self.do_undo)
+        
+        redo_shortcut = QShortcut(QKeySequence.StandardKey.Redo, self)
+        redo_shortcut.activated.connect(self.do_redo)
 
     def _init_state(self):
         """Set up initial state with one pattern and one track."""
@@ -311,6 +335,10 @@ class App(QMainWindow):
         if self.engine and self.state.playing:
             self.engine.mark_dirty()
         self._refresh_all()
+        
+        # Capture undo snapshot for certain actions
+        if source in self._undo_triggers:
+            self._push_undo(source)
 
     def _refresh_all(self):
         """Refresh all UI components from current state."""
@@ -323,6 +351,41 @@ class App(QMainWindow):
         else:
             self.beat_grid.refresh()
         self.track_panel.refresh()
+    
+    def _push_undo(self, source=None):
+        """Push current state onto undo stack."""
+        if source in ('undo', 'redo'):
+            return  # Don't capture during undo/redo
+        snapshot = capture_state(self.state)
+        self.undo_stack.push(snapshot)
+    
+    def do_undo(self):
+        """Undo the last action."""
+        if not self.undo_stack.can_undo():
+            return
+        snapshot = self.undo_stack.undo()
+        if snapshot:
+            restore_state(self.state, snapshot)
+            # Clear all selections to avoid ghost selections
+            self.piano_roll.clear_selection()
+            self.arrangement.selected_placements = []
+            self.arrangement.selected_beat_placements = []
+            self.state.notify('undo')
+            self._refresh_all()
+    
+    def do_redo(self):
+        """Redo the last undone action."""
+        if not self.undo_stack.can_redo():
+            return
+        snapshot = self.undo_stack.redo()
+        if snapshot:
+            restore_state(self.state, snapshot)
+            # Clear all selections to avoid ghost selections
+            self.piano_roll.clear_selection()
+            self.arrangement.selected_placements = []
+            self.arrangement.selected_beat_placements = []
+            self.state.notify('redo')
+            self._refresh_all()
 
     def _switch_editor(self):
         """Switch between piano roll and beat grid based on selection."""
@@ -348,17 +411,39 @@ class App(QMainWindow):
         self.toggle_play()
 
     def _on_copy(self):
-        if self._current_editor == 'piano_roll':
+        # Check if arranger has a selection
+        if self.arrangement.selected_placements or self.arrangement.selected_beat_placements:
+            self.arrangement.copy_selection()
+        # Otherwise try piano roll
+        elif self._current_editor == 'piano_roll':
             self.piano_roll._copy_to_clipboard()
         # TODO: Add beat_grid copy support when implemented
 
     def _on_cut(self):
-        if self._current_editor == 'piano_roll':
+        # Check if arranger has a selection
+        if self.arrangement.selected_placements or self.arrangement.selected_beat_placements:
+            self.arrangement.cut_selection()
+        # Otherwise try piano roll
+        elif self._current_editor == 'piano_roll':
             self.piano_roll._cut_to_clipboard()
         # TODO: Add beat_grid cut support when implemented
 
     def _on_paste(self):
-        if self._current_editor == 'piano_roll':
+        # Smart paste: check which clipboard has data and prioritize current context
+        piano_has_data = bool(self.piano_roll._clipboard)
+        arrangement_has_data = self.arrangement.clipboard.has_data()
+        
+        # If current editor is piano roll and it has clipboard data, paste there
+        if self._current_editor == 'piano_roll' and piano_has_data:
+            self.piano_roll._paste_from_clipboard()
+        # If current editor is piano roll but only arrangement has data, paste arrangement
+        elif self._current_editor == 'piano_roll' and arrangement_has_data and not piano_has_data:
+            self.arrangement.paste_at_playhead()
+        # If arrangement has data (and we're not in piano roll with data), paste arrangement
+        elif arrangement_has_data:
+            self.arrangement.paste_at_playhead()
+        # Fallback to piano roll if it has data
+        elif piano_has_data:
             self.piano_roll._paste_from_clipboard()
         # TODO: Add beat_grid paste support when implemented
 
@@ -368,7 +453,16 @@ class App(QMainWindow):
         # TODO: Add beat_grid duplicate support when implemented
 
     def _on_select_all(self):
-        if self._current_editor == 'piano_roll':
+        # Check which widget has focus or mouse position
+        focused = self.focusWidget()
+        
+        # If arrangement canvas or no clear focus, select arrangement
+        if focused == self.arrangement.canvas_widget or \
+           isinstance(focused, type(self.arrangement.canvas_widget)) or \
+           (self.arrangement.selected_placements or self.arrangement.selected_beat_placements):
+            self.arrangement.select_all()
+        # Otherwise piano roll
+        elif self._current_editor == 'piano_roll':
             pat = self.state.find_pattern(self.state.sel_pat)
             if pat:
                 self.piano_roll._selected = set(range(len(pat.notes)))
@@ -376,7 +470,11 @@ class App(QMainWindow):
         # TODO: Add beat_grid select all support when implemented
 
     def _on_delete(self):
-        if self._current_editor == 'piano_roll':
+        # Check if arranger has a selection
+        if self.arrangement.selected_placements or self.arrangement.selected_beat_placements:
+            self.arrangement.delete_selection()
+        # Otherwise try piano roll
+        elif self._current_editor == 'piano_roll':
             self.piano_roll._delete_selected()
         # TODO: Add beat_grid delete support when implemented
 
@@ -434,7 +532,14 @@ class App(QMainWindow):
     def delete_pattern(self, pid):
         """Delete a pattern and its placements."""
         self.state.patterns = [p for p in self.state.patterns if p.id != pid]
+        # Remove placements that reference this pattern
+        deleted_placement_ids = {p.id for p in self.state.placements if p.pattern_id == pid}
         self.state.placements = [p for p in self.state.placements if p.pattern_id != pid]
+        # Clear selection of deleted placements
+        self.arrangement.selected_placements = [
+            p for p in self.arrangement.selected_placements 
+            if p.id not in deleted_placement_ids
+        ]
         if self.state.sel_pat == pid:
             self.state.sel_pat = self.state.patterns[0].id if self.state.patterns else None
         self.state.notify('delete_pattern')
@@ -487,7 +592,14 @@ class App(QMainWindow):
     def delete_beat_pattern(self, pid):
         """Delete a beat pattern and its placements."""
         self.state.beat_patterns = [p for p in self.state.beat_patterns if p.id != pid]
+        # Remove placements that reference this pattern
+        deleted_placement_ids = {p.id for p in self.state.beat_placements if p.pattern_id == pid}
         self.state.beat_placements = [p for p in self.state.beat_placements if p.pattern_id != pid]
+        # Clear selection of deleted placements
+        self.arrangement.selected_beat_placements = [
+            p for p in self.arrangement.selected_beat_placements 
+            if p.id not in deleted_placement_ids
+        ]
         if self.state.sel_beat_pat == pid:
             self.state.sel_beat_pat = (self.state.beat_patterns[0].id
                                        if self.state.beat_patterns else None)
@@ -506,7 +618,14 @@ class App(QMainWindow):
     def delete_track(self, tid):
         """Delete a track and its placements."""
         self.state.tracks = [t for t in self.state.tracks if t.id != tid]
+        # Remove placements on this track
+        deleted_placement_ids = {p.id for p in self.state.placements if p.track_id == tid}
         self.state.placements = [p for p in self.state.placements if p.track_id != tid]
+        # Clear selection of deleted placements
+        self.arrangement.selected_placements = [
+            p for p in self.arrangement.selected_placements 
+            if p.id not in deleted_placement_ids
+        ]
         if self.state.sel_trk == tid:
             self.state.sel_trk = self.state.tracks[0].id if self.state.tracks else None
         self.state.notify('delete_track')
@@ -522,8 +641,15 @@ class App(QMainWindow):
     def delete_beat_track(self, btid):
         """Delete a beat track and its placements."""
         self.state.beat_tracks = [t for t in self.state.beat_tracks if t.id != btid]
+        # Remove placements on this track
+        deleted_placement_ids = {p.id for p in self.state.beat_placements if p.track_id == btid}
         self.state.beat_placements = [p for p in self.state.beat_placements
                                        if p.track_id != btid]
+        # Clear selection of deleted placements
+        self.arrangement.selected_beat_placements = [
+            p for p in self.arrangement.selected_beat_placements 
+            if p.id not in deleted_placement_ids
+        ]
         if self.state.sel_beat_trk == btid:
             self.state.sel_beat_trk = (self.state.beat_tracks[0].id
                                        if self.state.beat_tracks else None)

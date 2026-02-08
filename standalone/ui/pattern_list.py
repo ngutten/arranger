@@ -174,11 +174,21 @@ class PatternList(QFrame):
     def _select_pat(self, pid):
         self.state.sel_pat = pid
         self.state.sel_beat_pat = None
+        # Clear piano roll selection when selecting pattern
+        self.app.piano_roll.clear_selection()
+        # Clear arrangement selection when selecting pattern
+        self.app.arrangement.selected_placements = []
+        self.app.arrangement.selected_beat_placements = []
         self.state.notify('sel_pat')
 
     def _select_beat_pat(self, pid):
         self.state.sel_beat_pat = pid
         self.state.sel_pat = None
+        # Clear piano roll selection when selecting beat pattern
+        self.app.piano_roll.clear_selection()
+        # Clear arrangement selection when selecting pattern
+        self.app.arrangement.selected_placements = []
+        self.app.arrangement.selected_beat_placements = []
         self.state.notify('sel_beat_pat')
 
     def _del_pat(self, pid):

@@ -931,6 +931,10 @@ def _on_click(self, event):
     if self.state.tool == 'edit':
         n, i, is_resize = self._hit_note(x, y)
         
+        # Clear arranger selection when interacting with piano roll
+        self.app.arrangement.selected_placements = []
+        self.app.arrangement.selected_beat_placements = []
+        
         # Shift modifier - marquee select or multi-select
         if modifiers & Qt.ShiftModifier:
             if n:
