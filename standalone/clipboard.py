@@ -1,6 +1,7 @@
-"""Clipboard and marquee selection for arrangement view.
+"""Clipboard and marquee selection for arrangement and piano roll views.
 
-Handles marquee selection, copy, cut, paste of placements.
+Handles marquee selection, copy, cut, paste of placements and notes.
+Maintains separate clipboards for arrangement and piano roll.
 """
 
 import copy
@@ -8,6 +9,10 @@ from dataclasses import dataclass
 from typing import Optional, List, Tuple
 from PySide6.QtCore import QRectF, QPointF
 
+
+# ============================================================================
+# ARRANGEMENT CLIPBOARD
+# ============================================================================
 
 @dataclass
 class ClipboardData:
@@ -222,3 +227,76 @@ def select_placements_in_rect(rect: QRectF, state, bw: float, th: float) -> Tupl
                 selected_bps.append(bp)
                 
     return selected_pls, selected_bps
+
+
+# ============================================================================
+# PIANO ROLL NOTE CLIPBOARD
+# ============================================================================
+
+class NoteClipboard:
+    """Manages clipboard operations for piano roll notes.
+    
+    Separate from ArrangementClipboard to allow independent copy/paste
+    of notes and arrangement placements.
+    """
+    
+    def __init__(self):
+        self.notes: List = []  # List of Note objects
+        
+    def copy(self, notes):
+        """Copy notes to clipboard.
+        
+        Args:
+            notes: List of Note objects to copy
+        """
+        if not notes:
+            return
+            
+        # Import here to avoid circular imports
+        from .state import Note
+        
+        self.notes = [
+            Note(
+                pitch=n.pitch,
+                start=n.start,
+                duration=n.duration,
+                velocity=n.velocity
+            ) for n in notes
+        ]
+        
+        print(f"[NOTE CLIPBOARD] Copied {len(self.notes)} notes")
+        
+    def paste(self):
+        """Get clipboard contents as new Note objects.
+        
+        Returns:
+            List of Note objects (copies of clipboard contents)
+        """
+        if not self.notes:
+            print("[NOTE CLIPBOARD] Nothing to paste")
+            return []
+            
+        # Import here to avoid circular imports
+        from .state import Note
+        
+        # Return copies so clipboard is not modified
+        copied = [
+            Note(
+                pitch=n.pitch,
+                start=n.start,
+                duration=n.duration,
+                velocity=n.velocity
+            ) for n in self.notes
+        ]
+        
+        print(f"[NOTE CLIPBOARD] Pasted {len(copied)} notes")
+        return copied
+        
+    def has_data(self) -> bool:
+        """Check if clipboard has notes."""
+        return len(self.notes) > 0
+        
+    def clear(self):
+        """Clear clipboard."""
+        self.notes = []
+

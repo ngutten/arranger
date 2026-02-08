@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt, QRect, QPoint, QRectF
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QKeyEvent
 
 from ..state import NOTE_NAMES, scale_set, vel_color, Note
+from ..clipboard import NoteClipboard
 
 
 class PianoRoll(QFrame):
@@ -32,7 +33,7 @@ class PianoRoll(QFrame):
         self._marquee_start = None  # QPoint for marquee selection
         self._ghost_notes = []  # List of Note objects in ghost/paste mode
         self._ghost_offset = None  # (dx, dy) offset from original positions
-        self._clipboard = []  # List of Note objects
+        self._note_clipboard = NoteClipboard()
         
         # TODO: Implement undo/redo stack
         # self._undo_stack = []
@@ -223,17 +224,12 @@ class PianoRoll(QFrame):
         if not pat or not self._selected:
             return
         
-        self._clipboard = []
+        notes_to_copy = []
         for idx in sorted(self._selected):
             if 0 <= idx < len(pat.notes):
-                n = pat.notes[idx]
-                # Store as a copy
-                self._clipboard.append(Note(
-                    pitch=n.pitch,
-                    start=n.start,
-                    duration=n.duration,
-                    velocity=n.velocity
-                ))
+                notes_to_copy.append(pat.notes[idx])
+        
+        self._note_clipboard.copy(notes_to_copy)
     
     def _cut_to_clipboard(self):
         """Cut selected notes (copy + delete), enter ghost mode."""
@@ -251,12 +247,7 @@ class PianoRoll(QFrame):
         self._selected.clear()
         
         # Enter ghost mode immediately with clipboard contents
-        self._ghost_notes = [Note(
-            pitch=n.pitch,
-            start=n.start,
-            duration=n.duration,
-            velocity=n.velocity
-        ) for n in self._clipboard]
+        self._ghost_notes = self._note_clipboard.paste()
         self._ghost_offset = (0, 0)
         
         self.state.notify('note_edit')
@@ -264,15 +255,10 @@ class PianoRoll(QFrame):
     
     def _paste_from_clipboard(self):
         """Enter ghost mode with clipboard contents."""
-        if not self._clipboard:
+        if not self._note_clipboard.has_data():
             return
         
-        self._ghost_notes = [Note(
-            pitch=n.pitch,
-            start=n.start,
-            duration=n.duration,
-            velocity=n.velocity
-        ) for n in self._clipboard]
+        self._ghost_notes = self._note_clipboard.paste()
         self._ghost_offset = (0, 0)
         self.refresh()
     
@@ -294,7 +280,7 @@ class PianoRoll(QFrame):
         
         # Add duplicates immediately (no ghost mode for Ctrl+D)
         new_indices = []
-        for note in self._clipboard:
+        for note in self._note_clipboard.notes:
             new_note = Note(
                 pitch=note.pitch,
                 start=note.start + offset_beats,

@@ -430,7 +430,7 @@ class App(QMainWindow):
 
     def _on_paste(self):
         # Smart paste: check which clipboard has data and prioritize current context
-        piano_has_data = bool(self.piano_roll._clipboard)
+        piano_has_data = self.piano_roll._note_clipboard.has_data()
         arrangement_has_data = self.arrangement.clipboard.has_data()
         
         # If current editor is piano roll and it has clipboard data, paste there
