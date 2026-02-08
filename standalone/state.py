@@ -331,7 +331,7 @@ class AppState:
         self.sel_beat_pl: Optional[int] = None
 
         # Editing state
-        self.tool: str = 'draw'
+        self.tool: str = 'edit'
         self.note_len: str = '0.25'
         self.last_note_len: float = 0.25
         self.default_vel: int = 100

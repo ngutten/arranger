@@ -2,8 +2,8 @@
 
 from PySide6.QtWidgets import (QFrame, QWidget, QScrollArea, QLabel, QPushButton,
                                 QComboBox, QSlider, QVBoxLayout, QHBoxLayout)
-from PySide6.QtCore import Qt, QRect, QPoint
-from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont
+from PySide6.QtCore import Qt, QRect, QPoint, QRectF
+from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QKeyEvent
 
 from ..state import NOTE_NAMES, scale_set, vel_color, Note
 
@@ -24,8 +24,19 @@ class PianoRoll(QFrame):
         # Interaction state
         self._drag_note = None
         self._drag_offset_x = 0
+        self._drag_start_pos = None  # QPoint to track initial click position for deadzone
         self._resize_note = None
         self._selected = set()
+        
+        # New interaction states
+        self._marquee_start = None  # QPoint for marquee selection
+        self._ghost_notes = []  # List of Note objects in ghost/paste mode
+        self._ghost_offset = None  # (dx, dy) offset from original positions
+        self._clipboard = []  # List of Note objects
+        
+        # TODO: Implement undo/redo stack
+        # self._undo_stack = []
+        # self._redo_stack = []
 
         self._build()
 
@@ -58,21 +69,16 @@ class PianoRoll(QFrame):
         self.note_len_cb.currentTextChanged.connect(self._on_note_len)
         hdr_layout.addWidget(self.note_len_cb)
 
-        # Tool buttons
-        self.draw_btn = QPushButton('Draw')
-        self.draw_btn.setCheckable(True)
-        self.draw_btn.clicked.connect(lambda: self._set_tool('draw'))
-        hdr_layout.addWidget(self.draw_btn)
+        # Tool buttons - just Edit and Slice now
+        self.edit_btn = QPushButton('Edit')
+        self.edit_btn.setCheckable(True)
+        self.edit_btn.clicked.connect(lambda: self._set_tool('edit'))
+        hdr_layout.addWidget(self.edit_btn)
 
-        self.sel_btn = QPushButton('Sel')
-        self.sel_btn.setCheckable(True)
-        self.sel_btn.clicked.connect(lambda: self._set_tool('select'))
-        hdr_layout.addWidget(self.sel_btn)
-
-        self.del_btn = QPushButton('Del')
-        self.del_btn.setCheckable(True)
-        self.del_btn.clicked.connect(lambda: self._set_tool('erase'))
-        hdr_layout.addWidget(self.del_btn)
+        self.slice_btn = QPushButton('Slice')
+        self.slice_btn.setCheckable(True)
+        self.slice_btn.clicked.connect(lambda: self._set_tool('slice'))
+        hdr_layout.addWidget(self.slice_btn)
 
         # Velocity slider
         hdr_layout.addWidget(QLabel('Vel'))
@@ -130,6 +136,9 @@ class PianoRoll(QFrame):
 
         body.addLayout(right)
         layout.addLayout(body)
+        
+        # Set focus policy to receive keyboard events
+        self.setFocusPolicy(Qt.StrongFocus)
 
     def _on_note_len(self, text):
         self.state.note_len = text
@@ -139,13 +148,21 @@ class PianoRoll(QFrame):
         self._update_tool_buttons()
 
     def _update_tool_buttons(self):
-        self.draw_btn.setChecked(self.state.tool == 'draw')
-        self.sel_btn.setChecked(self.state.tool == 'select')
-        self.del_btn.setChecked(self.state.tool == 'erase')
+        self.edit_btn.setChecked(self.state.tool == 'edit')
+        self.slice_btn.setChecked(self.state.tool == 'slice')
 
     def _on_vel_change(self, value):
         self.vel_label.setText(str(value))
         self.state.default_vel = value
+        
+        # If notes are selected, update their velocities
+        if self._selected:
+            pat = self.state.find_pattern(self.state.sel_pat)
+            if pat:
+                for idx in self._selected:
+                    if 0 <= idx < len(pat.notes):
+                        pat.notes[idx].velocity = value
+                self.refresh()
 
     def _snap(self, beat):
         return int(beat / self.state.snap) * self.state.snap
@@ -163,6 +180,12 @@ class PianoRoll(QFrame):
                 is_resize = beat > n.start + n.duration - 0.15
                 return n, i, is_resize
         return None, -1, False
+    
+    def _coords_to_beat_pitch(self, x, y):
+        """Convert pixel coordinates to (beat, pitch)."""
+        pitch = self.HI - int(y / self.NH)
+        beat = x / self.BW
+        return beat, pitch
 
     def refresh(self):
         """Redraw the piano roll."""
@@ -192,6 +215,258 @@ class PianoRoll(QFrame):
 
     def clear_selection(self):
         self._selected.clear()
+        self.refresh()
+    
+    def _copy_to_clipboard(self):
+        """Copy selected notes to clipboard."""
+        pat = self.state.find_pattern(self.state.sel_pat)
+        if not pat or not self._selected:
+            return
+        
+        self._clipboard = []
+        for idx in sorted(self._selected):
+            if 0 <= idx < len(pat.notes):
+                n = pat.notes[idx]
+                # Store as a copy
+                self._clipboard.append(Note(
+                    pitch=n.pitch,
+                    start=n.start,
+                    duration=n.duration,
+                    velocity=n.velocity
+                ))
+    
+    def _cut_to_clipboard(self):
+        """Cut selected notes (copy + delete), enter ghost mode."""
+        pat = self.state.find_pattern(self.state.sel_pat)
+        if not pat or not self._selected:
+            return
+        
+        self._copy_to_clipboard()
+        
+        # Delete selected notes (in reverse order to preserve indices)
+        for idx in sorted(self._selected, reverse=True):
+            if 0 <= idx < len(pat.notes):
+                pat.notes.pop(idx)
+        
+        self._selected.clear()
+        
+        # Enter ghost mode immediately with clipboard contents
+        self._ghost_notes = [Note(
+            pitch=n.pitch,
+            start=n.start,
+            duration=n.duration,
+            velocity=n.velocity
+        ) for n in self._clipboard]
+        self._ghost_offset = (0, 0)
+        
+        self.state.notify('note_edit')
+        self.refresh()
+    
+    def _paste_from_clipboard(self):
+        """Enter ghost mode with clipboard contents."""
+        if not self._clipboard:
+            return
+        
+        self._ghost_notes = [Note(
+            pitch=n.pitch,
+            start=n.start,
+            duration=n.duration,
+            velocity=n.velocity
+        ) for n in self._clipboard]
+        self._ghost_offset = (0, 0)
+        self.refresh()
+    
+    def _duplicate_selection(self):
+        """Duplicate selected notes with smart offset."""
+        pat = self.state.find_pattern(self.state.sel_pat)
+        if not pat or not self._selected:
+            return
+        
+        # Copy to clipboard
+        self._copy_to_clipboard()
+        
+        # Calculate smart offset (one bar or pattern snap)
+        offset_beats = max(self.state.snap, 1.0)
+        
+        # Find the extent of selected notes
+        max_end = max(pat.notes[idx].start + pat.notes[idx].duration 
+                     for idx in self._selected if 0 <= idx < len(pat.notes))
+        
+        # Add duplicates immediately (no ghost mode for Ctrl+D)
+        new_indices = []
+        for note in self._clipboard:
+            new_note = Note(
+                pitch=note.pitch,
+                start=note.start + offset_beats,
+                duration=note.duration,
+                velocity=note.velocity
+            )
+            pat.notes.append(new_note)
+            new_indices.append(len(pat.notes) - 1)
+        
+        # Select the new notes
+        self._selected = set(new_indices)
+        
+        self.state.notify('note_add')
+        self.refresh()
+    
+    def _commit_ghost_notes(self, mouse_x, mouse_y):
+        """Commit ghost notes to the pattern at current mouse position."""
+        pat = self.state.find_pattern(self.state.sel_pat)
+        if not pat or not self._ghost_notes:
+            return
+        
+        # Calculate base position from mouse
+        beat, pitch = self._coords_to_beat_pitch(mouse_x, mouse_y)
+        
+        # Find the min start and pitch from ghost notes to use as anchor
+        if self._ghost_notes:
+            min_start = min(n.start for n in self._ghost_notes)
+            min_pitch = min(n.pitch for n in self._ghost_notes)
+            
+            # Calculate offset to place notes relative to cursor
+            beat_offset = self._snap(beat) - min_start
+            pitch_offset = pitch - min_pitch
+            
+            # Add notes to pattern
+            new_indices = []
+            for note in self._ghost_notes:
+                new_note = Note(
+                    pitch=note.pitch + pitch_offset,
+                    start=note.start + beat_offset,
+                    duration=note.duration,
+                    velocity=note.velocity
+                )
+                # Clamp to valid pitch range
+                new_note.pitch = max(self.LO, min(self.HI, new_note.pitch))
+                new_note.start = max(0, new_note.start)
+                
+                pat.notes.append(new_note)
+                new_indices.append(len(pat.notes) - 1)
+            
+            # Select the new notes
+            self._selected = set(new_indices)
+        
+        # Exit ghost mode
+        self._ghost_notes = []
+        self._ghost_offset = None
+        
+        self.state.notify('note_add')
+        self.refresh()
+    
+    def _cancel_ghost_mode(self):
+        """Cancel ghost mode without placing notes."""
+        self._ghost_notes = []
+        self._ghost_offset = None
+        self.refresh()
+    
+    def _delete_selected(self):
+        """Delete all selected notes."""
+        pat = self.state.find_pattern(self.state.sel_pat)
+        if not pat or not self._selected:
+            return
+        
+        # Delete in reverse order to preserve indices
+        for idx in sorted(self._selected, reverse=True):
+            if 0 <= idx < len(pat.notes):
+                pat.notes.pop(idx)
+        
+        self._selected.clear()
+        self.state.notify('note_edit')
+        self.refresh()
+    
+    def _merge_selected_notes(self):
+        """Merge two selected adjacent notes at the same pitch."""
+        pat = self.state.find_pattern(self.state.sel_pat)
+        if not pat or len(self._selected) != 2:
+            return
+        
+        # Get the two selected notes
+        indices = sorted(self._selected)
+        idx1, idx2 = indices[0], indices[1]
+        
+        if idx1 >= len(pat.notes) or idx2 >= len(pat.notes):
+            return
+        
+        n1, n2 = pat.notes[idx1], pat.notes[idx2]
+        
+        # Must be same pitch
+        if n1.pitch != n2.pitch:
+            return
+        
+        # Ensure n1 is the earlier note
+        if n1.start > n2.start:
+            n1, n2 = n2, n1
+            idx1, idx2 = idx2, idx1
+        
+        # Check if they're adjacent or overlapping
+        # Merge by extending n1 to cover both notes and deleting n2
+        end1 = n1.start + n1.duration
+        end2 = n2.start + n2.duration
+        
+        n1.duration = max(end1, end2) - n1.start
+        
+        # Delete n2 (the later index)
+        pat.notes.pop(idx2)
+        
+        # Update selection to just the merged note
+        self._selected = {idx1}
+        
+        self.state.notify('note_edit')
+        self.refresh()
+    
+    def keyPressEvent(self, event: QKeyEvent):
+        """Handle keyboard shortcuts."""
+        modifiers = event.modifiers()
+        key = event.key()
+        
+        # Escape - clear selection or cancel ghost mode
+        if key == Qt.Key_Escape:
+            if self._ghost_notes:
+                self._cancel_ghost_mode()
+            else:
+                self.clear_selection()
+            return
+        
+        # Ctrl/Cmd + C - Copy
+        if (modifiers & Qt.ControlModifier) and key == Qt.Key_C:
+            self._copy_to_clipboard()
+            return
+        
+        # Ctrl/Cmd + X - Cut
+        if (modifiers & Qt.ControlModifier) and key == Qt.Key_X:
+            self._cut_to_clipboard()
+            return
+        
+        # Ctrl/Cmd + V - Paste
+        if (modifiers & Qt.ControlModifier) and key == Qt.Key_V:
+            self._paste_from_clipboard()
+            return
+        
+        # Ctrl/Cmd + D - Duplicate
+        if (modifiers & Qt.ControlModifier) and key == Qt.Key_D:
+            self._duplicate_selection()
+            return
+        
+        # Ctrl/Cmd + A - Select all
+        if (modifiers & Qt.ControlModifier) and key == Qt.Key_A:
+            pat = self.state.find_pattern(self.state.sel_pat)
+            if pat:
+                self._selected = set(range(len(pat.notes)))
+                self.refresh()
+            return
+        
+        # Delete or Backspace - Delete selected
+        if key in (Qt.Key_Delete, Qt.Key_Backspace):
+            self._delete_selected()
+            return
+        
+        # M - Merge selected notes
+        if key == Qt.Key_M:
+            self._merge_selected_notes()
+            return
+        
+        super().keyPressEvent(event)
 
 
 class PianoKeysWidget(QWidget):
@@ -253,8 +528,22 @@ class PianoGridWidget(QWidget):
         super().__init__(parent)
         self.parent_roll = parent
         self._bg_note_fade = {}  # (pitch, pattern_id) -> fade_level (0.0-1.0)
+        self._slice_hover_pos = None  # (note_idx, beat) for slice mode preview
+        
+        # Enable keyboard focus
+        self.setFocusPolicy(Qt.StrongFocus)
+        
+        # Enable mouse tracking to receive move events without button press
+        self.setMouseTracking(True)
+    
+    def keyPressEvent(self, event):
+        """Forward keyboard events to parent roll."""
+        self.parent_roll.keyPressEvent(event)
 
     def mousePressEvent(self, event):
+        # Ensure grid widget has keyboard focus
+        self.setFocus()
+        
         if event.button() == Qt.LeftButton:
             self.parent_roll._on_click(event)
         elif event.button() == Qt.RightButton:
@@ -263,9 +552,30 @@ class PianoGridWidget(QWidget):
     def mouseMoveEvent(self, event):
         if event.buttons() & Qt.LeftButton:
             self.parent_roll._on_drag(event)
+        else:
+            # Update slice preview
+            if self.parent_roll.state.tool == 'slice':
+                x, y = event.pos().x(), event.pos().y()
+                n, i, _ = self.parent_roll._hit_note(x, y)
+                if n:
+                    beat, _ = self.parent_roll._coords_to_beat_pitch(x, y)
+                    self._slice_hover_pos = (i, beat)
+                else:
+                    self._slice_hover_pos = None
+                self.update()
+        
+        # Always update ghost note position when ghost notes are active
+        if self.parent_roll._ghost_notes:
+            self.update()
 
     def mouseReleaseEvent(self, event):
         self.parent_roll._on_release(event)
+    
+    def leaveEvent(self, event):
+        """Clear slice preview when mouse leaves widget."""
+        if self._slice_hover_pos:
+            self._slice_hover_pos = None
+            self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -325,34 +635,23 @@ class PianoGridWidget(QWidget):
         if not pat:
             return
 
-        # Background notes (other patterns) - with three-state overlay control
-        active_notes = set()  # (pitch, pattern_id)
+        # Background notes (other patterns) - kept from original
+        active_notes = set()
         bg_notes = []
         
-        # Smart placement: find first overlap between current pattern and other patterns
         def find_smart_offset(current_pat_id, other_pat_id):
-            """
-            Find the offset to align first overlap in pattern-relative coordinates.
-            
-            Returns the position in the current pattern's timeline where the other 
-            pattern's t=0 should appear. Returns 0.0 if no overlap found.
-            
-            Example: If Pattern 1 is at arr[4-16] and Pattern 2 is at arr[8-12],
-            then when viewing Pattern 1, we want Pattern 2's t=0 to appear at 
-            Pattern 1's t=4 (since arr_8 - arr_4 = 4).
-            """
+            """Find the offset to align first overlap in pattern-relative coordinates."""
             curr_pls = [pl for pl in s.placements if pl.pattern_id == current_pat_id]
             other_pls = [pl for pl in s.placements if pl.pattern_id == other_pat_id]
             
             if not curr_pls or not other_pls:
-                return 0.0  # No placements, use t=0
+                return 0.0
             
             curr_pat = s.find_pattern(current_pat_id)
             other_pat = s.find_pattern(other_pat_id)
             if not curr_pat or not other_pat:
                 return 0.0
             
-            # Find first overlapping region
             for curr_pl in sorted(curr_pls, key=lambda p: p.time):
                 curr_reps = curr_pl.repeats or 1
                 for curr_rep in range(curr_reps):
@@ -365,143 +664,66 @@ class PianoGridWidget(QWidget):
                             other_arr_start = other_pl.time + other_rep * other_pat.length
                             other_arr_end = other_arr_start + other_pat.length
                             
-                            # Check for overlap
                             if not (curr_arr_end <= other_arr_start or other_arr_end <= curr_arr_start):
-                                # Found overlap!
-                                # other_pattern's t=0 is at arrangement beat other_arr_start
-                                # current_pattern's t=0 is at arrangement beat curr_arr_start
-                                # In pattern coordinates: (other_arr_start - curr_arr_start)
                                 return other_arr_start - curr_arr_start
             
-            return 0.0  # No overlap found, use t=0
+            return 0.0
         
-        # Collect notes to display based on each pattern's overlay_mode
         for pl in s.placements:
             if pl.pattern_id == pat.id:
-                continue  # Skip the current pattern
+                continue
             other_pat = s.find_pattern(pl.pattern_id)
             if not other_pat:
                 continue
             
-            # Check overlay mode
             if other_pat.overlay_mode == 'off':
-                continue  # Skip this pattern entirely
+                continue
             
             t = s.find_track(pl.track_id)
             if not t:
                 continue
             
             transpose = s.compute_transpose(pl)
-            
-            # Calculate smart offset (where other pattern's t=0 appears in current pattern's timeline)
             pattern_offset = find_smart_offset(pat.id, other_pat.id)
             
             if other_pat.overlay_mode == 'always':
-                # Show all notes from all placements/repeats at their relative positions
-                reps = pl.repeats or 1
-                for rep in range(reps):
-                    # Calculate where this repeat instance starts in arrangement
-                    arr_start = pl.time + rep * other_pat.length
-                    
-                    # Find the first placement of current pattern for reference
-                    curr_placements = [p for p in s.placements if p.pattern_id == pat.id]
-                    if curr_placements:
-                        curr_first = min(curr_placements, key=lambda p: p.time)
-                        curr_arr_start = curr_first.time
-                        # Position relative to current pattern's first placement
-                        display_offset = arr_start - curr_arr_start
-                    else:
-                        display_offset = arr_start  # Fallback to absolute if no placements
-                    
-                    for n in other_pat.notes:
-                        pitch = n.pitch + transpose
-                        display_start = display_offset + n.start
-                        # Make key unique per repeat instance
-                        key = (pitch, pl.pattern_id, rep, n.start)
+                for n in other_pat.notes:
+                    bg_notes.append({
+                        'pitch': n.pitch + transpose,
+                        'start': n.start + pattern_offset,
+                        'duration': n.duration,
+                        'velocity': n.velocity,
+                        'key': (n.pitch + transpose, other_pat.id),
+                        'fade': None,
+                    })
+            elif other_pat.overlay_mode == 'playing':
+                for n in other_pat.notes:
+                    key = (n.pitch + transpose, other_pat.id)
+                    if key in active_notes:
                         bg_notes.append({
-                            'pitch': pitch,
-                            'start': display_start,
+                            'pitch': n.pitch + transpose,
+                            'start': n.start + pattern_offset,
                             'duration': n.duration,
+                            'velocity': n.velocity,
                             'key': key,
-                            'fade': 1.0,  # Always full opacity
+                            'fade': None,
                         })
-                        
-            elif other_pat.overlay_mode == 'playing' and s.playing and s.playhead is not None:
-                # For playing mode, use current overlaps based on playhead position
-                # Find which placement instances are currently overlapping
-                curr_placements = [p for p in s.placements if p.pattern_id == pat.id]
-                if not curr_placements:
-                    continue
-                
-                # Find current pattern instance that playhead is in
-                curr_pat = s.find_pattern(pat.id)
-                if not curr_pat:
-                    continue
-                    
-                curr_arr_start = None
-                for curr_pl in curr_placements:
-                    curr_reps = curr_pl.repeats or 1
-                    for curr_rep in range(curr_reps):
-                        cstart = curr_pl.time + curr_rep * curr_pat.length
-                        cend = cstart + curr_pat.length
-                        if cstart <= s.playhead < cend:
-                            curr_arr_start = cstart
-                            break
-                    if curr_arr_start is not None:
-                        break
-                
-                if curr_arr_start is None:
-                    continue  # Playhead not in current pattern
-                
-                # Now check other pattern's instances for overlap with current instance
-                reps = pl.repeats or 1
-                for rep in range(reps):
-                    other_arr_start = pl.time + rep * other_pat.length
-                    other_arr_end = other_arr_start + other_pat.length
-                    
-                    # Check if this other pattern instance overlaps current pattern instance
-                    curr_arr_end = curr_arr_start + curr_pat.length
-                    if not (curr_arr_end <= other_arr_start or other_arr_end <= curr_arr_start):
-                        # They overlap - check if notes are currently playing
-                        for n in other_pat.notes:
-                            note_arr_start = other_arr_start + n.start
-                            note_arr_end = note_arr_start + n.duration
-                            if note_arr_start <= s.playhead < note_arr_end:
-                                pitch = n.pitch + transpose
-                                # Display relative to current pattern instance
-                                display_start = (other_arr_start - curr_arr_start) + n.start
-                                key = (pitch, pl.pattern_id, rep)
-                                active_notes.add(key)
-                                bg_notes.append({
-                                    'pitch': pitch,
-                                    'start': display_start,
-                                    'duration': n.duration,
-                                    'key': key,
-                                    'fade': None,  # Will use animated fade
-                                })
         
-        # Update fade levels for 'playing' mode notes (those with fade=None)
-        fade_speed = 0.15
+        # Decay fading notes
+        keys_to_remove = []
+        for key in self._bg_note_fade:
+            self._bg_note_fade[key] = max(0.0, self._bg_note_fade[key] - 0.05)
+            if self._bg_note_fade[key] <= 0:
+                keys_to_remove.append(key)
+        for key in keys_to_remove:
+            del self._bg_note_fade[key]
         
-        # Fade in currently active notes
-        for key in active_notes:
-            self._bg_note_fade[key] = min(1.0, self._bg_note_fade.get(key, 0.0) + fade_speed)
-        
-        # Fade out inactive notes
-        for key in list(self._bg_note_fade.keys()):
-            if key not in active_notes:
-                self._bg_note_fade[key] = max(0.0, self._bg_note_fade[key] - fade_speed)
-                if self._bg_note_fade[key] <= 0:
-                    del self._bg_note_fade[key]
-        
-        # Draw background notes
         for n in bg_notes:
-            if self.parent_roll.LO <= n['pitch'] <= self.parent_roll.HI:
-                x = n['start'] * self.parent_roll.BW
-                y = (self.parent_roll.HI - n['pitch']) * self.parent_roll.NH
-                w = n['duration'] * self.parent_roll.BW
-                
-                # Use provided fade or get from animation dict
+            x = n['start'] * self.parent_roll.BW
+            y = (self.parent_roll.HI - n['pitch']) * self.parent_roll.NH
+            w = n['duration'] * self.parent_roll.BW
+            
+            if 0 <= n['pitch'] <= 127 and -w < x < total_w:
                 if n['fade'] is not None:
                     fade = n['fade']
                 else:
@@ -509,15 +731,14 @@ class PianoGridWidget(QWidget):
                 
                 if fade > 0:
                     painter.setPen(Qt.NoPen)
-                    color = QColor('#cccccc')  # Grey-white
-                    color.setAlpha(int(40 * fade))  # Fade from 0 to 40
+                    color = QColor('#cccccc')
+                    color.setAlpha(int(40 * fade))
                     painter.setBrush(color)
                     painter.drawRect(int(x), y + 1, int(w - 1), self.parent_roll.NH - 2)
         
-        # Continue animating if we have fading notes (only for 'playing' mode)
         if self._bg_note_fade:
             from PySide6.QtCore import QTimer
-            QTimer.singleShot(33, self.update)  # ~30fps animation
+            QTimer.singleShot(33, self.update)
 
         # Notes from current pattern
         for i, n in enumerate(pat.notes):
@@ -545,6 +766,69 @@ class PianoGridWidget(QWidget):
                 painter.setPen(QColor('#fff'))
                 painter.setFont(QFont('TkDefaultFont', 6))
                 painter.drawText(int(x + 2), y + self.parent_roll.NH - 3, f'v{n.velocity}')
+        
+        # Draw slice preview line
+        if self._slice_hover_pos and s.tool == 'slice':
+            note_idx, beat = self._slice_hover_pos
+            if 0 <= note_idx < len(pat.notes):
+                n = pat.notes[note_idx]
+                x = beat * self.parent_roll.BW
+                y = (self.parent_roll.HI - n.pitch) * self.parent_roll.NH
+                
+                painter.setPen(QPen(QColor('#ff0000'), 2))
+                painter.drawLine(int(x), y + 1, int(x), y + self.parent_roll.NH - 1)
+        
+        # Draw marquee selection rectangle
+        if self.parent_roll._marquee_start:
+            from PySide6.QtGui import QCursor
+            cursor_pos = self.mapFromGlobal(QCursor.pos())
+            start = self.parent_roll._marquee_start
+            rect = QRectF(
+                min(start.x(), cursor_pos.x()),
+                min(start.y(), cursor_pos.y()),
+                abs(cursor_pos.x() - start.x()),
+                abs(cursor_pos.y() - start.y())
+            )
+            painter.setPen(QPen(QColor('#ffffff'), 1, Qt.DashLine))
+            painter.setBrush(QColor(255, 255, 255, 30))
+            painter.drawRect(rect)
+        
+        # Draw ghost notes (semi-transparent)
+        if self.parent_roll._ghost_notes:
+            from PySide6.QtGui import QCursor
+            cursor_pos = self.mapFromGlobal(QCursor.pos())
+            
+            # Calculate offset from first note
+            if self.parent_roll._ghost_notes:
+                min_start = min(n.start for n in self.parent_roll._ghost_notes)
+                min_pitch = min(n.pitch for n in self.parent_roll._ghost_notes)
+                
+                cursor_beat, cursor_pitch = self.parent_roll._coords_to_beat_pitch(
+                    cursor_pos.x(), cursor_pos.y()
+                )
+                snapped_beat = self.parent_roll._snap(cursor_beat)
+                
+                beat_offset = snapped_beat - min_start
+                pitch_offset = cursor_pitch - min_pitch
+                
+                for n in self.parent_roll._ghost_notes:
+                    ghost_pitch = n.pitch + pitch_offset
+                    ghost_start = n.start + beat_offset
+                    
+                    # Clamp to valid range
+                    if ghost_pitch < self.parent_roll.LO or ghost_pitch > self.parent_roll.HI:
+                        continue
+                    
+                    x = ghost_start * self.parent_roll.BW
+                    y = (self.parent_roll.HI - ghost_pitch) * self.parent_roll.NH
+                    w = n.duration * self.parent_roll.BW
+                    
+                    # Draw semi-transparent
+                    color = QColor(vel_color(n.velocity))
+                    color.setAlpha(128)
+                    painter.setPen(QPen(QColor('#ffffff'), 1, Qt.DashLine))
+                    painter.setBrush(color)
+                    painter.drawRect(int(x), y + 1, int(w - 1), self.parent_roll.NH - 2)
 
 
 class VelocityWidget(QWidget):
@@ -575,6 +859,17 @@ class VelocityWidget(QWidget):
         x = event.pos().x()
         y = event.pos().y()
         vel = max(1, min(127, int((1 - y / 48) * 127)))
+        
+        # If notes are selected, update all of them
+        if self.parent_roll._selected:
+            for idx in self.parent_roll._selected:
+                if 0 <= idx < len(pat.notes):
+                    pat.notes[idx].velocity = vel
+            self.parent_roll.vel_slider.setValue(vel)
+            self.parent_roll.refresh()
+            return
+        
+        # Otherwise, find nearest note
         beat = x / self.parent_roll.BW
         
         best = -1
@@ -614,117 +909,225 @@ class VelocityWidget(QWidget):
             painter.drawRect(int(x), int(48 - h), int(bw), int(h))
 
 
-# Add event handlers to PianoRoll
+# Event handlers for PianoRoll
 def _on_click(self, event):
+    """Handle left mouse button press."""
     pat = self.state.find_pattern(self.state.sel_pat)
     if not pat:
         return
     
     x, y = event.pos().x(), event.pos().y()
-    pitch = self.HI - int(y / self.NH)
-    beat = x / self.BW
-
-    if self.state.tool == 'draw':
+    beat, pitch = self._coords_to_beat_pitch(x, y)
+    modifiers = event.modifiers()
+    
+    # Store initial click position for deadzone check
+    self._drag_start_pos = QPoint(x, y)
+    
+    # If in ghost mode, commit the paste
+    if self._ghost_notes:
+        self._commit_ghost_notes(x, y)
+        return
+    
+    if self.state.tool == 'edit':
         n, i, is_resize = self._hit_note(x, y)
-        if n and is_resize:
-            self._resize_note = n
-        elif n:
-            self._drag_note = n
-            self._drag_offset_x = beat - n.start
-        else:
-            # Create new note
-            vel = self.vel_slider.value()
-            dur = self.state.snap
-            if self.state.note_len == 'snap':
-                dur = self.state.snap
-            elif self.state.note_len == 'last':
-                dur = self.state.last_note_len
-            else:
-                # Parse fraction format
-                text = self.state.note_len
-                try:
-                    if '/' in text:
-                        parts = text.split('/')
-                        dur = float(parts[0]) / float(parts[1])
-                    else:
-                        dur = float(text)
-                except ValueError:
-                    dur = self.state.snap
-            
-            # Use the smaller of snap and note duration for snapping (item 7)
-            snap_value = min(self.state.snap, dur)
-            snap_beat = int(beat / snap_value) * snap_value
-            
-            nn = Note(pitch=pitch, start=snap_beat, duration=dur, velocity=vel)
-            pat.notes.append(nn)
-            # Don't set _resize_note - prevents changing length on initial click (item 8)
-            self.state.last_note_len = dur
-            self.app.play_note(pitch, vel, track_id=self.state.sel_trk)
-            self.state.notify('note_add')
-            self.refresh()
-    elif self.state.tool == 'erase':
-        n, i, _ = self._hit_note(x, y)
-        if n:
-            pat.notes.pop(i)
-            self._selected.discard(i)
-            self.state.notify('note_erase')
-            self.refresh()
-    elif self.state.tool == 'select':
-        n, i, is_resize = self._hit_note(x, y)
-        if n:
-            if event.modifiers() & Qt.ShiftModifier:
+        
+        # Shift modifier - marquee select or multi-select
+        if modifiers & Qt.ShiftModifier:
+            if n:
+                # Multi-select toggle
                 if i in self._selected:
                     self._selected.discard(i)
                 else:
                     self._selected.add(i)
+                self.refresh()
             else:
-                self._selected = {i}
-            if is_resize:
+                # Start marquee selection
+                self._marquee_start = QPoint(x, y)
+        else:
+            # Regular click
+            if n and is_resize:
+                # Resize existing note (but will check deadzone in drag)
                 self._resize_note = n
-            else:
+            elif n:
+                # Select and prepare to drag
+                if i not in self._selected:
+                    self._selected = {i}
                 self._drag_note = n
                 self._drag_offset_x = beat - n.start
-        else:
-            self._selected.clear()
-        self.refresh()
+                self.refresh()
+            else:
+                # Create new note
+                self._selected.clear()
+                vel = self.vel_slider.value()
+                dur = self.state.snap
+                
+                if self.state.note_len == 'snap':
+                    dur = self.state.snap
+                elif self.state.note_len == 'last':
+                    dur = self.state.last_note_len
+                else:
+                    text = self.state.note_len
+                    try:
+                        if '/' in text:
+                            parts = text.split('/')
+                            dur = float(parts[0]) / float(parts[1])
+                        else:
+                            dur = float(text)
+                    except ValueError:
+                        dur = self.state.snap
+                
+                snap_value = min(self.state.snap, dur)
+                snap_beat = int(beat / snap_value) * snap_value
+                
+                nn = Note(pitch=pitch, start=snap_beat, duration=dur, velocity=vel)
+                pat.notes.append(nn)
+                self.state.last_note_len = dur
+                self.app.play_note(pitch, vel, track_id=self.state.sel_trk)
+                self.state.notify('note_add')
+                self.refresh()
+    
+    elif self.state.tool == 'slice':
+        n, i, _ = self._hit_note(x, y)
+        if n:
+            # Split the note at the current beat position
+            if n.start < beat < n.start + n.duration:
+                # Create new note for the right portion
+                right_note = Note(
+                    pitch=n.pitch,
+                    start=beat,
+                    duration=(n.start + n.duration) - beat,
+                    velocity=n.velocity
+                )
+                # Shorten the left portion
+                n.duration = beat - n.start
+                # Add the right portion
+                pat.notes.append(right_note)
+                
+                self.state.notify('note_edit')
+                self.refresh()
 
 def _on_drag(self, event):
+    """Handle mouse drag."""
     pat = self.state.find_pattern(self.state.sel_pat)
     if not pat:
         return
     
     x, y = event.pos().x(), event.pos().y()
-    pitch = self.HI - int(y / self.NH)
-    beat = x / self.BW
-
-    if self._resize_note:
-        self._resize_note.duration = max(self.state.snap,
-                                          self._snap(beat - self._resize_note.start))
-        self.refresh()
-    elif self._drag_note:
-        self._drag_note.start = max(0, self._snap(beat - self._drag_offset_x))
-        self._drag_note.pitch = max(self.LO, min(self.HI, pitch))
-        self.refresh()
+    beat, pitch = self._coords_to_beat_pitch(x, y)
+    
+    # Update ghost note preview
+    if self._ghost_notes:
+        self.grid_widget.update()
+        return
+    
+    # Marquee selection
+    if self._marquee_start:
+        # Update marquee rectangle (drawing happens in paintEvent)
+        self.grid_widget.update()
+        return
+    
+    if self.state.tool == 'edit':
+        # Check deadzone for resize operations (10 pixels)
+        if self._resize_note and self._drag_start_pos:
+            dist = (QPoint(x, y) - self._drag_start_pos).manhattanLength()
+            if dist < 10:
+                # Still in deadzone, don't resize yet
+                return
+            else:
+                # Past deadzone, clear the start position so we don't check again
+                self._drag_start_pos = None
+        
+        if self._resize_note:
+            self._resize_note.duration = max(self.state.snap,
+                                              self._snap(beat - self._resize_note.start))
+            self.refresh()
+        elif self._drag_note:
+            # Check deadzone for drag operations
+            if self._drag_start_pos:
+                dist = (QPoint(x, y) - self._drag_start_pos).manhattanLength()
+                if dist < 10:
+                    # Still in deadzone, don't move yet
+                    return
+                else:
+                    # Past deadzone
+                    self._drag_start_pos = None
+            
+            # Calculate delta from the note we're dragging
+            new_start = max(0, self._snap(beat - self._drag_offset_x))
+            new_pitch = max(self.LO, min(self.HI, pitch))
+            
+            delta_start = new_start - self._drag_note.start
+            delta_pitch = new_pitch - self._drag_note.pitch
+            
+            # Apply delta to all selected notes
+            for idx in self._selected:
+                if 0 <= idx < len(pat.notes):
+                    pat.notes[idx].start = max(0, pat.notes[idx].start + delta_start)
+                    pat.notes[idx].pitch = max(self.LO, min(self.HI, 
+                                                            pat.notes[idx].pitch + delta_pitch))
+            
+            # Update the drag note position for next delta calculation
+            self._drag_note.start = new_start
+            self._drag_note.pitch = new_pitch
+            
+            self.refresh()
 
 def _on_release(self, event):
+    """Handle mouse button release."""
+    # Finalize marquee selection
+    if self._marquee_start:
+        pat = self.state.find_pattern(self.state.sel_pat)
+        if pat:
+            from PySide6.QtGui import QCursor
+            cursor_pos = self.grid_widget.mapFromGlobal(QCursor.pos())
+            start = self._marquee_start
+            
+            # Create selection rectangle
+            min_x = min(start.x(), cursor_pos.x())
+            max_x = max(start.x(), cursor_pos.x())
+            min_y = min(start.y(), cursor_pos.y())
+            max_y = max(start.y(), cursor_pos.y())
+            
+            # Find notes within rectangle
+            for i, n in enumerate(pat.notes):
+                note_x = n.start * self.BW
+                note_y = (self.HI - n.pitch) * self.NH
+                note_w = n.duration * self.BW
+                note_h = self.NH
+                
+                # Check if note overlaps with selection rectangle
+                if (note_x < max_x and note_x + note_w > min_x and
+                    note_y < max_y and note_y + note_h > min_y):
+                    self._selected.add(i)
+        
+        self._marquee_start = None
+        self.refresh()
+        return
+    
     if self._resize_note:
         self.state.last_note_len = self._resize_note.duration
     if self._resize_note or self._drag_note:
         self.state.notify('note_edit')
+    
     self._drag_note = None
     self._resize_note = None
+    self._drag_start_pos = None
 
 def _on_right_click(self, event):
-    """Handle right-click to delete notes."""
+    """Handle right-click."""
     pat = self.state.find_pattern(self.state.sel_pat)
     if not pat:
         return
     
     x, y = event.pos().x(), event.pos().y()
     n, i, _ = self._hit_note(x, y)
+    
     if n:
+        # Delete note
         pat.notes.pop(i)
         self._selected.discard(i)
+        # Adjust selection indices for notes after the deleted one
+        self._selected = {idx - 1 if idx > i else idx for idx in self._selected}
         self.refresh()
         self.state.notify('note_edit')
 

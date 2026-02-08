@@ -251,10 +251,12 @@ class App(QMainWindow):
         """Bind keyboard shortcuts."""
         QShortcut(Qt.Key_Space, self, self._on_space)
         QShortcut(QKeySequence.Copy, self, self._on_copy)
+        QShortcut(QKeySequence.Cut, self, self._on_cut)
         QShortcut(QKeySequence.Paste, self, self._on_paste)
         QShortcut(QKeySequence.SelectAll, self, self._on_select_all)
         QShortcut(QKeySequence.Delete, self, self._on_delete)
         QShortcut(Qt.Key_Backspace, self, self._on_delete)
+        QShortcut(QKeySequence('Ctrl+D'), self, self._on_duplicate)
 
     def _init_state(self):
         """Set up initial state with one pattern and one track."""
@@ -346,20 +348,37 @@ class App(QMainWindow):
         self.toggle_play()
 
     def _on_copy(self):
-        # Copy functionality would go here
-        pass
+        if self._current_editor == 'piano_roll':
+            self.piano_roll._copy_to_clipboard()
+        # TODO: Add beat_grid copy support when implemented
+
+    def _on_cut(self):
+        if self._current_editor == 'piano_roll':
+            self.piano_roll._cut_to_clipboard()
+        # TODO: Add beat_grid cut support when implemented
 
     def _on_paste(self):
-        # Paste functionality would go here
-        pass
+        if self._current_editor == 'piano_roll':
+            self.piano_roll._paste_from_clipboard()
+        # TODO: Add beat_grid paste support when implemented
+
+    def _on_duplicate(self):
+        if self._current_editor == 'piano_roll':
+            self.piano_roll._duplicate_selection()
+        # TODO: Add beat_grid duplicate support when implemented
 
     def _on_select_all(self):
-        # Select all functionality would go here
-        pass
+        if self._current_editor == 'piano_roll':
+            pat = self.state.find_pattern(self.state.sel_pat)
+            if pat:
+                self.piano_roll._selected = set(range(len(pat.notes)))
+                self.piano_roll.refresh()
+        # TODO: Add beat_grid select all support when implemented
 
     def _on_delete(self):
-        # Delete functionality would go here
-        pass
+        if self._current_editor == 'piano_roll':
+            self.piano_roll._delete_selected()
+        # TODO: Add beat_grid delete support when implemented
 
     # ---- Pattern management ----
 
