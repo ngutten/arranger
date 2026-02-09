@@ -14,12 +14,14 @@ from .state import (
     Placement, PALETTE, NOTE_NAMES,
 )
 from .undo import UndoStack, capture_state, restore_state
+from .ops import patterns as pat_ops
+from .ops import tracks as trk_ops
+from .ops import export as export_ops
+from .ops import playback as play_ops
+from .ops import project_io
 from .core.sf2 import SF2Info, scan_directory
 from .core.midi import create_midi
-from .core.audio import (
-    render_fluidsynth, render_basic, wav_to_mp3,
-    generate_preview_tone, render_sample, AudioPlayer,
-)
+from .core.audio import render_fluidsynth, render_basic, AudioPlayer
 from .core.settings import Settings
 
 try:
@@ -323,9 +325,9 @@ class App(QMainWindow):
         sf2_list = scan_directory(self.instruments_dir)
         if sf2_list:
             self.state.sf2 = sf2_list[0]
-            # Load into realtime engine
             if self.engine:
-                sf2_path = sf2_list[0].path if hasattr(sf2_list[0], 'path') else sf2_list[0].get('path')
+                from .ops.export import _get_sf2_path
+                sf2_path = _get_sf2_path(sf2_list[0])
                 if sf2_path:
                     self.engine.load_sf2(sf2_path)
 
@@ -482,20 +484,7 @@ class App(QMainWindow):
 
     def add_pattern(self):
         """Create a new melodic pattern."""
-        dlg = PatternDialog(self, self.state)
-        if dlg.exec():
-            pat = Pattern(
-                id=self.state.new_id(),
-                name=dlg.name,
-                length=dlg.length,
-                notes=[],
-                color=dlg.color,
-                key=dlg.key,
-                scale=dlg.scale,
-            )
-            self.state.patterns.append(pat)
-            self.state.sel_pat = pat.id
-            self.state.notify('add_pattern')
+        pat_ops.add_pattern(self.state)
 
     def edit_pattern(self, pid):
         """Edit an existing pattern's metadata."""
@@ -513,52 +502,19 @@ class App(QMainWindow):
 
     def duplicate_pattern(self, pid):
         """Duplicate a pattern."""
-        pat = self.state.find_pattern(pid)
-        if not pat:
-            return
-        new_pat = Pattern(
-            id=self.state.new_id(),
-            name=f'{pat.name} (copy)',
-            length=pat.length,
-            notes=[n.copy() for n in pat.notes],
-            color=pat.color,
-            key=pat.key,
-            scale=pat.scale,
-        )
-        self.state.patterns.append(new_pat)
-        self.state.sel_pat = new_pat.id
-        self.state.notify('duplicate_pattern')
+        pat_ops.duplicate_pattern(self.state, pid)
 
     def delete_pattern(self, pid):
         """Delete a pattern and its placements."""
-        self.state.patterns = [p for p in self.state.patterns if p.id != pid]
-        # Remove placements that reference this pattern
-        deleted_placement_ids = {p.id for p in self.state.placements if p.pattern_id == pid}
-        self.state.placements = [p for p in self.state.placements if p.pattern_id != pid]
-        # Clear selection of deleted placements
+        deleted_ids = pat_ops.delete_pattern(self.state, pid)
         self.arrangement.selected_placements = [
-            p for p in self.arrangement.selected_placements 
-            if p.id not in deleted_placement_ids
+            p for p in self.arrangement.selected_placements
+            if p.id not in deleted_ids
         ]
-        if self.state.sel_pat == pid:
-            self.state.sel_pat = self.state.patterns[0].id if self.state.patterns else None
-        self.state.notify('delete_pattern')
 
     def add_beat_pattern(self):
         """Create a new beat pattern."""
-        dlg = BeatPatternDialog(self, self.state)
-        if dlg.exec():
-            from .state import BeatPattern
-            pat = BeatPattern(
-                id=self.state.new_id(),
-                name=dlg.name,
-                length=dlg.length,
-                steps={},
-                color=dlg.color,
-            )
-            self.state.beat_patterns.append(pat)
-            self.state.sel_beat_pat = pat.id
-            self.state.notify('add_beat_pattern')
+        pat_ops.add_beat_pattern(self.state)
 
     def edit_beat_pattern(self, pid):
         """Edit an existing beat pattern's metadata."""
@@ -574,107 +530,49 @@ class App(QMainWindow):
 
     def duplicate_beat_pattern(self, pid):
         """Duplicate a beat pattern."""
-        from .state import BeatPattern
-        pat = self.state.find_beat_pattern(pid)
-        if not pat:
-            return
-        new_pat = BeatPattern(
-            id=self.state.new_id(),
-            name=f'{pat.name} (copy)',
-            length=pat.length,
-            steps={k: list(v) for k, v in pat.steps.items()},
-            color=pat.color,
-        )
-        self.state.beat_patterns.append(new_pat)
-        self.state.sel_beat_pat = new_pat.id
-        self.state.notify('duplicate_beat_pattern')
+        pat_ops.duplicate_beat_pattern(self.state, pid)
 
     def delete_beat_pattern(self, pid):
         """Delete a beat pattern and its placements."""
-        self.state.beat_patterns = [p for p in self.state.beat_patterns if p.id != pid]
-        # Remove placements that reference this pattern
-        deleted_placement_ids = {p.id for p in self.state.beat_placements if p.pattern_id == pid}
-        self.state.beat_placements = [p for p in self.state.beat_placements if p.pattern_id != pid]
-        # Clear selection of deleted placements
+        deleted_ids = pat_ops.delete_beat_pattern(self.state, pid)
         self.arrangement.selected_beat_placements = [
-            p for p in self.arrangement.selected_beat_placements 
-            if p.id not in deleted_placement_ids
+            p for p in self.arrangement.selected_beat_placements
+            if p.id not in deleted_ids
         ]
-        if self.state.sel_beat_pat == pid:
-            self.state.sel_beat_pat = (self.state.beat_patterns[0].id
-                                       if self.state.beat_patterns else None)
-        self.state.notify('delete_beat_pattern')
 
     # ---- Track management ----
 
     def add_track(self):
         """Create a new track."""
-        t = Track(id=self.state.new_id(), name=f'Track {len(self.state.tracks) + 1}',
-                  channel=len(self.state.tracks) % 16)
-        self.state.tracks.append(t)
-        self.state.sel_trk = t.id
-        self.state.notify('add_track')
+        trk_ops.add_track(self.state)
 
     def delete_track(self, tid):
         """Delete a track and its placements."""
-        self.state.tracks = [t for t in self.state.tracks if t.id != tid]
-        # Remove placements on this track
-        deleted_placement_ids = {p.id for p in self.state.placements if p.track_id == tid}
-        self.state.placements = [p for p in self.state.placements if p.track_id != tid]
-        # Clear selection of deleted placements
+        deleted_ids = trk_ops.delete_track(self.state, tid)
         self.arrangement.selected_placements = [
-            p for p in self.arrangement.selected_placements 
-            if p.id not in deleted_placement_ids
+            p for p in self.arrangement.selected_placements
+            if p.id not in deleted_ids
         ]
-        if self.state.sel_trk == tid:
-            self.state.sel_trk = self.state.tracks[0].id if self.state.tracks else None
-        self.state.notify('delete_track')
 
     def add_beat_track(self):
         """Create a new beat track."""
-        bt = BeatTrack(id=self.state.new_id(),
-                       name=f'Beat {len(self.state.beat_tracks) + 1}')
-        self.state.beat_tracks.append(bt)
-        self.state.sel_beat_trk = bt.id
-        self.state.notify('add_beat_track')
+        trk_ops.add_beat_track(self.state)
 
     def delete_beat_track(self, btid):
         """Delete a beat track and its placements."""
-        self.state.beat_tracks = [t for t in self.state.beat_tracks if t.id != btid]
-        # Remove placements on this track
-        deleted_placement_ids = {p.id for p in self.state.beat_placements if p.track_id == btid}
-        self.state.beat_placements = [p for p in self.state.beat_placements
-                                       if p.track_id != btid]
-        # Clear selection of deleted placements
+        deleted_ids = trk_ops.delete_beat_track(self.state, btid)
         self.arrangement.selected_beat_placements = [
-            p for p in self.arrangement.selected_beat_placements 
-            if p.id not in deleted_placement_ids
+            p for p in self.arrangement.selected_beat_placements
+            if p.id not in deleted_ids
         ]
-        if self.state.sel_beat_trk == btid:
-            self.state.sel_beat_trk = (self.state.beat_tracks[0].id
-                                       if self.state.beat_tracks else None)
-        self.state.notify('delete_beat_track')
 
     def add_beat_instrument(self):
         """Add an instrument to the beat kit."""
-        inst = BeatInstrument(
-            id=self.state.new_id(),
-            name=f'Inst {len(self.state.beat_kit) + 1}',
-            channel=9,  # Drum channel
-            pitch=36,   # Bass drum
-            velocity=100,
-        )
-        self.state.beat_kit.append(inst)
-        self.state.notify('beat_kit')
+        trk_ops.add_beat_instrument(self.state)
 
     def delete_beat_instrument(self, iid):
         """Remove an instrument from the beat kit."""
-        self.state.beat_kit = [i for i in self.state.beat_kit if i.id != iid]
-        # Remove steps using this instrument from all beat patterns
-        for pat in self.state.beat_patterns:
-            if iid in pat.steps:
-                del pat.steps[iid]
-        self.state.notify('beat_kit')
+        trk_ops.delete_beat_instrument(self.state, iid)
 
     # ---- Soundfont ----
 
@@ -684,10 +582,9 @@ class App(QMainWindow):
         dlg = SF2Dialog(self, self, sf2_list if sf2_list else [])
         if dlg.exec():
             self.state.sf2 = dlg.result
-            # Load into realtime engine
             if self.engine and dlg.result:
-                sf2_path = (dlg.result.path if hasattr(dlg.result, 'path')
-                            else dlg.result.get('path'))
+                from .ops.export import _get_sf2_path
+                sf2_path = _get_sf2_path(dlg.result)
                 if sf2_path:
                     self.engine.load_sf2(sf2_path)
             self.state.notify('sf2_loaded')
@@ -695,100 +592,31 @@ class App(QMainWindow):
     # ---- Playback helpers ----
 
     def play_note(self, pitch, velocity, track_id=None):
-        """Play a single note preview, using track instrument if available."""
-        channel = 0
-        if track_id:
-            t = self.state.find_track(track_id)
-            if t:
-                channel = t.channel
-
-        # Use engine if available
-        if self.engine:
-            self.engine.play_single_note(pitch, velocity, channel, duration=0.5)
-            return
-
-        # Legacy fallback
-        bank, program = 0, 0
-        if track_id:
-            t = self.state.find_track(track_id)
-            if t:
-                bank, program = t.bank, t.program
-        if self.state.sf2:
-            sf2_path = (self.state.sf2.path if hasattr(self.state.sf2, 'path')
-                        else self.state.sf2.get('path'))
-            if sf2_path:
-                try:
-                    wav = render_sample(sf2_path, bank, program, pitch, velocity,
-                                       duration=0.5, channel=channel)
-                    if wav:
-                        self.player.play_async(wav)
-                        return
-                except Exception:
-                    pass
-        wav = generate_preview_tone(pitch, velocity, 0.3)
-        self.player.play_async(wav)
+        """Play a single note preview."""
+        play_ops.play_note(self.state, self.engine, self.player,
+                           pitch, velocity, track_id)
 
     def play_beat_hit(self, inst_id):
         """Play a single beat instrument hit."""
-        inst = next((i for i in self.state.beat_kit if i.id == inst_id), None)
-        if not inst:
-            return
-
-        # Use engine if available
-        if self.engine:
-            # Ensure the instrument's bank/program is set up for non-drum channels
-            if inst.channel != 9:
-                # For non-drum channels, explicitly set the bank/program before playing
-                self.engine._send_cmd('_setup_program', inst.channel, inst.bank, inst.program)
-            self.engine.play_single_note(inst.pitch, inst.velocity,
-                                         inst.channel, duration=0.5)
-            return
-
-        # Legacy fallback
-        sf2_path = None
-        if self.state.sf2:
-            sf2_path = (self.state.sf2.path if hasattr(self.state.sf2, 'path')
-                        else self.state.sf2.get('path'))
-        if sf2_path:
-            wav = render_sample(sf2_path, inst.bank, inst.program, inst.pitch,
-                              inst.velocity, duration=0.5, channel=inst.channel)
-            if wav:
-                self.player.play_async(wav)
-        else:
-            wav = generate_preview_tone(inst.pitch, inst.velocity, 0.3)
-            self.player.play_async(wav)
+        play_ops.play_beat_hit(self.state, self.engine, self.player, inst_id)
 
     def preview_pattern(self):
         """Preview the currently selected pattern."""
-        pat = self.state.find_pattern(self.state.sel_pat)
-        if not pat or not pat.notes:
-            return
+        arr = play_ops.build_pattern_preview(self.state)
+        if arr:
+            self._render_and_play(arr)
 
-        t = self.state.find_track(self.state.sel_trk)
-        if not t:
-            t = Track(id='preview', name='Preview', channel=0,
-                      bank=0, program=0, volume=100)
+    def preview_beat_pattern(self):
+        """Preview the currently selected beat pattern."""
+        arr = play_ops.build_beat_pattern_preview(self.state)
+        if arr:
+            self._render_and_play(arr)
 
-        inst = {
-            'name': t.name, 'channel': t.channel,
-            'bank': t.bank, 'program': t.program,
-            'volume': t.volume,
-        }
-
-        notes = [{'pitch': n.pitch, 'start': n.start, 'duration': n.duration,
-                  'velocity': n.velocity} for n in pat.notes]
-
-        tracks = [{
-            **inst,
-            'placements': [{
-                'pattern': {'notes': notes, 'length': pat.length},
-                'time': 0, 'transpose': 0, 'repeats': 1,
-            }]
-        }]
-
-        arr = {'bpm': self.state.bpm, 'tsNum': self.state.ts_num,
-               'tsDen': self.state.ts_den, 'tracks': tracks}
-        self._render_and_play(arr)
+    def _render_and_play(self, arr):
+        """Render an arrangement and play it in a background thread."""
+        from .ops.export import _get_sf2_path
+        play_ops.render_and_play_arr(
+            arr, _get_sf2_path(self.state.sf2), self.player)
 
     # ---- Pattern/Beat Pattern Dialogs ----
     
@@ -804,63 +632,6 @@ class App(QMainWindow):
         dialog.exec()
         self._refresh_all()
 
-    def preview_beat_pattern(self):
-        """Preview the currently selected beat pattern."""
-        pat = self.state.find_beat_pattern(self.state.sel_beat_pat)
-        if not pat or not pat.grid:
-            return
-
-        tracks = []
-        for inst in self.state.beat_kit:
-            grid = pat.grid.get(inst.id)
-            if not grid:
-                continue
-            notes = []
-            # Convert grid to notes
-            for step_idx, vel in enumerate(grid):
-                if vel > 0:
-                    step_pos = step_idx / pat.subdivision
-                    notes.append({
-                        'pitch': inst.pitch,
-                        'start': step_pos,
-                        'duration': 0.25,
-                        'velocity': vel,
-                    })
-            if notes:
-                tracks.append({
-                    'name': inst.name, 'channel': inst.channel,
-                    'bank': inst.bank, 'program': inst.program,
-                    'volume': 100,
-                    'placements': [{
-                        'pattern': {'notes': notes, 'length': pat.length},
-                        'time': 0, 'transpose': 0, 'repeats': 1,
-                    }]
-                })
-
-        if not tracks:
-            return
-
-        arr = {'bpm': self.state.bpm, 'tsNum': self.state.ts_num,
-               'tsDen': self.state.ts_den, 'tracks': tracks}
-        self._render_and_play(arr)
-
-    def _render_and_play(self, arr):
-        """Render an arrangement and play it in a background thread."""
-        def work():
-            midi = create_midi(arr)
-            wav = None
-            if self.state.sf2:
-                sf2_path = (self.state.sf2.path if hasattr(self.state.sf2, 'path')
-                            else self.state.sf2.get('path'))
-                if sf2_path:
-                    wav = render_fluidsynth(midi, sf2_path)
-            if wav is None:
-                wav = render_basic(arr)
-            if wav:
-                self.player.play_async(wav)
-
-        threading.Thread(target=work, daemon=True).start()
-
     # ---- Playback ----
 
     def toggle_play(self):
@@ -872,45 +643,32 @@ class App(QMainWindow):
     def toggle_loop(self):
         self.state.looping = not self.state.looping
         if self.state.looping:
-            # Initialize loop markers if not set
             if self.state.loop_end is None:
-                from .core.engine import compute_arrangement_length
-                length = compute_arrangement_length(self.state)
+                length = play_ops.compute_arrangement_length(self.state)
                 if length > 0:
                     self.state.loop_start = 0.0
                     self.state.loop_end = length
                 else:
-                    # Default to first 4 beats
                     self.state.loop_start = 0.0
                     self.state.loop_end = float(self.state.ts_num)
-        self._sync_loop_to_engine()
+        play_ops.sync_loop_to_engine(self.state, self.engine)
         self.topbar.refresh()
         self.arrangement.refresh()
 
     def _sync_loop_to_engine(self):
         """Push current loop state to the engine."""
-        if not self.engine:
-            return
-        if self.state.looping and self.state.loop_end is not None:
-            ls = self.state.loop_start if self.state.loop_start is not None else 0.0
-            self.engine.set_loop(ls, self.state.loop_end)
-        else:
-            self.engine.set_loop(None, None)
+        play_ops.sync_loop_to_engine(self.state, self.engine)
 
     def start_play(self):
         """Start full arrangement playback."""
-        # Use realtime engine if available
         if self.engine:
             self._start_play_engine()
             return
-        # Legacy fallback
         self._start_play_legacy()
 
     def _start_play_engine(self):
         """Start playback via the realtime audio engine."""
-        from .core.engine import compute_arrangement_length
-
-        max_beat = compute_arrangement_length(self.state)
+        max_beat = play_ops.compute_arrangement_length(self.state)
         if max_beat == 0:
             return
 
@@ -919,15 +677,12 @@ class App(QMainWindow):
         self._playback_max_beat = max_beat
         self.topbar.refresh()
 
-        # Sync loop state
-        self._sync_loop_to_engine()
+        play_ops.sync_loop_to_engine(self.state, self.engine)
 
-        # Build schedule and start
         self.engine.mark_dirty()
         self.engine.seek(0.0)
         self.engine.play()
 
-        # Start playhead animation timer
         self._start_playhead_timer()
 
     def _start_playhead_timer(self):
@@ -972,16 +727,7 @@ class App(QMainWindow):
         if not has_notes:
             return
 
-        max_beat = 0
-        for pl in self.state.placements:
-            pat = self.state.find_pattern(pl.pattern_id)
-            if pat:
-                max_beat = max(max_beat, pl.time + pat.length * (pl.repeats or 1))
-        for bp in self.state.beat_placements:
-            pat = self.state.find_beat_pattern(bp.pattern_id)
-            if pat:
-                max_beat = max(max_beat, bp.time + pat.length * (bp.repeats or 1))
-
+        max_beat = play_ops.compute_arrangement_length(self.state)
         if max_beat == 0:
             return
 
@@ -990,19 +736,18 @@ class App(QMainWindow):
         self._playback_max_beat = max_beat
         self.topbar.refresh()
 
+        from .ops.export import _get_sf2_path
+        sf2_path = _get_sf2_path(self.state.sf2)
+
         def render_and_start():
             midi = create_midi(arr)
             wav = None
-            if self.state.sf2:
-                sf2_path = (self.state.sf2.path if hasattr(self.state.sf2, 'path')
-                            else self.state.sf2.get('path'))
-                if sf2_path:
-                    wav = render_fluidsynth(midi, sf2_path)
+            if sf2_path:
+                wav = render_fluidsynth(midi, sf2_path)
             if wav is None:
                 wav = render_basic(arr)
             if wav:
                 self.player.play_wav(wav)
-                # Start wall-clock playhead animation
                 QTimer.singleShot(0, self._start_legacy_playhead)
 
         threading.Thread(target=render_and_start, daemon=True).start()
@@ -1045,13 +790,11 @@ class App(QMainWindow):
 
     def do_export(self, fmt):
         """Export the arrangement as MIDI, WAV, or MP3."""
-        arr = self.state.build_arrangement()
-        midi = create_midi(arr)
-
         if fmt == 'midi':
             path, _ = QFileDialog.getSaveFileName(
                 self, 'Export MIDI', '', 'MIDI files (*.mid);;All files (*.*)')
             if path:
+                midi = export_ops.export_midi(self.state)
                 with open(path, 'wb') as f:
                     f.write(midi)
                 QMessageBox.information(self, 'Export', f'MIDI exported to {path}')
@@ -1068,39 +811,24 @@ class App(QMainWindow):
         if not path:
             return
 
+        engine = self.engine
+
         def render_work():
-            wav = None
-
-            # Use engine offline rendering if available (guarantees preview == export)
-            if self.engine:
-                wav = self.engine.render_offline_wav()
-
-            # Legacy fallback
-            if wav is None:
-                if self.state.sf2:
-                    sf2_path = (self.state.sf2.path if hasattr(self.state.sf2, 'path')
-                                else self.state.sf2.get('path'))
-                    if sf2_path:
-                        wav = render_fluidsynth(midi, sf2_path)
-                if wav is None:
-                    wav = render_basic(arr)
-
-            if wav is None:
-                QTimer.singleShot(0, lambda: QMessageBox.critical(
-                    self, 'Error', 'No notes to render'))
-                return
-
             if fmt == 'mp3':
-                mp3 = wav_to_mp3(wav)
-                if mp3:
-                    with open(path, 'wb') as f:
-                        f.write(mp3)
-                else:
+                data = export_ops.render_mp3(self.state, engine)
+                if data is None:
                     QTimer.singleShot(0, lambda: QMessageBox.critical(
                         self, 'Error', 'ffmpeg not available for MP3 conversion'))
+                    return
             else:
-                with open(path, 'wb') as f:
-                    f.write(wav)
+                data = export_ops.render_wav(self.state, engine)
+                if data is None:
+                    QTimer.singleShot(0, lambda: QMessageBox.critical(
+                        self, 'Error', 'No notes to render'))
+                    return
+
+            with open(path, 'wb') as f:
+                f.write(data)
 
         threading.Thread(target=render_work, daemon=True).start()
 
@@ -1110,27 +838,19 @@ class App(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(
             self, 'Save Project', '', 'JSON files (*.json);;All files (*.*)')
         if path:
-            with open(path, 'w') as f:
-                f.write(self.state.to_json())
-            self.state._project_path = path
+            project_io.save_project(self.state, path)
 
     def load_project(self):
         path, _ = QFileDialog.getOpenFileName(
             self, 'Load Project', '', 'JSON files (*.json);;All files (*.*)')
         if path:
             try:
-                with open(path) as f:
-                    self.state.load_json(f.read())
-                self.state._project_path = path
-                # Try to reload SF2 if path hint exists
-                if hasattr(self.state, '_sf2_path_hint') and self.state._sf2_path_hint:
-                    try:
-                        self.state.sf2 = SF2Info(self.state._sf2_path_hint)
-                        # Load into engine
-                        if self.engine:
-                            self.engine.load_sf2(self.state._sf2_path_hint)
-                    except Exception:
-                        pass
+                def sf2_loader(sf2_path):
+                    self.state.sf2 = SF2Info(sf2_path)
+                    if self.engine:
+                        self.engine.load_sf2(sf2_path)
+
+                project_io.load_project(self.state, path, sf2_loader)
                 self.piano_roll.clear_selection()
                 self.topbar.refresh()
                 self._refresh_all()

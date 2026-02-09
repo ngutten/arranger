@@ -93,40 +93,12 @@ class PatternList(QFrame):
         layout.addWidget(self.beat_scroll, stretch=1)
 
     def _new_pattern(self):
-        from ..state import Pattern
-        # Create pattern with defaults directly
-        pat = Pattern(
-            id=self.state.new_id(), 
-            name=f'Pattern {len(self.state.patterns) + 1}',
-            length=self.state.ts_num,
-            notes=[], 
-            color=PALETTE[len(self.state.patterns) % len(PALETTE)],
-            key='C',
-            scale='major',
-        )
-        self.state.patterns.append(pat)
-        self.state.sel_pat = pat.id
-        self.state.sel_beat_pat = None
-        self.state.notify('pattern_dialog')
+        from ..ops.patterns import add_pattern
+        add_pattern(self.state)
 
     def _new_beat_pattern(self):
-        from ..state import BeatPattern
-        # Create beat pattern with defaults directly
-        grid = {}
-        for inst in self.state.beat_kit:
-            grid[inst.id] = [0] * (self.state.ts_num * 4)
-        pat = BeatPattern(
-            id=self.state.new_id(),
-            name=f'Beat {len(self.state.beat_patterns) + 1}',
-            length=self.state.ts_num,
-            subdivision=4,
-            color=PALETTE[len(self.state.beat_patterns) % len(PALETTE)],
-            grid=grid,
-        )
-        self.state.beat_patterns.append(pat)
-        self.state.sel_beat_pat = pat.id
-        self.state.sel_pat = None
-        self.state.notify('beat_pattern_dialog')
+        from ..ops.patterns import add_beat_pattern
+        add_beat_pattern(self.state)
 
     def refresh(self):
         """Rebuild pattern lists from state."""
@@ -192,45 +164,20 @@ class PatternList(QFrame):
         self.state.notify('sel_beat_pat')
 
     def _del_pat(self, pid):
-        self.state.patterns = [p for p in self.state.patterns if p.id != pid]
-        self.state.placements = [p for p in self.state.placements if p.pattern_id != pid]
-        if self.state.sel_pat == pid:
-            self.state.sel_pat = None
-        self.state.notify('del_pat')
+        from ..ops.patterns import delete_pattern
+        delete_pattern(self.state, pid)
 
     def _dup_pat(self, pid):
-        import copy
-        pat = self.state.find_pattern(pid)
-        if not pat:
-            return
-        new_pat = copy.deepcopy(pat)
-        new_pat.id = self.state.new_id()
-        new_pat.name = pat.name + ' copy'
-        new_pat.color = PALETTE[len(self.state.patterns) % len(PALETTE)]
-        self.state.patterns.append(new_pat)
-        self.state.sel_pat = new_pat.id
-        self.state.notify('dup_pat')
+        from ..ops.patterns import duplicate_pattern
+        duplicate_pattern(self.state, pid)
 
     def _del_beat_pat(self, pid):
-        self.state.beat_patterns = [p for p in self.state.beat_patterns if p.id != pid]
-        self.state.beat_placements = [p for p in self.state.beat_placements if p.pattern_id != pid]
-        if self.state.sel_beat_pat == pid:
-            self.state.sel_beat_pat = None
-        self.state.notify('del_beat_pat')
+        from ..ops.patterns import delete_beat_pattern
+        delete_beat_pattern(self.state, pid)
 
     def _dup_beat_pat(self, pid):
-        import copy
-        pat = self.state.find_beat_pattern(pid)
-        if not pat:
-            return
-        new_pat = copy.deepcopy(pat)
-        new_pat.id = self.state.new_id()
-        new_pat.name = pat.name + ' copy'
-        new_pat.color = PALETTE[len(self.state.beat_patterns) % len(PALETTE)]
-        self.state.beat_patterns.append(new_pat)
-        self.state.sel_beat_pat = new_pat.id
-        self.state.sel_pat = None
-        self.state.notify('dup_beat_pat')
+        from ..ops.patterns import duplicate_beat_pattern
+        duplicate_beat_pattern(self.state, pid)
 
 
 class PatternItem(QFrame):

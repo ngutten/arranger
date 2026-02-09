@@ -11,6 +11,85 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 
+class IndexedList(list):
+    """A list that maintains an {id: item} index for O(1) lookups.
+
+    Items must have an ``id`` attribute. The index is rebuilt whenever
+    the list is replaced wholesale (via the property setter on AppState)
+    and kept in sync by overriding mutating methods.
+
+    For iteration, indexing, slicing, len(), ``in``, and list
+    comprehensions this behaves identically to a plain list.
+    """
+
+    def __init__(self, items=()):
+        super().__init__(items)
+        self._idx: dict = {item.id: item for item in self}
+
+    def get(self, item_id):
+        """O(1) lookup by id. Returns None if not found."""
+        return self._idx.get(item_id)
+
+    def _rebuild_index(self):
+        self._idx = {item.id: item for item in self}
+
+    # -- mutating overrides --
+
+    def append(self, item):
+        super().append(item)
+        self._idx[item.id] = item
+
+    def extend(self, items):
+        items = list(items)  # consume generator once
+        super().extend(items)
+        for item in items:
+            self._idx[item.id] = item
+
+    def remove(self, item):
+        super().remove(item)
+        self._idx.pop(item.id, None)
+
+    def pop(self, index=-1):
+        item = super().pop(index)
+        self._idx.pop(item.id, None)
+        return item
+
+    def insert(self, index, item):
+        super().insert(index, item)
+        self._idx[item.id] = item
+
+    def clear(self):
+        super().clear()
+        self._idx.clear()
+
+    def __delitem__(self, index):
+        item = self[index]
+        super().__delitem__(index)
+        if hasattr(item, 'id'):
+            self._idx.pop(item.id, None)
+        elif isinstance(item, list):
+            # slice deletion
+            self._rebuild_index()
+
+    def __setitem__(self, index, value):
+        # Handle replacing an item at an index
+        if isinstance(index, int):
+            old = self[index]
+            self._idx.pop(old.id, None)
+            super().__setitem__(index, value)
+            self._idx[value.id] = value
+        else:
+            super().__setitem__(index, value)
+            self._rebuild_index()
+
+    def __iadd__(self, other):
+        items = list(other)
+        super().__iadd__(items)
+        for item in items:
+            self._idx[item.id] = item
+        return self
+
+
 # Music constants
 NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 
@@ -303,7 +382,22 @@ class BeatInstrument:
 
 
 class AppState:
-    """Central application state with observer pattern for UI updates."""
+    """Central application state with observer pattern for UI updates.
+
+    Collections (patterns, tracks, placements, etc.) are stored as
+    ``IndexedList`` instances, giving O(1) lookup by id via the
+    ``find_*`` helpers while preserving ordered iteration.
+
+    Reassigning a collection (``state.patterns = [...]``) transparently
+    wraps the new list in an IndexedList, so all existing code that
+    filters via comprehension continues to work unchanged.
+    """
+
+    # Names of collections that should be IndexedList-wrapped.
+    _COLLECTIONS = (
+        'patterns', 'tracks', 'placements',
+        'beat_kit', 'beat_patterns', 'beat_tracks', 'beat_placements',
+    )
 
     def __init__(self):
         self.bpm: int = 120
@@ -311,14 +405,14 @@ class AppState:
         self.ts_num: int = 4
         self.ts_den: int = 4
 
-        self.patterns: list[Pattern] = []
-        self.tracks: list[Track] = []
-        self.placements: list[Placement] = []
+        self._patterns = IndexedList()
+        self._tracks = IndexedList()
+        self._placements = IndexedList()
 
-        self.beat_kit: list[BeatInstrument] = []
-        self.beat_patterns: list[BeatPattern] = []
-        self.beat_tracks: list[BeatTrack] = []
-        self.beat_placements: list[BeatPlacement] = []
+        self._beat_kit = IndexedList()
+        self._beat_patterns = IndexedList()
+        self._beat_tracks = IndexedList()
+        self._beat_placements = IndexedList()
 
         self.sf2 = None  # SF2Info or dict with path/name/presets
 
@@ -348,6 +442,64 @@ class AppState:
         self._listeners: list[Callable] = []
         self._project_path: Optional[str] = None
 
+    # -- Collection properties (auto-wrap in IndexedList on assignment) --
+
+    @property
+    def patterns(self) -> IndexedList:
+        return self._patterns
+
+    @patterns.setter
+    def patterns(self, value):
+        self._patterns = value if isinstance(value, IndexedList) else IndexedList(value)
+
+    @property
+    def tracks(self) -> IndexedList:
+        return self._tracks
+
+    @tracks.setter
+    def tracks(self, value):
+        self._tracks = value if isinstance(value, IndexedList) else IndexedList(value)
+
+    @property
+    def placements(self) -> IndexedList:
+        return self._placements
+
+    @placements.setter
+    def placements(self, value):
+        self._placements = value if isinstance(value, IndexedList) else IndexedList(value)
+
+    @property
+    def beat_kit(self) -> IndexedList:
+        return self._beat_kit
+
+    @beat_kit.setter
+    def beat_kit(self, value):
+        self._beat_kit = value if isinstance(value, IndexedList) else IndexedList(value)
+
+    @property
+    def beat_patterns(self) -> IndexedList:
+        return self._beat_patterns
+
+    @beat_patterns.setter
+    def beat_patterns(self, value):
+        self._beat_patterns = value if isinstance(value, IndexedList) else IndexedList(value)
+
+    @property
+    def beat_tracks(self) -> IndexedList:
+        return self._beat_tracks
+
+    @beat_tracks.setter
+    def beat_tracks(self, value):
+        self._beat_tracks = value if isinstance(value, IndexedList) else IndexedList(value)
+
+    @property
+    def beat_placements(self) -> IndexedList:
+        return self._beat_placements
+
+    @beat_placements.setter
+    def beat_placements(self, value):
+        self._beat_placements = value if isinstance(value, IndexedList) else IndexedList(value)
+
     def new_id(self) -> int:
         nid = self._next_id
         self._next_id += 1
@@ -360,27 +512,27 @@ class AppState:
         for cb in self._listeners:
             cb(source)
 
-    # Lookup helpers
+    # Lookup helpers — O(1) via IndexedList.get()
     def find_pattern(self, pid) -> Optional[Pattern]:
-        return next((p for p in self.patterns if p.id == pid), None)
+        return self._patterns.get(pid)
 
     def find_track(self, tid) -> Optional[Track]:
-        return next((t for t in self.tracks if t.id == tid), None)
+        return self._tracks.get(tid)
 
     def find_placement(self, plid) -> Optional[Placement]:
-        return next((p for p in self.placements if p.id == plid), None)
+        return self._placements.get(plid)
 
     def find_beat_pattern(self, bpid) -> Optional[BeatPattern]:
-        return next((p for p in self.beat_patterns if p.id == bpid), None)
+        return self._beat_patterns.get(bpid)
 
     def find_beat_track(self, btid) -> Optional[BeatTrack]:
-        return next((t for t in self.beat_tracks if t.id == btid), None)
+        return self._beat_tracks.get(btid)
 
     def find_beat_placement(self, bplid) -> Optional[BeatPlacement]:
-        return next((p for p in self.beat_placements if p.id == bplid), None)
+        return self._beat_placements.get(bplid)
 
     def find_beat_instrument(self, iid) -> Optional[BeatInstrument]:
-        return next((i for i in self.beat_kit if i.id == iid), None)
+        return self._beat_kit.get(iid)
 
     def compute_transpose(self, pl: Placement) -> int:
         """Compute total transposition for a placement (manual + key shift)."""
