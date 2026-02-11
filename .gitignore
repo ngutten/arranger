@@ -5,3 +5,4 @@ __pycache__/
 autosave.json
 logs/
 run.sh
+*~

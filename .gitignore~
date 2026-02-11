@@ -4,3 +4,4 @@ __pycache__/
 *.sf2
 autosave.json
 logs/
+run.sh
