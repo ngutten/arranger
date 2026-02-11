@@ -38,7 +38,6 @@ from .ui.beat_grid import BeatGrid
 from .ui.track_panel import TrackPanel
 from .ui.dialogs import PatternDialog, BeatPatternDialog, SF2Dialog
 
-
 class App(QMainWindow):
     """Main application - owns the state, creates the window, coordinates UI."""
 
@@ -83,7 +82,16 @@ class App(QMainWindow):
         
         # Capture initial state for undo
         self._push_undo("init")
-
+        
+        # Timer for auto-save functionality
+        self.autosave_timer = QTimer(self)
+        self.autosave_timer.timeout.connect(self._auto_save)
+        self.autosave_timer.start(60000)
+    
+    # Autosave functionality
+    def _auto_save(self):
+        project_io.save_project(self.state, "autosave.json")
+        
     def _setup_theme(self):
         """Configure Qt stylesheet for dark mode."""
         self.setStyleSheet("""
@@ -205,7 +213,7 @@ class App(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-
+        
         # Top bar
         self.topbar = TopBar(central, self)
         layout.addWidget(self.topbar)
@@ -832,8 +840,25 @@ class App(QMainWindow):
 
         threading.Thread(target=render_work, daemon=True).start()
 
-    # ---- Save/Load ----
+    # ---- New/Save/Load ----
 
+    def new_project(self):
+        path = "defaults/initial.json"
+        if path:
+            try:
+                def sf2_loader(sf2_path):
+                    self.state.sf2 = SF2Info(sf2_path)
+                    if self.engine:
+                        self.engine.load_sf2(sf2_path)
+
+                project_io.load_project(self.state, path, sf2_loader)
+                self.state.sel_pat = self.state.patterns[0].id
+                self.piano_roll.clear_selection()
+                self.topbar.refresh()
+                self._refresh_all()
+            except Exception as e:
+                QMessageBox.critical(self, 'Error', f'Failed to load initial state: {e}')
+ 
     def save_project(self):
         path, _ = QFileDialog.getSaveFileName(
             self, 'Save Project', '', 'JSON files (*.json);;All files (*.*)')

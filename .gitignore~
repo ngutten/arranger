@@ -2,5 +2,3 @@ __pycache__/
 *.pyc
 *.pyo
 *.sf2
-autosave.json
-logs/

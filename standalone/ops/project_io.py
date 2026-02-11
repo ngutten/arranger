@@ -1,6 +1,5 @@
 """Project save/load operations."""
-
-
+    
 def save_project(state, path: str):
     """Save project state to JSON file."""
     with open(path, 'w') as f:

@@ -71,7 +71,7 @@ class TrackPanel(QFrame):
         # Clear all widgets from the layout
         while frame.layout().count():
             item = frame.layout().takeAt(0)
-            if item.widget() and item.widget() != keep_widget:
+            if item.widget():
                 item.widget().deleteLater()
 
     def _render_track_settings(self):

@@ -127,6 +127,10 @@ class TopBar(QFrame):
         sep2.setFrameShadow(QFrame.Sunken)
         layout.addWidget(sep2)
 
+        new_btn = QPushButton('New')
+        new_btn.clicked.connect(self.app.new_project)
+        layout.addWidget(new_btn)
+
         save_btn = QPushButton('Save')
         save_btn.clicked.connect(self.app.save_project)
         layout.addWidget(save_btn)

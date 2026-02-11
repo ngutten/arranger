@@ -8,7 +8,6 @@ Usage:
     python -m standalone.main [--instruments DIR]
     python standalone/main.py [--instruments DIR]
 """
-
 import argparse
 import sys
 from pathlib import Path
