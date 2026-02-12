@@ -377,26 +377,35 @@ def build_schedule(state) -> list[SchedEvent]:
     # We allocate bend channels per (track_channel, time_window) to handle
     # polyphony: a pool channel is "in use" from note_on to note_off.
     bend_pool_state: dict[int, float] = {}  # pool_ch -> note_off_beat (when it's free)
-    bend_channel_programs: set[int] = set()  # pool channels that have been set up
+    # Track the last (bank, program, volume) configured on each pool channel so we
+    # can skip redundant in-sequence program/volume events when the same track reuses
+    # the same channel back-to-back.
+    bend_channel_last_config: dict[int, tuple] = {}  # pool_ch -> (bank, program, volume)
 
     def alloc_bend_channel(on_beat, note_off_beat, bank, program, volume):
-        """Return a free pool channel, configuring it if needed."""
-        # A channel is free if its last note has finished before this one starts
+        """Return a free pool channel, configuring it if needed.
+
+        Program and volume events are emitted at on_beat (just before the note-on)
+        rather than as static beat=-2 setup events.  A pool channel can be reused
+        by notes from different tracks at different times, so the correct instrument
+        must be set at playback time, not once at startup.
+        """
         for pool_ch in _BEND_POOL:
             if bend_pool_state.get(pool_ch, -1.0) <= on_beat + 1e-9:
                 bend_pool_state[pool_ch] = note_off_beat
-                if pool_ch not in bend_channel_programs:
-                    events.append(SchedEvent(beat=-2, event_type=EVT_PROGRAM,
+                last = bend_channel_last_config.get(pool_ch)
+                if last != (bank, program, volume):
+                    # Emit program/volume at on_beat so they fire right before the
+                    # note-on.  Using on_beat - 1e-9 would be cleaner in principle,
+                    # but the sort key already orders EVT_PROGRAM before EVT_NOTE_ON
+                    # at the same beat, so on_beat is fine.
+                    events.append(SchedEvent(beat=on_beat, event_type=EVT_PROGRAM,
                                              channel=pool_ch, pitch=program, velocity=bank))
-                    events.append(SchedEvent(beat=-2, event_type=EVT_VOLUME,
+                    events.append(SchedEvent(beat=on_beat, event_type=EVT_VOLUME,
                                              channel=pool_ch, pitch=volume))
-                    bend_channel_programs.add(pool_ch)
-                else:
-                    # Re-configure in case this track has a different program
-                    events.append(SchedEvent(beat=-2, event_type=EVT_PROGRAM,
-                                             channel=pool_ch, pitch=program, velocity=bank))
+                    bend_channel_last_config[pool_ch] = (bank, program, volume)
                 return pool_ch
-        # Pool exhausted — fall back to track channel
+        # Pool exhausted — fall back to track channel (already configured)
         return track_ch
 
     for pl in state.placements:
