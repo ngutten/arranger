@@ -35,8 +35,18 @@ class PatternList(QFrame):
         title_label.setFont(font)
         hdr_layout.addWidget(title_label)
         hdr_layout.addStretch()
-        new_btn = QPushButton('+ New')
-        new_btn.setMaximumWidth(60)
+        imp_btn = QPushButton('Imp')
+        imp_btn.setMaximumWidth(48)
+        imp_btn.setToolTip('Import pattern from JSON file')
+        imp_btn.clicked.connect(self._import_pattern)
+        hdr_layout.addWidget(imp_btn)
+        exp_btn = QPushButton('Exp')
+        exp_btn.setMaximumWidth(48)
+        exp_btn.setToolTip('Export selected pattern to JSON file')
+        exp_btn.clicked.connect(self._export_pattern)
+        hdr_layout.addWidget(exp_btn)
+        new_btn = QPushButton('New')
+        new_btn.setMaximumWidth(48)
         new_btn.clicked.connect(self._new_pattern)
         hdr_layout.addWidget(new_btn)
         layout.addWidget(hdr)
@@ -74,8 +84,18 @@ class PatternList(QFrame):
         btitle_label.setFont(font)
         bhdr_layout.addWidget(btitle_label)
         bhdr_layout.addStretch()
+        bimp_btn = QPushButton('Imp')
+        bimp_btn.setMaximumWidth(48)
+        bimp_btn.setToolTip('Import beat pattern from JSON file')
+        bimp_btn.clicked.connect(self._import_beat_pattern)
+        bhdr_layout.addWidget(bimp_btn)
+        bexp_btn = QPushButton('Exp')
+        bexp_btn.setMaximumWidth(48)
+        bexp_btn.setToolTip('Export selected beat pattern to JSON file')
+        bexp_btn.clicked.connect(self._export_beat_pattern)
+        bhdr_layout.addWidget(bexp_btn)
         bnew_btn = QPushButton('+ New')
-        bnew_btn.setMaximumWidth(60)
+        bnew_btn.setMaximumWidth(48)
         bnew_btn.clicked.connect(self._new_beat_pattern)
         bhdr_layout.addWidget(bnew_btn)
         layout.addWidget(bhdr)
@@ -180,6 +200,64 @@ class PatternList(QFrame):
     def _dup_beat_pat(self, pid):
         from ..ops.patterns import duplicate_beat_pattern
         duplicate_beat_pattern(self.state, pid)
+
+    # ---- Pattern import / export ----
+
+    def _export_pattern(self):
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from ..ops.project_io import export_pattern
+        pat = self.state.find_pattern(self.state.sel_pat)
+        if not pat:
+            QMessageBox.warning(self, 'Export', 'No melodic pattern selected.')
+            return
+        safe_name = pat.name.replace(' ', '_').replace('/', '_')
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Export Pattern', f'{safe_name}.json',
+            'Pattern files (*.json);;All files (*.*)')
+        if path:
+            export_pattern(pat, path)
+
+    def _export_beat_pattern(self):
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from ..ops.project_io import export_beat_pattern
+        pat = self.state.find_beat_pattern(self.state.sel_beat_pat)
+        if not pat:
+            QMessageBox.warning(self, 'Export', 'No beat pattern selected.')
+            return
+        safe_name = pat.name.replace(' ', '_').replace('/', '_')
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Export Beat Pattern', f'{safe_name}.json',
+            'Pattern files (*.json);;All files (*.*)')
+        if path:
+            export_beat_pattern(pat, path)
+
+    def _import_pattern(self):
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from ..ops.project_io import import_pattern
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Import Pattern', '',
+            'Pattern files (*.json);;All files (*.*)')
+        if path:
+            try:
+                import_pattern(self.state, path)
+            except ValueError as e:
+                QMessageBox.warning(self, 'Import Error', str(e))
+            except Exception as e:
+                QMessageBox.critical(self, 'Import Error', f'Failed to load: {e}')
+
+    def _import_beat_pattern(self):
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from ..ops.project_io import import_beat_pattern
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Import Beat Pattern', '',
+            'Pattern files (*.json);;All files (*.*)')
+        if path:
+            try:
+                import_beat_pattern(self.state, path)
+            except ValueError as e:
+                QMessageBox.warning(self, 'Import Error', str(e))
+            except Exception as e:
+                QMessageBox.critical(self, 'Import Error', f'Failed to load: {e}')
 
 
 class PatternItem(QFrame):

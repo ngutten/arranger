@@ -36,7 +36,7 @@ from .ui.arrangement import ArrangementView
 from .ui.piano_roll import PianoRoll
 from .ui.beat_grid import BeatGrid
 from .ui.track_panel import TrackPanel
-from .ui.dialogs import PatternDialog, BeatPatternDialog, SF2Dialog
+from .ui.dialogs import PatternDialog, BeatPatternDialog, SF2Dialog, ConfigDialog
 
 class App(QMainWindow):
     """Main application - owns the state, creates the window, coordinates UI."""
@@ -47,6 +47,9 @@ class App(QMainWindow):
         self.player = AudioPlayer()  # kept for legacy preview fallback
         self.instruments_dir = instruments_dir or str(
             Path(__file__).parent.parent / 'instruments')
+
+        # Load user settings (MIDI device, SF2 path, audio params, etc.)
+        self.settings = Settings()
 
         # Undo/redo system
         self.undo_stack = UndoStack(max_size=100)
@@ -325,19 +328,31 @@ class App(QMainWindow):
             print("[App] AudioEngine not available (missing sounddevice/pyfluidsynth?)")
             return
         try:
-            settings = Settings()
-            self.engine = AudioEngine(self.state, settings)
+            self.engine = AudioEngine(self.state, self.settings)
         except Exception as e:
             print(f"[App] Failed to initialize AudioEngine: {e}")
             self.engine = None
 
     def _auto_load_sf2(self):
-        """Try to load the first SF2 file from the instruments directory."""
+        """Load SF2 on startup: prefer settings path, fall back to first in instruments dir."""
+        from .core.sf2 import SF2Info
+        from .ops.export import _get_sf2_path
+
+        # Prefer the user's saved default SF2
+        if self.settings.sf2_path:
+            try:
+                sf2 = SF2Info(self.settings.sf2_path)
+                self.state.sf2 = sf2
+                if self.engine:
+                    self.engine.load_sf2(self.settings.sf2_path)
+                return
+            except Exception:
+                pass  # fall through to directory scan
+
         sf2_list = scan_directory(self.instruments_dir)
         if sf2_list:
             self.state.sf2 = sf2_list[0]
             if self.engine:
-                from .ops.export import _get_sf2_path
                 sf2_path = _get_sf2_path(sf2_list[0])
                 if sf2_path:
                     self.engine.load_sf2(sf2_path)
@@ -608,6 +623,16 @@ class App(QMainWindow):
 
     # ---- Soundfont ----
 
+    def open_config(self):
+        """Open the configuration dialog."""
+        dlg = ConfigDialog(self, self)
+        dlg.exec()
+
+    def _on_config_changed(self):
+        """Called by ConfigDialog after settings are saved; update dependent UI."""
+        if hasattr(self, 'piano_roll'):
+            self.piano_roll._update_rec_btn_enabled()
+
     def load_sf2(self):
         """Open dialog to select and load a soundfont."""
         sf2_list = scan_directory(self.instruments_dir)
@@ -829,7 +854,6 @@ class App(QMainWindow):
                 midi = export_ops.export_midi(self.state)
                 with open(path, 'wb') as f:
                     f.write(midi)
-                QMessageBox.information(self, 'Export', f'MIDI exported to {path}')
             return
 
         # Get file path BEFORE starting background thread

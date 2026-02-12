@@ -1,5 +1,7 @@
 """Piano roll editor - note editing on a pitch/time grid."""
 
+import time
+
 from PySide6.QtWidgets import (QFrame, QWidget, QScrollArea, QLabel, QPushButton,
                                 QComboBox, QSlider, QVBoxLayout, QHBoxLayout)
 from PySide6.QtCore import Qt, QRect, QPoint, QRectF
@@ -38,6 +40,14 @@ class PianoRoll(QFrame):
         # Bend tool state
         self._bend_drag_note = None   # Note currently being edited in bend mode
         self._bend_drag_point_idx = None  # index of control point being dragged, or None
+
+        # MIDI recording state
+        self._rec_midi_in = None       # rtmidi.MidiIn instance while armed/recording
+        self._rec_notes = {}           # {pitch: start_time} for open note-ons
+        self._rec_events = []          # [(start_beat, duration, pitch, velocity)]
+        self._rec_start_time = None    # time.monotonic() when first note landed
+        self._rec_armed = False        # True = waiting for first note-on
+        self._rec_recording = False    # True = recording in progress
         
         # TODO: Implement undo/redo stack
         # self._undo_stack = []
@@ -102,6 +112,19 @@ class PianoRoll(QFrame):
         self.vel_label = QLabel('100')
         self.vel_label.setMinimumWidth(30)
         hdr_layout.addWidget(self.vel_label)
+
+        # MIDI record button
+        self.rec_btn = QPushButton('Rec')
+        self.rec_btn.setCheckable(True)
+        self.rec_btn.setStyleSheet(
+            'QPushButton { color: #aaa; }'
+            'QPushButton:checked { background-color: #c0392b; color: #fff; }'
+            'QPushButton:disabled { color: #444; }'
+        )
+        self.rec_btn.setToolTip('Record from MIDI input (arm — starts on first note)')
+        self.rec_btn.clicked.connect(self._toggle_rec)
+        hdr_layout.addWidget(self.rec_btn)
+        self._update_rec_btn_enabled()
 
         layout.addWidget(hdr)
 
@@ -345,7 +368,147 @@ class PianoRoll(QFrame):
             self._selected = result
             self.state.notify('note_edit')
             self.refresh()
-    
+
+    # ---- MIDI recording ----
+
+    def _update_rec_btn_enabled(self):
+        """Enable Rec only when a MIDI device is configured."""
+        try:
+            has_device = bool(
+                hasattr(self.app, 'settings') and
+                self.app.settings.midi_input_device
+            )
+        except Exception:
+            has_device = False
+        self.rec_btn.setEnabled(has_device)
+        if not has_device:
+            self.rec_btn.setToolTip('No MIDI input device configured (see Config)')
+
+    def _toggle_rec(self, checked):
+        if checked:
+            self._arm_recording()
+        else:
+            self._stop_recording()
+
+    def _arm_recording(self):
+        """Open the MIDI port and wait for the first note-on."""
+        pat = self.state.find_pattern(self.state.sel_pat)
+        if not pat:
+            self.rec_btn.setChecked(False)
+            return
+
+        device_name = getattr(getattr(self.app, 'settings', None), 'midi_input_device', '')
+        if not device_name:
+            self.rec_btn.setChecked(False)
+            return
+
+        try:
+            import rtmidi
+            midi_in = rtmidi.MidiIn()
+            ports = midi_in.get_ports()
+            if device_name not in ports:
+                self.rec_btn.setChecked(False)
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.warning(self, 'MIDI Error',
+                    f'Device "{device_name}" not found.\nCheck Config for available devices.')
+                return
+            midi_in.open_port(ports.index(device_name))
+            midi_in.set_callback(self._midi_callback)
+            midi_in.ignore_types(sysex=True, timing=True, active_sense=True)
+            self._rec_midi_in = midi_in
+        except Exception as e:
+            self.rec_btn.setChecked(False)
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, 'MIDI Error', f'Could not open MIDI port:\n{e}')
+            return
+
+        self._rec_notes = {}
+        self._rec_events = []
+        self._rec_start_time = None
+        self._rec_armed = True
+        self._rec_recording = False
+        self.rec_btn.setText('■ Stop')
+        self.rec_btn.setToolTip('Recording — click to stop')
+
+    def _midi_callback(self, event, data=None):
+        """Called from rtmidi thread on each incoming MIDI message."""
+        msg, _delta_t = event
+        if not msg:
+            return
+        status = msg[0] & 0xF0
+        now = time.monotonic()
+
+        if status == 0x90 and len(msg) >= 3 and msg[2] > 0:   # note-on
+            pitch, vel = msg[1], msg[2]
+            if self._rec_armed and not self._rec_recording:
+                self._rec_start_time = now
+                self._rec_armed = False
+                self._rec_recording = True
+            if self._rec_recording and self._rec_start_time is not None:
+                beat = (now - self._rec_start_time) / (60.0 / self.state.bpm)
+                self._rec_notes[pitch] = (beat, vel)
+
+        elif status in (0x80,) or (status == 0x90 and len(msg) >= 3 and msg[2] == 0):
+            pitch = msg[1]
+            if pitch in self._rec_notes and self._rec_recording:
+                start_beat, vel = self._rec_notes.pop(pitch)
+                if self._rec_start_time is not None:
+                    end_beat = (now - self._rec_start_time) / (60.0 / self.state.bpm)
+                    duration = max(0.0625, end_beat - start_beat)
+                    self._rec_events.append((start_beat, duration, pitch, vel))
+
+    def _stop_recording(self):
+        """Close MIDI port and commit recorded notes to the pattern."""
+        self._rec_armed = False
+        self._rec_recording = False
+
+        # Close still-open notes at current wall time
+        if self._rec_start_time is not None:
+            now = time.monotonic()
+            for pitch, (start_beat, vel) in list(self._rec_notes.items()):
+                end_beat = (now - self._rec_start_time) / (60.0 / self.state.bpm)
+                duration = max(0.0625, end_beat - start_beat)
+                self._rec_events.append((start_beat, duration, pitch, vel))
+        self._rec_notes = {}
+
+        if self._rec_midi_in:
+            try:
+                self._rec_midi_in.close_port()
+            except Exception:
+                pass
+            self._rec_midi_in = None
+
+        self.rec_btn.setText('Rec')
+        self.rec_btn.setChecked(False)
+        self.rec_btn.setToolTip('Record from MIDI input (arm — starts on first note)')
+
+        if not self._rec_events:
+            return
+
+        pat = self.state.find_pattern(self.state.sel_pat)
+        if not pat:
+            return
+
+        from ..state import Note
+
+        # Shift so first note lands at beat 0
+        t0 = min(s for s, d, p, v in self._rec_events)
+        notes = []
+        for start, dur, pitch, vel in self._rec_events:
+            notes.append(Note(pitch=pitch, start=round(start - t0, 6),
+                               duration=round(dur, 6), velocity=vel))
+
+        # Expand pattern if needed, rounding up to a whole bar
+        max_end = max(n.start + n.duration for n in notes)
+        if max_end > pat.length:
+            bar = self.state.ts_num
+            pat.length = bar * (int(max_end / bar) + 1)
+
+        pat.notes.extend(notes)
+        self._rec_events = []
+        self.state.notify('note_add')
+        self.refresh()
+
     def keyPressEvent(self, event: QKeyEvent):
         """Handle keyboard shortcuts."""
         modifiers = event.modifiers()

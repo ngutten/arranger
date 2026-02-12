@@ -91,9 +91,9 @@ class TopBar(QFrame):
         layout.addStretch()
 
         # Action buttons
-        load_sf2_btn = QPushButton('Load SF2')
-        load_sf2_btn.clicked.connect(self.app.load_sf2)
-        layout.addWidget(load_sf2_btn)
+        config_btn = QPushButton('Config')
+        config_btn.clicked.connect(self.app.open_config)
+        layout.addWidget(config_btn)
 
         add_track_btn = QPushButton('+ Track')
         add_track_btn.clicked.connect(self.app.add_track)

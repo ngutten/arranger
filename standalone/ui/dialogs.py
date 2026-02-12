@@ -257,3 +257,148 @@ class SF2Dialog(QDialog):
                 self.result = sf2
                 break
         self.accept()
+
+
+class ConfigDialog(QDialog):
+    """Application configuration dialog.
+
+    Covers: MIDI input device selection, default soundfont, and (read-only
+    display of) audio settings.  Changes are saved to the user settings file
+    on OK.
+    """
+
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app = app
+        self.settings = app.settings
+        self.setWindowTitle('Configuration')
+        self.setFixedSize(420, 280)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+
+        # ---- MIDI input device ----
+        self.midi_combo = QComboBox()
+        self._midi_ports = []
+        self._populate_midi_ports()
+        form.addRow('MIDI Input:', self.midi_combo)
+
+        # ---- Default SF2 ----
+        sf2_row = QHBoxLayout()
+        self.sf2_label = QLabel(self._short_path(self.settings.sf2_path) or '(none)')
+        self.sf2_label.setStyleSheet('color: #aaa;')
+        sf2_row.addWidget(self.sf2_label, 1)
+        browse_btn = QPushButton('Browse…')
+        browse_btn.setMaximumWidth(70)
+        browse_btn.clicked.connect(self._browse_sf2)
+        sf2_row.addWidget(browse_btn)
+        clear_sf2_btn = QPushButton('Clear')
+        clear_sf2_btn.setMaximumWidth(50)
+        clear_sf2_btn.clicked.connect(self._clear_sf2)
+        sf2_row.addWidget(clear_sf2_btn)
+        form.addRow('Default SF2:', sf2_row)
+        self._sf2_path = self.settings.sf2_path
+
+        # ---- Audio info (read-only) ----
+        audio_info = QLabel(
+            f'{self.settings.sample_rate} Hz  ·  block {self.settings.block_size}'
+        )
+        audio_info.setStyleSheet('color: #888; font-size: 8pt;')
+        form.addRow('Audio:', audio_info)
+
+        layout.addLayout(form)
+
+        note = QLabel(
+            'Audio settings (sample rate, block size) are set in\n'
+            '~/.config/sequencer/settings.json and take effect on restart.'
+        )
+        note.setStyleSheet('color: #666; font-size: 8pt;')
+        layout.addWidget(note)
+
+        layout.addStretch()
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        ok_btn = QPushButton('OK')
+        ok_btn.clicked.connect(self._ok)
+        ok_btn.setDefault(True)
+        cancel_btn = QPushButton('Cancel')
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+    def _populate_midi_ports(self):
+        """Enumerate rtmidi input ports; fall back gracefully if unavailable."""
+        self.midi_combo.clear()
+        self.midi_combo.addItem('(none)')
+        self._midi_ports = []
+        try:
+            import rtmidi
+            midi_in = rtmidi.MidiIn()
+            ports = midi_in.get_ports()
+            self._midi_ports = ports
+            for name in ports:
+                self.midi_combo.addItem(name)
+            # Restore saved selection
+            saved = self.settings.midi_input_device
+            if saved in ports:
+                self.midi_combo.setCurrentText(saved)
+        except Exception:
+            self.midi_combo.addItem('(rtmidi not installed)')
+            self.midi_combo.setEnabled(False)
+
+    def _browse_sf2(self):
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Select SoundFont', '', 'SoundFont files (*.sf2);;All files (*.*)')
+        if path:
+            self._sf2_path = path
+            self.sf2_label.setText(self._short_path(path))
+
+    def _clear_sf2(self):
+        self._sf2_path = ''
+        self.sf2_label.setText('(none)')
+
+    @staticmethod
+    def _short_path(path):
+        """Show just the filename to keep the label compact."""
+        from pathlib import Path as P
+        return P(path).name if path else ''
+
+    def _ok(self):
+        # MIDI device
+        idx = self.midi_combo.currentIndex()
+        # index 0 is '(none)', ports start at 1
+        if idx > 0 and (idx - 1) < len(self._midi_ports):
+            self.settings.midi_input_device = self._midi_ports[idx - 1]
+        else:
+            self.settings.midi_input_device = ''
+
+        # SF2 path
+        self.settings.sf2_path = self._sf2_path
+
+        self.settings.save()
+
+        # Apply SF2 immediately if it changed and engine is running
+        if self._sf2_path and self.app.engine:
+            try:
+                self.app.engine.load_sf2(self._sf2_path)
+                from ..state import SF2Info  # noqa — might not exist; use app helper
+            except Exception:
+                pass
+            try:
+                from ..core.sf2 import SF2Info
+                self.app.state.sf2 = SF2Info(self._sf2_path)
+                self.app.state.notify('sf2_loaded')
+            except Exception:
+                pass
+
+        # Notify app so Rec button can update its enabled state
+        if hasattr(self.app, '_on_config_changed'):
+            self.app._on_config_changed()
+
+        self.accept()
