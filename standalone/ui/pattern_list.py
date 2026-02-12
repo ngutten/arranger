@@ -115,8 +115,9 @@ class PatternList(QFrame):
         # Clear existing widgets except stretch
         while self.pat_layout.count() > 1:
             item = self.pat_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            w = item.widget()
+            if w:
+                w.deleteLater()
 
         for pat in self.state.patterns:
             item = PatternItem(self, pat, self.state.sel_pat == pat.id)
@@ -126,8 +127,9 @@ class PatternList(QFrame):
         # Clear existing widgets except stretch
         while self.beat_layout.count() > 1:
             item = self.beat_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            w = item.widget()
+            if w:
+                w.deleteLater()
 
         if not self.state.beat_patterns:
             lbl = QLabel('No beat patterns')

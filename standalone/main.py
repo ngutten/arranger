@@ -29,6 +29,10 @@ def main():
     parser = argparse.ArgumentParser(description='Music Arranger - Standalone')
     parser.add_argument('--instruments', type=str, default=None,
                         help='Path to instruments directory containing .sf2 files')
+    parser.add_argument('--debug', action='store_true',
+                        help='Enable widget lifecycle debug hooks (logs to widget_debug.log)')
+    parser.add_argument('--debug-verbose', action='store_true',
+                        help='Verbose widget debug (logs every risky event dispatch)')
     args = parser.parse_args()
 
     instruments_dir = args.instruments
@@ -36,10 +40,22 @@ def main():
         # Default: instruments/ directory next to the project root
         instruments_dir = str(Path(__file__).parent.parent / 'instruments')
 
+    # Install debug hooks BEFORE QApplication so deleteLater patch is ready
+    if args.debug or args.debug_verbose:
+        from .debug_widgets import install_hooks, install_event_filter
+        import standalone.debug_widgets as dw
+        if args.debug_verbose:
+            dw.VERBOSE = True
+        install_hooks()
+
     app = QApplication(sys.argv)
     
     # Set application style
     app.setStyle('Fusion')
+
+    # Install event filter now that QApp exists
+    if args.debug or args.debug_verbose:
+        install_event_filter()
     
     # Import here to avoid circular imports
     from .app import App

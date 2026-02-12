@@ -68,11 +68,20 @@ class TrackPanel(QFrame):
         if not frame.layout():
             # Create layout if it doesn't exist yet (first time)
             QVBoxLayout(frame)
-        # Clear all widgets from the layout
-        while frame.layout().count():
-            item = frame.layout().takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        # Clear all items from the layout – widgets AND sub-layouts
+        self._clear_layout(frame.layout())
+
+    @staticmethod
+    def _clear_layout(layout):
+        """Recursively remove and destroy all items in a layout."""
+        while layout.count():
+            item = layout.takeAt(0)
+            child_layout = item.layout()
+            if child_layout:
+                TrackPanel._clear_layout(child_layout)
+            w = item.widget()
+            if w:
+                w.deleteLater()
 
     def _render_track_settings(self):
         self._clear_frame(self.trk_frame)

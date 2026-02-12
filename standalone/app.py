@@ -72,6 +72,9 @@ class App(QMainWindow):
         self._play_timer = None
         self._playback_max_beat = 0
 
+        # Coalesced refresh state
+        self._refresh_pending = False
+
         self._setup_theme()
         self._build_ui()
         self._bind_keys()
@@ -344,11 +347,29 @@ class App(QMainWindow):
         # Mark engine dirty so schedule rebuilds on next audio callback
         if self.engine and self.state.playing:
             self.engine.mark_dirty()
-        self._refresh_all()
-        
-        # Capture undo snapshot for certain actions
+
+        # Capture undo snapshot for certain actions (synchronous, reads AppState not widgets)
         if source in self._undo_triggers:
             self._push_undo(source)
+
+        # Coalesce UI refresh — schedule once, skip if already pending
+        self._schedule_refresh()
+
+    def _schedule_refresh(self):
+        """Schedule a UI refresh for the end of the current event batch.
+
+        Multiple calls within the same event loop iteration coalesce into
+        a single refresh, which prevents tearing down and rebuilding widgets
+        while user input events are still being delivered.
+        """
+        if not self._refresh_pending:
+            self._refresh_pending = True
+            QTimer.singleShot(0, self._do_deferred_refresh)
+
+    def _do_deferred_refresh(self):
+        """Execute the coalesced refresh."""
+        self._refresh_pending = False
+        self._refresh_all()
 
     def _refresh_all(self):
         """Refresh all UI components from current state."""
@@ -380,7 +401,9 @@ class App(QMainWindow):
             self.piano_roll.clear_selection()
             self.arrangement.selected_placements = []
             self.arrangement.selected_beat_placements = []
-            self.state.notify('undo')
+            # Mark engine dirty directly, skip the notify→schedule path
+            if self.engine and self.state.playing:
+                self.engine.mark_dirty()
             self._refresh_all()
     
     def do_redo(self):
@@ -394,7 +417,8 @@ class App(QMainWindow):
             self.piano_roll.clear_selection()
             self.arrangement.selected_placements = []
             self.arrangement.selected_beat_placements = []
-            self.state.notify('redo')
+            if self.engine and self.state.playing:
+                self.engine.mark_dirty()
             self._refresh_all()
 
     def _switch_editor(self):
