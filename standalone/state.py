@@ -194,15 +194,23 @@ class Note:
     start: float
     duration: float
     velocity: int = 100
+    # Pitch bend control points: list of [beat_offset, semitones] pairs.
+    # beat_offset is relative to note start, clamped to [0, duration].
+    # semitones is in [-2.0, 2.0]. Empty list = no bend.
+    bend: list = field(default_factory=list)
 
     def to_dict(self):
-        return {'pitch': self.pitch, 'start': self.start,
-                'duration': self.duration, 'velocity': self.velocity}
+        d = {'pitch': self.pitch, 'start': self.start,
+             'duration': self.duration, 'velocity': self.velocity}
+        if self.bend:
+            d['bend'] = self.bend
+        return d
 
     @staticmethod
     def from_dict(d):
         return Note(pitch=d['pitch'], start=d['start'],
-                    duration=d['duration'], velocity=d.get('velocity', 100))
+                    duration=d['duration'], velocity=d.get('velocity', 100),
+                    bend=d.get('bend', []))
 
 
 @dataclass

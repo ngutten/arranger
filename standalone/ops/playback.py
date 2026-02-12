@@ -97,7 +97,8 @@ def build_pattern_preview(state):
     }
 
     notes = [{'pitch': n.pitch, 'start': n.start, 'duration': n.duration,
-              'velocity': n.velocity} for n in pat.notes]
+              'velocity': n.velocity,
+              **({'bend': n.bend} if n.bend else {})} for n in pat.notes]
 
     tracks = [{
         **inst,

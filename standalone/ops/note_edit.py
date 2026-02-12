@@ -61,6 +61,7 @@ def duplicate_notes(pat, selected, clipboard_notes, offset_beats):
             start=note.start + offset_beats,
             duration=note.duration,
             velocity=note.velocity,
+            bend=[list(p) for p in note.bend] if note.bend else [],
         )
         pat.notes.append(new_note)
         new_indices.append(len(pat.notes) - 1)
@@ -97,6 +98,7 @@ def commit_ghost_notes(pat, ghost_notes, beat, pitch, snap_fn,
             start=max(0, note.start + beat_offset),
             duration=note.duration,
             velocity=note.velocity,
+            bend=[list(p) for p in note.bend] if note.bend else [],
         )
         pat.notes.append(new_note)
         new_indices.append(len(pat.notes) - 1)
@@ -133,10 +135,12 @@ def merge_notes(pat, selected):
     end1 = n1.start + n1.duration
     end2 = n2.start + n2.duration
     n1.duration = max(end1, end2) - n1.start
-    
+    # Bend curves from two different notes can't be meaningfully combined — strip them
+    n1.bend = []
+
     # Delete n2
     pat.notes.pop(idx2)
-    
+
     return {idx1}
 
 

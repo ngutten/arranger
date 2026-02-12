@@ -34,6 +34,10 @@ class PianoRoll(QFrame):
         self._ghost_notes = []  # List of Note objects in ghost/paste mode
         self._ghost_offset = None  # (dx, dy) offset from original positions
         self._note_clipboard = NoteClipboard()
+
+        # Bend tool state
+        self._bend_drag_note = None   # Note currently being edited in bend mode
+        self._bend_drag_point_idx = None  # index of control point being dragged, or None
         
         # TODO: Implement undo/redo stack
         # self._undo_stack = []
@@ -70,7 +74,7 @@ class PianoRoll(QFrame):
         self.note_len_cb.currentTextChanged.connect(self._on_note_len)
         hdr_layout.addWidget(self.note_len_cb)
 
-        # Tool buttons - just Edit and Slice now
+        # Tool buttons - Edit, Slice, and Bend
         self.edit_btn = QPushButton('Edit')
         self.edit_btn.setCheckable(True)
         self.edit_btn.clicked.connect(lambda: self._set_tool('edit'))
@@ -80,6 +84,11 @@ class PianoRoll(QFrame):
         self.slice_btn.setCheckable(True)
         self.slice_btn.clicked.connect(lambda: self._set_tool('slice'))
         hdr_layout.addWidget(self.slice_btn)
+
+        self.bend_btn = QPushButton('Bend')
+        self.bend_btn.setCheckable(True)
+        self.bend_btn.clicked.connect(lambda: self._set_tool('bend'))
+        hdr_layout.addWidget(self.bend_btn)
 
         # Velocity slider
         hdr_layout.addWidget(QLabel('Vel'))
@@ -151,6 +160,7 @@ class PianoRoll(QFrame):
     def _update_tool_buttons(self):
         self.edit_btn.setChecked(self.state.tool == 'edit')
         self.slice_btn.setChecked(self.state.tool == 'slice')
+        self.bend_btn.setChecked(self.state.tool == 'bend')
 
     def _on_vel_change(self, value):
         self.vel_label.setText(str(value))
@@ -167,6 +177,24 @@ class PianoRoll(QFrame):
 
     def _snap(self, beat):
         return int(beat / self.state.snap) * self.state.snap
+
+    def _hit_bend_point(self, x, y, radius=6):
+        """Hit-test bend control points. Returns (note, point_index) or (None, -1)."""
+        pat = self.state.find_pattern(self.state.sel_pat)
+        if not pat:
+            return None, -1
+        for n in pat.notes:
+            if not n.bend:
+                continue
+            note_y_top = (self.HI - n.pitch) * self.NH
+            note_y_center = note_y_top + self.NH // 2
+            for i, (beat_off, semitones) in enumerate(n.bend):
+                px = (n.start + beat_off) * self.BW
+                # semitones in [-2, 2] -> y offset within the note row, ±2 rows
+                py = note_y_center - int(semitones / 2.0 * self.NH * 2)
+                if abs(x - px) <= radius and abs(y - py) <= radius:
+                    return n, i
+        return None, -1
 
     def _hit_note(self, x, y):
         """Hit test for notes. Returns (note, index, is_resize_handle)."""
@@ -681,6 +709,74 @@ class PianoGridWidget(QWidget):
                 painter.setPen(QColor('#fff'))
                 painter.setFont(QFont('TkDefaultFont', 6))
                 painter.drawText(int(x + 2), y + self.parent_roll.NH - 3, f'v{n.velocity}')
+
+        # Bend curves — drawn on top of all notes
+        _in_bend_mode = s.tool == 'bend'
+        for i, n in enumerate(pat.notes):
+            if not n.bend and not _in_bend_mode:
+                continue
+
+            note_x0 = n.start * self.parent_roll.BW
+            note_y_center = (self.parent_roll.HI - n.pitch) * self.parent_roll.NH + self.parent_roll.NH // 2
+
+            if n.bend:
+                # Build full point list with implicit zero at start/end
+                pts = sorted(n.bend, key=lambda p: p[0])
+                full = [[0.0, 0.0]] + [[p[0], p[1]] for p in pts] + [[n.duration, 0.0]]
+
+                def _curve_y(beat_off):
+                    tc = max(0.0, min(n.duration, beat_off))
+                    seg = 0
+                    for k in range(len(full) - 1):
+                        if full[k][0] <= tc <= full[k+1][0]:
+                            seg = k
+                            break
+                    t1, v1 = full[seg]
+                    t2, v2 = full[min(len(full)-1, seg+1)]
+                    v0 = full[max(0, seg-1)][1]
+                    v3 = full[min(len(full)-1, seg+2)][1]
+                    seg_len = t2 - t1
+                    if seg_len > 1e-9:
+                        lt = max(0.0, min(1.0, (tc - t1) / seg_len))
+                        sem = 0.5 * ((2*v1) + (-v0+v2)*lt +
+                                     (2*v0-5*v1+4*v2-v3)*lt*lt +
+                                     (-v0+3*v1-3*v2+v3)*lt*lt*lt)
+                    else:
+                        sem = v2
+                    return note_y_center - int(sem / 2.0 * self.parent_roll.NH * 2)
+
+                # Draw smooth curve by sampling
+                from PySide6.QtCore import QLineF
+                curve_color = QColor('#00f5d4')
+                curve_color.setAlpha(200)
+                painter.setPen(QPen(curve_color, 1.5))
+                steps = max(16, int(n.duration * 32))
+                prev_cx = note_x0
+                prev_cy = _curve_y(0.0)
+                for s_idx in range(1, steps + 1):
+                    t = s_idx / steps * n.duration
+                    cx = note_x0 + t * self.parent_roll.BW
+                    cy = _curve_y(t)
+                    painter.drawLine(int(prev_cx), int(prev_cy), int(cx), int(cy))
+                    prev_cx, prev_cy = cx, cy
+
+                # Draw control point handles
+                for pt_idx, (beat_off, semitones) in enumerate(n.bend):
+                    px = int(note_x0 + beat_off * self.parent_roll.BW)
+                    py = note_y_center - int(semitones / 2.0 * self.parent_roll.NH * 2)
+                    is_dragging = (self.parent_roll._bend_drag_note is n and
+                                   self.parent_roll._bend_drag_point_idx == pt_idx)
+                    handle_color = QColor('#fee440') if is_dragging else QColor('#00f5d4')
+                    painter.setPen(QPen(QColor('#000'), 1))
+                    painter.setBrush(handle_color)
+                    painter.drawEllipse(px - 4, py - 4, 8, 8)
+
+            elif _in_bend_mode:
+                # In bend mode, show a faint zero-line on notes with no bend yet
+                painter.setPen(QPen(QColor(255, 255, 255, 40), 1, Qt.DashLine))
+                nx0 = int(note_x0)
+                nx1 = int(note_x0 + n.duration * self.parent_roll.BW)
+                painter.drawLine(nx0, note_y_center, nx1, note_y_center)
         
         # Draw slice preview line
         if self._slice_hover_pos and s.tool == 'slice':
@@ -917,11 +1013,36 @@ def _on_click(self, event):
                     duration=(n.start + n.duration) - beat,
                     velocity=n.velocity
                 )
-                # Shorten the left portion
+                # Shorten the left portion, strip its bend (can't cleanly split a curve)
                 n.duration = beat - n.start
+                n.bend = []
                 # Add the right portion
                 pat.notes.append(right_note)
-                
+
+                self.state.notify('note_edit')
+                self.refresh()
+
+    elif self.state.tool == 'bend':
+        # Hit-test existing control points first
+        bn, bi = self._hit_bend_point(x, y)
+        if bn is not None:
+            # Start dragging this control point
+            self._bend_drag_note = bn
+            self._bend_drag_point_idx = bi
+        else:
+            # Click on a note body — add new control point
+            n, i, _ = self._hit_note(x, y)
+            if n:
+                beat_off = max(0.0, min(n.duration, beat - n.start))
+                note_y_center = (self.HI - n.pitch) * self.NH + self.NH // 2
+                semitones = max(-2.0, min(2.0, -(y - note_y_center) / (self.NH * 2.0) * 2.0))
+                n.bend.append([beat_off, round(semitones, 3)])
+                n.bend.sort(key=lambda p: p[0])
+                # Start dragging the new point
+                self._bend_drag_note = n
+                self._bend_drag_point_idx = next(
+                    k for k, p in enumerate(n.bend) if abs(p[0] - beat_off) < 1e-6)
+                self.app.engine.mark_dirty()
                 self.state.notify('note_edit')
                 self.refresh()
 
@@ -988,8 +1109,26 @@ def _on_drag(self, event):
             # Update the drag note position for next delta calculation
             self._drag_note.start = new_start
             self._drag_note.pitch = new_pitch
-            
+
             self.refresh()
+
+    elif self.state.tool == 'bend':
+        if self._bend_drag_note is not None and self._bend_drag_point_idx is not None:
+            n = self._bend_drag_note
+            idx = self._bend_drag_point_idx
+            if 0 <= idx < len(n.bend):
+                new_beat_off = max(0.0, min(n.duration, beat - n.start))
+                note_y_center = (self.HI - n.pitch) * self.NH + self.NH // 2
+                new_semitones = max(-2.0, min(2.0, -(y - note_y_center) / (self.NH * 2.0) * 2.0))
+                n.bend[idx] = [new_beat_off, round(new_semitones, 3)]
+                n.bend.sort(key=lambda p: p[0])
+                # Point may have shifted index after sort — find it by proximity
+                self._bend_drag_point_idx = min(
+                    range(len(n.bend)),
+                    key=lambda k: abs(n.bend[k][0] - new_beat_off))
+                self.app.engine.mark_dirty()
+                self.grid_widget.update()
+
 
 def _on_release(self, event):
     """Handle mouse button release."""
@@ -999,7 +1138,7 @@ def _on_release(self, event):
         if pat:
             from PySide6.QtGui import QCursor
             cursor_pos = self.grid_widget.mapFromGlobal(QCursor.pos())
-            
+
             from ..ops.note_edit import marquee_select
             new_sel = marquee_select(
                 pat,
@@ -1007,29 +1146,48 @@ def _on_release(self, event):
                 (cursor_pos.x(), cursor_pos.y()),
                 self.BW, self.NH, self.HI)
             self._selected |= new_sel
-        
+
         self._marquee_start = None
         self.refresh()
         return
-    
+
     if self._resize_note:
         self.state.last_note_len = self._resize_note.duration
     if self._resize_note or self._drag_note:
         self.state.notify('note_edit')
-    
+
     self._drag_note = None
     self._resize_note = None
     self._drag_start_pos = None
+
+    # Finalise bend drag
+    if self._bend_drag_note is not None:
+        self.app.engine.mark_dirty()
+        self.state.notify('note_edit')
+        self._bend_drag_note = None
+        self._bend_drag_point_idx = None
+
 
 def _on_right_click(self, event):
     """Handle right-click."""
     pat = self.state.find_pattern(self.state.sel_pat)
     if not pat:
         return
-    
+
     x, y = event.pos().x(), event.pos().y()
+
+    if self.state.tool == 'bend':
+        # Delete bend control point under cursor
+        bn, bi = self._hit_bend_point(x, y)
+        if bn is not None and bi >= 0:
+            bn.bend.pop(bi)
+            self.app.engine.mark_dirty()
+            self.state.notify('note_edit')
+            self.refresh()
+        return
+
     n, i, _ = self._hit_note(x, y)
-    
+
     if n:
         from ..ops.note_edit import delete_note_at
         self._selected = delete_note_at(pat, i, self._selected)

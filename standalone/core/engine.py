@@ -35,6 +35,7 @@ class Instrument(Protocol):
     def set_program(self, channel: int, bank: int, program: int) -> None: ...
     def set_channel_volume(self, channel: int, volume: int) -> None: ...
     def all_notes_off(self, channel: int = -1) -> None: ...
+    def pitchbend(self, channel: int, value: int) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -85,15 +86,27 @@ class FluidSynthInstrument:
         # CC7 = channel volume
         self.fs.cc(channel, 7, max(0, min(127, volume)))
 
+    def pitchbend(self, channel: int, value: int) -> None:
+        """Send pitch bend. value is 14-bit (0-16383), center=8192.
+
+        pyfluidsynth's pitch_bend() takes a signed value (-8192..+8191, 0=center)
+        and adds 8192 internally before calling fluid_synth_pitch_bend.
+        We store/compute bend values in the MIDI-spec unsigned convention
+        (0-16383, 8192=center), so subtract 8192 here to convert.
+        """
+        self.fs.pitch_bend(channel, value - 8192)
+
     def all_notes_off(self, channel: int = -1) -> None:
         """Send all-notes-off. channel=-1 means all channels."""
         if channel == -1:
             for ch in range(16):
                 self.fs.cc(ch, 123, 0)   # CC 123 = all notes off
                 self.fs.cc(ch, 120, 0)   # CC 120 = all sound off (kills tails)
+                self.fs.pitch_bend(ch, 0)  # reset bend (pyfluidsynth signed: 0=center)
         else:
             self.fs.cc(channel, 123, 0)
             self.fs.cc(channel, 120, 0)
+            self.fs.pitch_bend(channel, 0)  # reset bend (pyfluidsynth signed: 0=center)
 
     def render(self, num_frames: int) -> np.ndarray:
         """Render num_frames of stereo audio.
@@ -147,6 +160,9 @@ class SineInstrument:
 
     def set_channel_volume(self, channel: int, volume: int) -> None:
         pass
+
+    def pitchbend(self, channel: int, value: int) -> None:
+        pass  # no-op for sine
 
     def all_notes_off(self, channel: int = -1) -> None:
         self._voices.clear()
@@ -208,6 +224,7 @@ EVT_NOTE_ON = 0
 EVT_NOTE_OFF = 1
 EVT_PROGRAM = 2
 EVT_VOLUME = 3
+EVT_BEND = 4  # pitch bend; pitch=14-bit value (0-16383, center=8192)
 
 @dataclass(slots=True)
 class SchedEvent:
@@ -224,8 +241,118 @@ class SchedEvent:
     velocity: int = 0
 
 
+_BEND_CENTER = 8192
+_BEND_RANGE_SEMITONES = 2.0   # matches FluidSynth default RPN 0 bend range
+_BEND_POOL = list(range(10, 16))  # channels reserved for auto-routed bent notes
+_BEND_RESOLUTION = 32  # bend events per beat (≈ 1 event per ~2ms at 120bpm)
+
+
+def _semitones_to_bend(semitones: float) -> int:
+    """Convert semitones to 14-bit MIDI pitch bend value."""
+    ratio = max(-1.0, min(1.0, semitones / _BEND_RANGE_SEMITONES))
+    return int(_BEND_CENTER + ratio * (_BEND_CENTER - 1 if ratio >= 0 else _BEND_CENTER))
+
+
+def _cubic_interp(t, p0, p1, p2, p3):
+    """Catmull-Rom cubic interpolation between p1 and p2, with p0/p3 as neighbours."""
+    return 0.5 * ((2 * p1) +
+                  (-p0 + p2) * t +
+                  (2*p0 - 5*p1 + 4*p2 - p3) * t*t +
+                  (-p0 + 3*p1 - 3*p2 + p3) * t*t*t)
+
+
+def _emit_bend_events(events, channel, note_start, note_duration, control_points):
+    """Emit a densely sampled bend curve for one note.
+
+    control_points: list of [beat_offset, semitones] sorted by beat_offset.
+    Pads with implicit zero-bend at start and end so curves return to neutral.
+    """
+    if not control_points:
+        return
+
+    # Sort and clamp offsets to note duration
+    pts = sorted(control_points, key=lambda p: p[0])
+    pts = [[max(0.0, min(note_duration, p[0])), p[1]] for p in pts]
+
+    # Build anchor list: implicit zero at start and end, but don't duplicate
+    # if the user already placed a point at t=0 or t=duration.
+    full = []
+    if pts[0][0] > 1e-9:
+        full.append([0.0, 0.0])
+    full.extend(pts)
+    if pts[-1][0] < note_duration - 1e-9:
+        full.append([note_duration, 0.0])
+
+    if len(full) < 2:
+        # Single point — constant bend, return to center at note end
+        if full:
+            bv = _semitones_to_bend(full[0][1])
+            events.append(SchedEvent(beat=note_start, event_type=EVT_BEND,
+                                     channel=channel, pitch=bv))
+        events.append(SchedEvent(beat=note_start + note_duration,
+                                 event_type=EVT_BEND, channel=channel,
+                                 pitch=_BEND_CENTER))
+        return
+
+    # Sample the curve at _BEND_RESOLUTION events/beat
+    step = 1.0 / _BEND_RESOLUTION
+    t = 0.0
+    prev_bend_val = -1  # force first event
+
+    while t <= note_duration + step * 0.5:
+        t_clamped = min(t, note_duration)
+
+        # Find surrounding control points for Catmull-Rom
+        seg = 0
+        for k in range(len(full) - 1):
+            if full[k][0] <= t_clamped < full[k+1][0]:
+                seg = k
+                break
+        # At exactly note_duration, use the last segment
+        if t_clamped >= full[-1][0]:
+            seg = len(full) - 2
+
+        t1, v1 = full[seg]
+        t2, v2 = full[min(len(full)-1, seg+1)]
+        v0 = full[max(0, seg-1)][1]
+        v3 = full[min(len(full)-1, seg+2)][1]
+
+        seg_len = t2 - t1
+        if seg_len > 1e-9:
+            local_t = max(0.0, min(1.0, (t_clamped - t1) / seg_len))
+            semitones = _cubic_interp(local_t, v0, v1, v2, v3)
+        else:
+            semitones = v1
+
+        bend_val = _semitones_to_bend(semitones)
+        if bend_val != prev_bend_val:
+            events.append(SchedEvent(
+                beat=note_start + t_clamped,
+                event_type=EVT_BEND,
+                channel=channel,
+                pitch=bend_val,
+            ))
+            prev_bend_val = bend_val
+
+        t += step
+
+    # Always reset bend to centre at note-off (same tick, sorts before next note-on)
+    if prev_bend_val != _BEND_CENTER:
+        events.append(SchedEvent(
+            beat=note_start + note_duration,
+            event_type=EVT_BEND,
+            channel=channel,
+            pitch=_BEND_CENTER,
+        ))
+
+
 def build_schedule(state) -> list[SchedEvent]:
     """Build a sorted event schedule from the current AppState.
+
+    Notes with pitch bend data are auto-routed to dedicated channels from
+    _BEND_POOL so that their per-note bend events don't interfere with other
+    notes on the same track channel. Program/volume setup events are emitted
+    for each routed channel so FluidSynth uses the right instrument.
 
     This runs on the main thread. The result is an immutable list that
     gets swapped atomically into the engine.
@@ -246,7 +373,32 @@ def build_schedule(state) -> list[SchedEvent]:
         events.append(SchedEvent(beat=-1, event_type=EVT_PROGRAM, channel=ch,
                                  pitch=inst.program, velocity=inst.bank))
 
-    # Melodic placements
+    # Melodic placements — with bend auto-routing
+    # We allocate bend channels per (track_channel, time_window) to handle
+    # polyphony: a pool channel is "in use" from note_on to note_off.
+    bend_pool_state: dict[int, float] = {}  # pool_ch -> note_off_beat (when it's free)
+    bend_channel_programs: set[int] = set()  # pool channels that have been set up
+
+    def alloc_bend_channel(on_beat, note_off_beat, bank, program, volume):
+        """Return a free pool channel, configuring it if needed."""
+        # A channel is free if its last note has finished before this one starts
+        for pool_ch in _BEND_POOL:
+            if bend_pool_state.get(pool_ch, -1.0) <= on_beat + 1e-9:
+                bend_pool_state[pool_ch] = note_off_beat
+                if pool_ch not in bend_channel_programs:
+                    events.append(SchedEvent(beat=-2, event_type=EVT_PROGRAM,
+                                             channel=pool_ch, pitch=program, velocity=bank))
+                    events.append(SchedEvent(beat=-2, event_type=EVT_VOLUME,
+                                             channel=pool_ch, pitch=volume))
+                    bend_channel_programs.add(pool_ch)
+                else:
+                    # Re-configure in case this track has a different program
+                    events.append(SchedEvent(beat=-2, event_type=EVT_PROGRAM,
+                                             channel=pool_ch, pitch=program, velocity=bank))
+                return pool_ch
+        # Pool exhausted — fall back to track channel
+        return track_ch
+
     for pl in state.placements:
         t = state.find_track(pl.track_id)
         pat = state.find_pattern(pl.pattern_id)
@@ -262,12 +414,19 @@ def build_schedule(state) -> list[SchedEvent]:
                 v = max(1, min(127, n.velocity))
                 on_beat = offset + n.start
                 off_beat = on_beat + n.duration
-                events.append(SchedEvent(beat=on_beat, event_type=EVT_NOTE_ON,
-                                         channel=ch, pitch=p, velocity=v))
-                events.append(SchedEvent(beat=off_beat, event_type=EVT_NOTE_OFF,
-                                         channel=ch, pitch=p))
 
-    # Beat placements
+                if n.bend:
+                    note_ch = alloc_bend_channel(on_beat, off_beat, t.bank, t.program, t.volume)
+                    _emit_bend_events(events, note_ch, on_beat, n.duration, n.bend)
+                else:
+                    note_ch = ch
+
+                events.append(SchedEvent(beat=on_beat, event_type=EVT_NOTE_ON,
+                                         channel=note_ch, pitch=p, velocity=v))
+                events.append(SchedEvent(beat=off_beat, event_type=EVT_NOTE_OFF,
+                                         channel=note_ch, pitch=p))
+
+    # Beat placements (no bend support — drums don't bend)
     for bp in state.beat_placements:
         bt = state.find_beat_track(bp.track_id)
         bpat = state.find_beat_pattern(bp.pattern_id)
@@ -292,8 +451,10 @@ def build_schedule(state) -> list[SchedEvent]:
                         events.append(SchedEvent(beat=off_beat, event_type=EVT_NOTE_OFF,
                                                  channel=ch, pitch=inst.pitch))
 
-    # Sort: by beat, then note-offs before note-ons at same beat (avoids re-triggering)
-    events.sort(key=lambda e: (e.beat, 0 if e.event_type == EVT_NOTE_OFF else 1))
+    # Sort: by beat, then: note-offs, bend, note-ons (avoids re-triggering and ensures
+    # bend is applied before new notes fire at the same beat position)
+    _order = {EVT_NOTE_OFF: 0, EVT_BEND: 1, EVT_PROGRAM: 1, EVT_VOLUME: 1, EVT_NOTE_ON: 2}
+    events.sort(key=lambda e: (e.beat, _order.get(e.event_type, 1)))
     return events
 
 
@@ -555,13 +716,17 @@ class AudioEngine:
                 self._retrigger_active_notes(old_schedule)
 
     def _apply_setup_events(self):
-        """Apply all setup events (beat < 0) — programs, volumes.
+        """Apply all setup events (beat < 0) — programs, volumes, bend resets.
 
         Always re-applies programs (no caching) because the user may have
-        changed track instruments since last play.
+        changed track instruments since last play. Also resets pitch bend on
+        all pool channels so residual state from a prior session doesn't bleed.
         """
         if not self._instrument:
             return
+        # Reset bend on all pool channels unconditionally
+        for pool_ch in _BEND_POOL:
+            self._instrument.pitchbend(pool_ch, _BEND_CENTER)
         for evt in self._schedule:
             if evt.beat >= 0:
                 break
@@ -640,6 +805,8 @@ class AudioEngine:
                     self._instrument.note_on(evt.pitch, evt.velocity, evt.channel)
                 elif evt.event_type == EVT_NOTE_OFF:
                     self._instrument.note_off(evt.pitch, evt.channel)
+                elif evt.event_type == EVT_BEND:
+                    self._instrument.pitchbend(evt.channel, evt.pitch)
             idx += 1
 
         self._sched_idx = idx
@@ -726,7 +893,9 @@ class AudioEngine:
         else:
             inst = SineInstrument(self.settings)
 
-        # Apply setup events
+        # Apply setup events (programs, volumes) and reset all pool bend channels
+        for pool_ch in _BEND_POOL:
+            inst.pitchbend(pool_ch, _BEND_CENTER)
         for evt in schedule:
             if evt.beat >= 0:
                 break
@@ -758,6 +927,8 @@ class AudioEngine:
                     inst.note_on(evt.pitch, evt.velocity, evt.channel)
                 elif evt.event_type == EVT_NOTE_OFF:
                     inst.note_off(evt.pitch, evt.channel)
+                elif evt.event_type == EVT_BEND:
+                    inst.pitchbend(evt.channel, evt.pitch)
                 sched_idx += 1
 
             audio = inst.render(n)
