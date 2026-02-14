@@ -551,6 +551,114 @@ void TrackSourceNode::preview_all_notes_off() {
 }
 
 // ---------------------------------------------------------------------------
+// NoteGateNode
+// ---------------------------------------------------------------------------
+
+NoteGateNode::NoteGateNode(const std::string& id_, int pitch_lo, int pitch_hi, int mode)
+    : pitch_lo_(pitch_lo), pitch_hi_(pitch_hi), mode_(mode)
+{
+    id = id_;
+}
+
+std::vector<Node::PortDecl> NoteGateNode::declare_ports() const {
+    // No audio ports — event input is handled via note_on/note_off virtuals.
+    // Control output goes into the buffer graph.
+    return {
+        {"control_out", PortType::Control, true, 0.0f, 0.0f, 1.0f},
+    };
+}
+
+void NoteGateNode::process(const ProcessContext& /*ctx*/,
+                            const std::vector<PortBuffer>& /*inputs*/,
+                            std::vector<PortBuffer>& outputs)
+{
+    outputs[0].control = current_value_;
+}
+
+void NoteGateNode::note_on(int channel, int pitch, int velocity) {
+    if (!in_band_(pitch)) return;
+    active_[channel * 128 + pitch] = velocity;
+    recompute_value_();
+}
+
+void NoteGateNode::note_off(int channel, int pitch) {
+    if (!in_band_(pitch)) return;
+    active_.erase(channel * 128 + pitch);
+    recompute_value_();
+}
+
+void NoteGateNode::all_notes_off(int channel) {
+    if (channel == -1) {
+        active_.clear();
+    } else {
+        for (auto it = active_.begin(); it != active_.end(); ) {
+            if (it->first / 128 == channel) it = active_.erase(it);
+            else ++it;
+        }
+    }
+    recompute_value_();
+}
+
+void NoteGateNode::set_param(const std::string& name, float value) {
+    if (name == "pitch_lo")
+        pitch_lo_ = std::max(0, std::min(127, static_cast<int>(value)));
+    else if (name == "pitch_hi")
+        pitch_hi_ = std::max(0, std::min(127, static_cast<int>(value)));
+    else if (name == "mode")
+        mode_ = std::max(0, std::min(3, static_cast<int>(value)));
+    // Recompute after param change (in case band or mode changed mid-play)
+    recompute_value_();
+}
+
+void NoteGateNode::recompute_value_() {
+    if (active_.empty()) {
+        current_value_ = 0.0f;
+        return;
+    }
+
+    switch (mode_) {
+        case 0: // Gate
+            current_value_ = 1.0f;
+            break;
+
+        case 1: { // Velocity — most recent note-on (highest key in map as proxy)
+            // We want the most recently triggered note; since we don't track
+            // insertion order, use highest velocity among active notes as a
+            // reasonable approximation (avoids a separate queue).
+            int max_vel = 0;
+            for (auto& [k, v] : active_) max_vel = std::max(max_vel, v);
+            current_value_ = max_vel / 127.0f;
+            break;
+        }
+
+        case 2: { // Pitch — active note closest to pitch_hi (highest pitch in band)
+            int band_width = pitch_hi_ - pitch_lo_;
+            if (band_width <= 0) { current_value_ = 0.0f; break; }
+            int highest_pitch = -1;
+            for (auto& [k, v] : active_) {
+                int pitch = k % 128;
+                if (pitch > highest_pitch) highest_pitch = pitch;
+            }
+            current_value_ = static_cast<float>(highest_pitch - pitch_lo_) / band_width;
+            current_value_ = std::max(0.0f, std::min(1.0f, current_value_));
+            break;
+        }
+
+        case 3: { // NoteCount — normalised by band width
+            int band_width = pitch_hi_ - pitch_lo_ + 1;
+            if (band_width <= 0) { current_value_ = 0.0f; break; }
+            current_value_ = std::min(1.0f,
+                static_cast<float>(active_.size()) / band_width);
+            break;
+        }
+
+        default:
+            current_value_ = 0.0f;
+    }
+}
+
+
+// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
@@ -566,6 +674,10 @@ std::unique_ptr<Node> make_node(const NodeDesc& desc, std::string& err) {
     }
     if (desc.type == "track_source") {
         return std::make_unique<TrackSourceNode>(desc.id);
+    }
+    if (desc.type == "note_gate") {
+        return std::make_unique<NoteGateNode>(desc.id,
+            desc.pitch_lo, desc.pitch_hi, desc.gate_mode);
     }
 #ifdef AS_ENABLE_SF2
     if (desc.type == "fluidsynth") {

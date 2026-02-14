@@ -396,12 +396,24 @@ class ServerEngine:
             [bt.id for bt in self.state.beat_tracks]
         )
 
+    def _graph_payload(self) -> dict:
+        """Build the set_graph payload, using the custom graph model if present."""
+        if self.state.signal_graph is not None:
+            return self.state.signal_graph.to_server_dict(bpm=self.state.bpm)
+        # Fall back to the auto-generated default
+        return _build_graph(self.state, self._sf2_path)
+
     def load_sf2(self, sf2_path: str) -> bool:
         """Rebuild the graph with a fluidsynth node.  Returns True on success."""
-        resp = self._send(_build_graph(self.state, sf2_path))
+        self._sf2_path = sf2_path
+        # Update the default synth's sf2_path in the custom graph if one exists
+        if self.state.signal_graph is not None:
+            for node in self.state.signal_graph.nodes:
+                if node.node_type == "fluidsynth" and node.is_default_synth:
+                    node.params["sf2_path"] = sf2_path
+        resp = self._send(self._graph_payload())
         ok = resp is not None and resp.get("status") == "ok"
         if ok:
-            self._sf2_path = sf2_path
             self._graph_loaded = True
             self._graph_track_ids = self._current_track_ids()
         else:
@@ -413,10 +425,14 @@ class ServerEngine:
 
         Rebuilds if no graph has been loaded yet, or if the track set has
         changed since the last build (new track added, track deleted).
+        When a custom graph model is active, syncs its track_source nodes
+        to match the current tracks before sending.
         """
         current = self._current_track_ids()
         if not self._graph_loaded or current != self._graph_track_ids:
-            resp = self._send(_build_graph(self.state, self._sf2_path))
+            if self.state.signal_graph is not None:
+                self.state.signal_graph.sync_track_sources(self.state, self._sf2_path)
+            resp = self._send(self._graph_payload())
             if resp and resp.get("status") == "ok":
                 self._graph_loaded = True
                 self._graph_track_ids = current
@@ -427,7 +443,9 @@ class ServerEngine:
 
     def mark_dirty(self):
         """Rebuild the graph (in case tracks changed) and push a fresh schedule."""
-        self._send(_build_graph(self.state, self._sf2_path))
+        if self.state.signal_graph is not None:
+            self.state.signal_graph.sync_track_sources(self.state, self._sf2_path)
+        self._send(self._graph_payload())
         self._graph_loaded = True
         self._graph_track_ids = self._current_track_ids()
         self._send({"cmd": "set_bpm", "bpm": self.state.bpm})

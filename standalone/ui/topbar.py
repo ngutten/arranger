@@ -95,6 +95,14 @@ class TopBar(QFrame):
         config_btn.clicked.connect(self.app.open_config)
         layout.addWidget(config_btn)
 
+        # Graph Editor button — enabled only when server engine is active
+        self.graph_btn = QPushButton('Graph ⬡')
+        self.graph_btn.setToolTip(
+            'Open signal graph editor\n'
+            '(requires the C++ audio server backend)')
+        self.graph_btn.clicked.connect(self.app.open_graph_editor)
+        layout.addWidget(self.graph_btn)
+
         add_track_btn = QPushButton('+ Track')
         add_track_btn.clicked.connect(self.app.add_track)
         layout.addWidget(add_track_btn)
@@ -173,3 +181,15 @@ class TopBar(QFrame):
         self.snap_combo.setCurrentText(snap_map.get(self.state.snap, '1/4'))
         
         self.play_btn.setText('⏹' if self.state.playing else '▶')
+
+        # Enable graph editor button only when server engine is active
+        try:
+            from ..core.server_engine import ServerEngine
+            graph_available = isinstance(self.app.engine, ServerEngine)
+        except Exception:
+            graph_available = False
+        self.graph_btn.setEnabled(graph_available)
+        self.graph_btn.setToolTip(
+            'Open signal graph editor' if graph_available
+            else 'Signal graph editor requires the C++ audio server backend'
+        )

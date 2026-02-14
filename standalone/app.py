@@ -44,6 +44,12 @@ from .ui.beat_grid import BeatGrid
 from .ui.track_panel import TrackPanel
 from .ui.dialogs import PatternDialog, BeatPatternDialog, SF2Dialog, ConfigDialog
 
+#try:
+from .graph_editor import GraphModel, GraphEditorWindow
+_HAS_GRAPH_EDITOR = True
+#except ImportError:
+#    _HAS_GRAPH_EDITOR = False
+
 class App(QMainWindow):
     """Main application - owns the state, creates the window, coordinates UI."""
 
@@ -72,6 +78,9 @@ class App(QMainWindow):
 
         # Realtime audio engine
         self.engine = None  # initialized in _init_engine()
+
+        # Graph editor window (non-modal; lazily created)
+        self._graph_editor_window = None
 
         # Drag-and-drop state
         self._drag_type = None
@@ -327,6 +336,9 @@ class App(QMainWindow):
         # Auto-load first SF2
         self._auto_load_sf2()
 
+        # Build default graph model (done after SF2 load so sf2_path is known)
+        self._ensure_graph_model()
+
         # Initial render
         self._refresh_all()
 
@@ -379,6 +391,65 @@ class App(QMainWindow):
                 sf2_path = _get_sf2_path(sf2_list[0])
                 if sf2_path:
                     self.engine.load_sf2(sf2_path)
+
+    def _ensure_graph_model(self) -> None:
+        """Build a default GraphModel if one doesn't exist yet.
+
+        Called after engine init and SF2 load so the default synth can be
+        populated with the correct SF2 path.
+        """
+        if not _HAS_GRAPH_EDITOR:
+            return
+        if self.state.signal_graph is not None:
+            # Already loaded (e.g. from project file); just sync track sources
+            sf2_path = self._current_sf2_path()
+            self.state.signal_graph.sync_track_sources(self.state, sf2_path)
+            return
+        sf2_path = self._current_sf2_path()
+        self.state.signal_graph = GraphModel.make_default(self.state, sf2_path)
+
+    def _current_sf2_path(self) -> str:
+        """Return the currently loaded SF2 path, or ''."""
+        if self.state.sf2 and hasattr(self.state.sf2, 'path'):
+            return self.state.sf2.path
+        if self.engine and hasattr(self.engine, '_sf2_path'):
+            return self.engine._sf2_path or ''
+        return ''
+
+    def open_graph_editor(self) -> None:
+        """Open (or raise) the signal graph editor window."""
+        if not _HAS_GRAPH_EDITOR:
+            print("Error: no graph editor")
+            return
+        # Only available when ServerEngine is active
+        if not (_HAS_SERVER_ENGINE and isinstance(self.engine,
+                __import__('standalone.core.server_engine',
+                           fromlist=['ServerEngine']).ServerEngine)):
+            return
+
+        if self._graph_editor_window is not None:
+            self._graph_editor_window.raise_()
+            self._graph_editor_window.activateWindow()
+            return
+
+        self._graph_editor_window = GraphEditorWindow(
+            model=self.state.signal_graph,
+            server_engine=self.engine,
+            state=self.state,
+            on_graph_changed=self._on_graph_model_changed,
+            parent=None,   # free-floating window
+        )
+        self._graph_editor_window.closed.connect(self._on_graph_editor_closed)
+        self._graph_editor_window.show()
+
+    def _on_graph_model_changed(self, model) -> None:
+        """Called when the graph editor makes a live change."""
+        # model is the same object as self.state.signal_graph (edited in-place)
+        # Nothing extra needed; the editor has already pushed to the server.
+        pass
+
+    def _on_graph_editor_closed(self) -> None:
+        self._graph_editor_window = None
 
     def _on_state_change(self, source=None):
         """Called whenever state changes. Refreshes relevant UI components."""
@@ -614,7 +685,11 @@ class App(QMainWindow):
 
     def add_track(self):
         """Create a new track."""
-        trk_ops.add_track(self.state)
+        t = trk_ops.add_track(self.state)
+        if _HAS_GRAPH_EDITOR and self.state.signal_graph is not None:
+            self.state.signal_graph.add_track_source(
+                t.id, t.name, self._current_sf2_path())
+            self._push_graph_to_engine()
 
     def delete_track(self, tid):
         """Delete a track and its placements."""
@@ -623,10 +698,17 @@ class App(QMainWindow):
             p for p in self.arrangement.selected_placements
             if p.id not in deleted_ids
         ]
+        if _HAS_GRAPH_EDITOR and self.state.signal_graph is not None:
+            self.state.signal_graph.remove_track_source(tid)
+            self._push_graph_to_engine()
 
     def add_beat_track(self):
         """Create a new beat track."""
-        trk_ops.add_beat_track(self.state)
+        bt = trk_ops.add_beat_track(self.state)
+        if _HAS_GRAPH_EDITOR and self.state.signal_graph is not None:
+            self.state.signal_graph.add_track_source(
+                bt.id, bt.name, self._current_sf2_path())
+            self._push_graph_to_engine()
 
     def delete_beat_track(self, btid):
         """Delete a beat track and its placements."""
@@ -635,6 +717,18 @@ class App(QMainWindow):
             p for p in self.arrangement.selected_beat_placements
             if p.id not in deleted_ids
         ]
+        if _HAS_GRAPH_EDITOR and self.state.signal_graph is not None:
+            self.state.signal_graph.remove_track_source(btid)
+            self._push_graph_to_engine()
+
+    def _push_graph_to_engine(self) -> None:
+        """Push the current graph model to the engine if it's a ServerEngine."""
+        if self.engine and hasattr(self.engine, '_send') and self.state.signal_graph:
+            payload = self.state.signal_graph.to_server_dict(bpm=self.state.bpm)
+            self.engine._send(payload)
+            # Refresh graph editor canvas if open
+            if self._graph_editor_window is not None:
+                self._graph_editor_window._canvas.update()
 
     def add_beat_instrument(self):
         """Add an instrument to the beat kit."""
@@ -961,10 +1055,14 @@ class App(QMainWindow):
                 self.state.sel_pat = self.state.patterns[0].id
                 self.piano_roll.clear_selection()
                 self.topbar.refresh()
+                # Build/sync graph model after loading
+                self._ensure_graph_model()
+                if self._graph_editor_window is not None:
+                    self._graph_editor_window._canvas.set_model(self.state.signal_graph)
                 self._refresh_all()
             except Exception as e:
                 QMessageBox.critical(self, 'Error', f'Failed to load initial state: {e}')
- 
+
     def save_project(self):
         path, _ = QFileDialog.getSaveFileName(
             self, 'Save Project', '', 'JSON files (*.json);;All files (*.*)')
@@ -984,6 +1082,11 @@ class App(QMainWindow):
                 project_io.load_project(self.state, path, sf2_loader)
                 self.piano_roll.clear_selection()
                 self.topbar.refresh()
+                # Sync/rebuild graph model
+                self._ensure_graph_model()
+                if self._graph_editor_window is not None:
+                    self._graph_editor_window._canvas.set_model(self.state.signal_graph)
+                    self._graph_editor_window._canvas.frame_all()
                 self._refresh_all()
             except Exception as e:
                 QMessageBox.critical(self, 'Error', f'Failed to load project: {e}')

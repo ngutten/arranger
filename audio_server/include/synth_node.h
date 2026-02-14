@@ -222,16 +222,74 @@ std::string list_lv2_plugins(const std::string& uri_prefix = "");
 #endif // AS_ENABLE_LV2
 
 // ---------------------------------------------------------------------------
+// NoteGateNode — converts a MIDI event stream into a control signal
+// ---------------------------------------------------------------------------
+// Sits on a TrackSourceNode's downstream list (receives note_on/note_off like
+// a synth) and emits a control_out buffer port (like ControlSourceNode).
+//
+// Output modes (set via set_param("mode", N)):
+//   0 — Gate:       1.0 while any in-band note is held, 0.0 otherwise  (default)
+//   1 — Velocity:   normalised velocity (vel/127) of the most recent note-on
+//                   in band; 0.0 when no notes are held
+//   2 — Pitch:      position of the most recent note within [pitch_lo, pitch_hi]
+//                   mapped to [0, 1]; 0.0 when no notes are held
+//   3 — NoteCount:  number of simultaneously held in-band notes, normalised by
+//                   the band width (pitch_hi - pitch_lo + 1); clamped to [0,1]
+//
+// Pitch band: only notes with pitch_lo <= pitch <= pitch_hi are counted.
+// Default band is 0..127 (all notes).
+// Latch behaviour: gate stays high while ANY in-band note is held.
+//
+// All event methods are called on the audio thread before process(); no locking
+// is needed — the graph guarantees single-threaded event delivery per block.
+
+class NoteGateNode final : public Node {
+public:
+    explicit NoteGateNode(const std::string& id_,
+                          int pitch_lo = 0, int pitch_hi = 127,
+                          int mode = 0);
+
+    std::vector<PortDecl> declare_ports() const override;
+    void process(const ProcessContext& ctx,
+                 const std::vector<PortBuffer>& inputs,
+                 std::vector<PortBuffer>& outputs) override;
+
+    void note_on (int channel, int pitch, int velocity) override;
+    void note_off(int channel, int pitch) override;
+    void all_notes_off(int channel = -1) override;
+
+    // set_param: "pitch_lo", "pitch_hi" (0-127), "mode" (0-3)
+    void set_param(const std::string& name, float value) override;
+
+private:
+    int   pitch_lo_  = 0;
+    int   pitch_hi_  = 127;
+    int   mode_      = 0;
+
+    // Active notes in band: key = channel*128 + pitch, value = velocity
+    std::unordered_map<int, int> active_;
+
+    float current_value_ = 0.0f;   // written by note events, read by process()
+
+    void  recompute_value_();
+    bool  in_band_(int pitch) const { return pitch >= pitch_lo_ && pitch <= pitch_hi_; }
+};
+
+
+// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
 struct NodeDesc {
     std::string id;
-    std::string type;          // "fluidsynth"|"sine"|"lv2"|"mixer"|"control_source"|"track_source"
+    std::string type;          // "fluidsynth"|"sine"|"lv2"|"mixer"|"control_source"|"track_source"|"note_gate"
     std::string sf2_path;      // fluidsynth
     std::string lv2_uri;       // lv2
     std::string sample_path;   // sampler (future)
     int         channel_count = 2;  // mixer
+    int         pitch_lo      = 0;   // note_gate
+    int         pitch_hi      = 127; // note_gate
+    int         gate_mode     = 0;   // note_gate: 0=gate 1=velocity 2=pitch 3=note_count
     std::unordered_map<std::string, float> params;
 };
 

@@ -45,6 +45,9 @@ std::unique_ptr<Graph> Graph::from_json(const std::string& j_str, std::string& e
         desc.lv2_uri     = jn.value("lv2_uri", "");
         desc.sample_path = jn.value("sample_path", "");
         desc.channel_count = jn.value("channel_count", 2);
+        desc.pitch_lo    = jn.value("pitch_lo", 0);
+        desc.pitch_hi    = jn.value("pitch_hi", 127);
+        desc.gate_mode   = jn.value("gate_mode", 0);
         if (jn.contains("params")) {
             for (auto& [k, v] : jn["params"].items()) {
                 desc.params[k] = v.get<float>();
@@ -103,8 +106,8 @@ bool Graph::activate(float sample_rate, int max_block_size) {
     }
 
     // Wire downstream processor nodes into each TrackSourceNode.
-    // A track source fans out to every node that has its events_out port
-    // connected to an input port of that node.
+    // Any node connected from a track_source (regardless of type) receives
+    // note events. This covers synth nodes AND NoteGateNodes.
     for (auto& entry : nodes_) {
         auto* src = dynamic_cast<TrackSourceNode*>(entry.node.get());
         if (!src) continue;

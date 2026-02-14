@@ -6,3 +6,5 @@ autosave.json
 logs/
 run.sh
 *~
+*.zip
+build/

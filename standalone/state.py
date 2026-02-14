@@ -445,6 +445,10 @@ class AppState:
         self.loop_start: Optional[float] = None   # beat position, None = start of arrangement
         self.loop_end: Optional[float] = None     # beat position, None = end of arrangement
 
+        # Signal graph — owned by GraphModel; None means use the automatic default
+        # built from current tracks in ServerEngine._ensure_graph().
+        self.signal_graph = None   # type: Optional[object]  (GraphModel)
+
         # Internal
         self._next_id: int = 1
         self._listeners: list[Callable] = []
@@ -631,6 +635,8 @@ class AppState:
             'beatPlacements': [p.to_dict() for p in self.beat_placements],
             'sf2Path': self.sf2.path if self.sf2 else None,
             'nextId': self._next_id,
+            'signalGraph': (self.signal_graph.to_dict()
+                            if self.signal_graph is not None else None),
         }
         return json.dumps(data, indent=2)
 
@@ -656,4 +662,14 @@ class AppState:
         self.sel_beat_pl = None
         # sf2Path is stored but the caller must reload the SF2 file
         self._sf2_path_hint = d.get('sf2Path')
+        # Signal graph
+        sg_data = d.get('signalGraph')
+        if sg_data is not None:
+            try:
+                from .graph_editor import GraphModel
+                self.signal_graph = GraphModel.from_dict(sg_data)
+            except Exception:
+                self.signal_graph = None
+        else:
+            self.signal_graph = None
         self.notify()
