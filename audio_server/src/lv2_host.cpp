@@ -107,10 +107,16 @@ std::string list_lv2_plugins(const std::string& uri_prefix) {
             // sym is owned by the plugin — do not free it
         }
 
+        // Plugin class / category (most specific class from the LV2 hierarchy)
+        const LilvPluginClass* cls       = lilv_plugin_get_class(p);
+        const LilvNode*        cls_label = lilv_plugin_class_get_label(cls);
+        std::string category = cls_label ? lilv_node_as_string(cls_label) : "Plugin";
+
         arr.push_back({
-            {"uri",   uri},
-            {"name",  name},
-            {"ports", ports_arr},
+            {"uri",      uri},
+            {"name",     name},
+            {"category", category},
+            {"ports",    ports_arr},
         });
     }
 

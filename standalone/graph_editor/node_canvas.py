@@ -402,6 +402,18 @@ class NodeGraphCanvas(QWidget):
             w.setGeometry(int(tl.x()), int(tl.y()), w_width, w_height)
             w.show()
 
+            # For LV2 nodes: refresh which control ports are driven by wires
+            refresh = getattr(w, "refresh_wired_ports", None)
+            if refresh is not None:
+                wired = {
+                    c.to_port
+                    for c in self.model.connections
+                    if c.to_node == node.node_id
+                    and self.model._port_type_for(node.node_id, c.to_port)
+                       is not None
+                }
+                refresh(wired)
+
     # -----------------------------------------------------------------------
     # Paint
     # -----------------------------------------------------------------------
@@ -809,6 +821,11 @@ class NodeGraphCanvas(QWidget):
                          n.node_type not in ("track_source",)]
             for nid in to_del:
                 self.model.remove_node(nid)
+                # Remove the inline settings widget so it doesn't linger on screen
+                w = self._settings_widgets.pop(nid, None)
+                if w:
+                    w.setParent(None)
+                    w.deleteLater()
             self.selected_nodes -= set(to_del)
             if to_del:
                 self.graph_changed.emit()
@@ -975,16 +992,91 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable):
         return w
 
     if t == "lv2":
-        # LV2 URI display (read-only; node was created via the server query flow)
+        # LV2 node: show URI (small, dimmed) plus a spinbox for every control
+        # input port that has range metadata.  Spinboxes are disabled (greyed)
+        # whenever a wire is connected to the corresponding port — the canvas
+        # calls w.refresh_wired_ports(set_of_port_ids) on each repaint.
+        from PySide6.QtWidgets import QDoubleSpinBox as _DSB, QScrollArea
+
+        raw_ports = node.params.get("_ports", [])
+        ctrl_inputs = [p for p in raw_ports
+                       if p.get("type") == "control" and p.get("direction") == "input"]
+
         w = QWidget(parent)
         w.setStyleSheet("background: transparent; color: #ccc;")
         lay = QFormLayout(w)
         lay.setContentsMargins(4, 2, 4, 2)
         lay.setSpacing(2)
+
+        # URI row (always shown, read-only, small)
         uri_lbl = QLabel(node.params.get("lv2_uri", ""))
-        uri_lbl.setStyleSheet("color: #888; font-size: 9px;")
+        uri_lbl.setStyleSheet("color: #555; font-size: 8px;")
         uri_lbl.setWordWrap(True)
         lay.addRow(QLabel("URI:"), uri_lbl)
+
+        # Dual-mono badge — shown when the plugin is mono and will be run ×2
+        # (the flag is populated lazily by ports(), so call it now if needed)
+        if "_dual_mono" not in node.params:
+            node.ports()
+        if node.params.get("_dual_mono"):
+            badge = QLabel("⇄ dual mono ×2")
+            badge.setStyleSheet(
+                "color: #6bcb77; font-size: 8px; background: #0d1a0d;"
+                " border: 1px solid #2a4a2a; border-radius: 3px; padding: 1px 4px;")
+            lay.addRow(badge)
+
+        # One spinbox per control input port
+        # dict: symbol → QDoubleSpinBox
+        _ctrl_spins: dict = {}
+
+        SPIN_STYLE_ACTIVE   = "background: #0d1117; color: #ccc; border: 1px solid #2a3a5c;"
+        SPIN_STYLE_DISABLED = "background: #111; color: #444; border: 1px solid #1a1a1a;"
+
+        for p in ctrl_inputs:
+            sym     = p.get("symbol", "")
+            lbl_txt = p.get("name", sym) or sym
+            p_min   = float(p.get("min",     0.0))
+            p_max   = float(p.get("max",     1.0))
+            p_def   = float(p.get("default", 0.0))
+            # Clamp default to range
+            p_def   = max(p_min, min(p_max, p_def))
+            # Compute a reasonable step and decimal count from the range
+            span    = p_max - p_min if p_max != p_min else 1.0
+            if span <= 0.1:
+                step, dec = 0.001, 4
+            elif span <= 2.0:
+                step, dec = 0.01, 3
+            elif span <= 20.0:
+                step, dec = 0.1, 2
+            elif span <= 200.0:
+                step, dec = 1.0, 1
+            else:
+                step, dec = 10.0, 0
+
+            spin = _DSB()
+            spin.setRange(p_min, p_max)
+            spin.setSingleStep(step)
+            spin.setDecimals(dec)
+            stored = node.params.get(sym, p_def)
+            spin.setValue(float(stored))
+            spin.setStyleSheet(SPIN_STYLE_ACTIVE)
+            spin.setMaximumWidth(90)
+            sym_capture = sym
+            spin.valueChanged.connect(
+                lambda v, k=sym_capture: on_change(node.node_id, k, v))
+            row_lbl = QLabel(lbl_txt + ":")
+            row_lbl.setStyleSheet("color: #aaa; font-size: 8px;")
+            lay.addRow(row_lbl, spin)
+            _ctrl_spins[sym] = spin
+
+        def refresh_wired_ports(wired: set):
+            """Called by canvas to grey out ports driven by a wire."""
+            for sym, spin in _ctrl_spins.items():
+                driven = sym in wired
+                spin.setEnabled(not driven)
+                spin.setStyleSheet(SPIN_STYLE_DISABLED if driven else SPIN_STYLE_ACTIVE)
+
+        w.refresh_wired_ports = refresh_wired_ports
         return w
 
     if t in ("mixer", "output"):

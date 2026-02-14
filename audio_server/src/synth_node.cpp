@@ -405,7 +405,9 @@ void LV2Node::activate(float sample_rate, int max_block_size) {
             LilvNode* def_n = nullptr; LilvNode* min_n = nullptr; LilvNode* max_n = nullptr;
             lilv_port_get_range(impl_->plugin, port, &def_n, &min_n, &max_n);
             if (def_n && lilv_node_is_float(def_n)) pi.value = lilv_node_as_float(def_n);
-            lilv_node_free(def_n); lilv_node_free(min_n); lilv_node_free(max_n);
+            if (def_n) lilv_node_free(def_n);
+            if (min_n) lilv_node_free(min_n);
+            if (max_n) lilv_node_free(max_n);
             lilv_instance_connect_port(impl_->instance, i, &pi.value);
         }
     }
@@ -443,6 +445,8 @@ void LV2Node::process(const ProcessContext& ctx,
                        const std::vector<PortBuffer>& inputs,
                        std::vector<PortBuffer>& outputs)
 {
+    if (!impl_->instance) return;  // not yet activated (or activation failed)
+
     // Copy graph input buffers into LV2 audio input port buffers
     for (size_t i = 0; i < inputs.size() && i < impl_->audio_in_idx.size(); ++i) {
         auto& p = impl_->ports[impl_->audio_in_idx[i]];

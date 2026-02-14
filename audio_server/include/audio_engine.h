@@ -122,8 +122,9 @@ private:
     // Graph — swapped atomically. Audio thread reads active_graph_.
     std::unique_ptr<Graph>       pending_graph_;
     std::atomic<Graph*>          active_graph_  { nullptr };
-    std::unique_ptr<Graph>       owned_graph_;   // keeps lifetime on main thread
-    std::mutex                   graph_mutex_;   // protects pending_graph_
+    std::unique_ptr<Graph>       owned_graph_;     // current graph (audio thread reads this)
+    std::unique_ptr<Graph>       retiring_graph_;  // previous graph, freed on next set_graph
+    std::mutex                   graph_mutex_;     // protects owned_graph_ / retiring_graph_
 
     // Dispatcher — lives on audio thread
     Dispatcher dispatcher_;

@@ -140,10 +140,15 @@ void AudioEngine::close() {
         Pa_CloseStream(static_cast<PaStream*>(stream_));
         stream_ = nullptr;
     }
+    // Stop the audio thread from seeing either graph before we free them
+    active_graph_.store(nullptr, std::memory_order_release);
     if (owned_graph_) {
         owned_graph_->deactivate();
-        active_graph_.store(nullptr);
         owned_graph_.reset();
+    }
+    if (retiring_graph_) {
+        retiring_graph_->deactivate();
+        retiring_graph_.reset();
     }
 }
 
@@ -161,14 +166,23 @@ std::string AudioEngine::set_graph(const std::string& graph_json) {
         if (j.contains("bpm")) bpm_ = j["bpm"].get<float>();
     } catch (...) {}
 
-    std::unique_ptr<Graph> old;
     {
         std::lock_guard<std::mutex> lk(graph_mutex_);
-        old = std::move(owned_graph_);
+
+        // Retire the previous "old" graph now — by the time set_graph is called
+        // again, at least one audio callback has completed and moved to the graph
+        // that was current_ at that point.  This one-generation lag ensures the
+        // audio thread is never inside a graph we're freeing.
+        retiring_graph_.reset();
+
+        // Move the currently-active graph to retiring; it will be freed on the
+        // next set_graph call (safe because the audio thread will have moved to
+        // owned_graph_ before then).
+        retiring_graph_ = std::move(owned_graph_);
+
         owned_graph_ = std::move(g);
         active_graph_.store(owned_graph_.get(), std::memory_order_release);
     }
-    if (old) old->deactivate();
     return {};
 }
 

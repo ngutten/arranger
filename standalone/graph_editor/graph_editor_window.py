@@ -62,6 +62,7 @@ class GraphEditorWindow(QWidget):
     """
 
     closed = Signal()
+    _lv2_plugins_ready = Signal(object)   # carries the response dict; emitted from worker thread
 
     def __init__(self, model: GraphModel, server_engine,
                  state, on_graph_changed: Callable = None,
@@ -86,6 +87,8 @@ class GraphEditorWindow(QWidget):
         self._lv2_plugins: list[dict] = []   # fetched once on open
 
         self._build_ui()
+        # Connect before fetch so the signal is wired before the worker can emit
+        self._lv2_plugins_ready.connect(self._populate_lv2_menu)
         self._fetch_lv2_plugins()
 
         # Apply dark palette matching the main window
@@ -231,12 +234,14 @@ class GraphEditorWindow(QWidget):
             except Exception:
                 return None
 
-        # Run in a background thread so the UI doesn't stall
+        # Run in a background thread so the UI doesn't stall.
+        # Use a queued signal (auto-connection crosses threads safely in Qt)
+        # rather than QTimer.singleShot, which is not safe to call from a
+        # non-Qt thread and silently drops the callback.
         import threading
         def _worker():
             resp = _fetch()
-            # Schedule UI update back on main thread
-            QTimer.singleShot(0, lambda: self._populate_lv2_menu(resp))
+            self._lv2_plugins_ready.emit(resp)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -255,15 +260,46 @@ class GraphEditorWindow(QWidget):
             act.setEnabled(False)
             return
 
+        # Group by category (supplied by server via lilv_plugin_get_class).
+        # Each category gets a submenu; within each submenu plugins are sorted
+        # alphabetically.  "Plugin" (the catch-all root class) goes last as
+        # "Other".
+        from collections import defaultdict
+        by_category: dict = defaultdict(list)
         for p in plugins:
-            name = p.get("name", p.get("uri", "?"))
-            uri  = p.get("uri", "")
-            ports = p.get("ports", [])
-            act = self._plugins_menu.addAction(name)
-            # capture
-            act.triggered.connect(
-                lambda checked=False, u=uri, n=name, ps=ports:
-                self._add_lv2_node(u, n, ps))
+            cat = p.get("category", "Plugin") or "Plugin"
+            by_category[cat].append(p)
+
+        def _add_category(menu, cat_plugins):
+            for p in sorted(cat_plugins, key=lambda x: x.get("name", "").lower()):
+                name  = p.get("name", p.get("uri", "?"))
+                uri   = p.get("uri", "")
+                ports = p.get("ports", [])
+                act   = menu.addAction(name)
+                act.triggered.connect(
+                    lambda checked=False, u=uri, n=name, ps=ports:
+                    self._add_lv2_node(u, n, ps))
+
+        # Sort categories; push the generic "Plugin" bucket to the bottom as "Other"
+        cats = sorted(c for c in by_category if c != "Plugin")
+        if "Plugin" in by_category:
+            cats.append("Plugin")
+
+        for cat in cats:
+            display = "Other" if cat == "Plugin" else cat
+            if len(by_category[cat]) == 1:
+                # Single-entry category — add directly rather than nesting one deep
+                p     = by_category[cat][0]
+                name  = p.get("name", p.get("uri", "?"))
+                uri   = p.get("uri", "")
+                ports = p.get("ports", [])
+                act   = self._plugins_menu.addAction(f"{name}  [{display}]")
+                act.triggered.connect(
+                    lambda checked=False, u=uri, n=name, ps=ports:
+                    self._add_lv2_node(u, n, ps))
+            else:
+                sub = self._plugins_menu.addMenu(display)
+                _add_category(sub, by_category[cat])
 
     # -----------------------------------------------------------------------
     # Node add helpers
@@ -376,6 +412,11 @@ class GraphEditorWindow(QWidget):
     def _delete_node(self, node: GraphNode) -> None:
         self.model.remove_node(node.node_id)
         self._canvas.selected_nodes.discard(node.node_id)
+        # Clean up the inline settings widget so it doesn't linger on screen
+        w = self._canvas._settings_widgets.pop(node.node_id, None)
+        if w:
+            w.setParent(None)
+            w.deleteLater()
         self._canvas.update()
         self._on_graph_changed_canvas()
 

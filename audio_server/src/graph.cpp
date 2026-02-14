@@ -62,8 +62,9 @@ std::unique_ptr<Graph> Graph::from_json(const std::string& j_str, std::string& e
         }
 
         NodeEntry entry;
-        entry.node  = std::move(node);
-        entry.ports = entry.node->declare_ports();
+        entry.node        = std::move(node);
+        entry.ports       = entry.node->declare_ports();
+        entry.init_params = desc.params;   // applied after activate()
 
         g->node_index_[desc.id] = static_cast<int>(g->nodes_.size());
         g->nodes_.push_back(std::move(entry));
@@ -80,6 +81,16 @@ std::unique_ptr<Graph> Graph::from_json(const std::string& j_str, std::string& e
     }
 
     return g;
+}
+
+// ---------------------------------------------------------------------------
+// Graph::~Graph
+// ---------------------------------------------------------------------------
+
+Graph::~Graph() {
+    // Ensure LV2 instances are properly shut down even if deactivate() was
+    // never called explicitly (e.g. when retiring_graph_ unique_ptr is reset).
+    deactivate();
 }
 
 // ---------------------------------------------------------------------------
@@ -101,8 +112,10 @@ bool Graph::activate(float sample_rate, int max_block_size) {
 
     for (auto& entry : nodes_) {
         entry.node->activate(sample_rate, max_block_size);
-        // Apply initial params
-        // (params were stored in NodeDesc; we apply them via set_param after activate)
+        // Apply initial params from the JSON NodeDesc (must be after activate
+        // so that LV2 port buffers are allocated and connected)
+        for (auto& [k, v] : entry.init_params)
+            entry.node->set_param(k, v);
     }
 
     // Wire downstream processor nodes into each TrackSourceNode.

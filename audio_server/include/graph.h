@@ -122,6 +122,9 @@ private:
 
 class Graph {
 public:
+    Graph()  = default;
+    ~Graph();   // deactivates all nodes
+
     // Build from JSON (runs on main thread). Returns nullptr on error.
     static std::unique_ptr<Graph> from_json(
         const std::string& json,
@@ -157,6 +160,8 @@ private:
         std::vector<Node::PortDecl>  ports;
         std::vector<int>             input_buf_indices;   // index into pool
         std::vector<int>             output_buf_indices;
+        // Params from the JSON NodeDesc, applied after activate()
+        std::unordered_map<std::string, float> init_params;
     };
 
     std::vector<NodeEntry>                        nodes_;
