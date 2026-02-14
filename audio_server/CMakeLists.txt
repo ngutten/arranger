@@ -98,6 +98,8 @@ add_library(audio_server_lib STATIC
     src/scheduler.cpp
     src/synth_node.cpp
     src/audio_engine.cpp
+    src/plugin_registry.cpp
+    src/plugin_adapter.cpp
 )
 
 target_include_directories(audio_server_lib PUBLIC

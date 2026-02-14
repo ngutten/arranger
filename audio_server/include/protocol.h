@@ -83,6 +83,11 @@ constexpr const char* CMD_GET_GRAPH     = "get_graph";
 // {uri_prefix: str (optional)} → {plugins: [...]}
 constexpr const char* CMD_LIST_PLUGINS  = "list_plugins";
 
+// -- Plugin descriptor query (new plugin API) --
+// → {plugins: [{id, display_name, category, doc, ports: [...], config_params: [...]}]}
+// Lists all plugins registered via the new Plugin API (REGISTER_PLUGIN).
+constexpr const char* CMD_LIST_REGISTERED_PLUGINS = "list_registered_plugins";
+
 // -- Preview note injection (bypass transport/schedule) --
 // {node_id: str, channel: int, pitch: int, velocity: int} → {status}
 constexpr const char* CMD_NOTE_ON       = "note_on";

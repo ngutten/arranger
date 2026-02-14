@@ -12,6 +12,7 @@
 #include "audio_engine.h"
 #include "ipc.h"
 #include "protocol.h"
+#include "plugin_api.h"
 #include "nlohmann/json.hpp"
 
 #ifdef AS_ENABLE_LV2
@@ -242,6 +243,95 @@ private:
             std::string err = engine_.set_node_config(node_id, config.dump());
             if (!err.empty()) return {{"status", "error"}, {"message", err}};
             return {{"status", "ok"}};
+        }
+
+        // -------------------------------------------------------------------
+        // New plugin API: list all registered plugins with full descriptors
+        if (cmd == protocol::CMD_LIST_REGISTERED_PLUGINS) {
+            json plugins = json::array();
+            for (auto* reg : PluginRegistry::all()) {
+                auto desc = PluginRegistry::find_descriptor(reg->id);
+                if (!desc) continue;
+
+                json jp;
+                jp["id"]           = desc->id;
+                jp["display_name"] = desc->display_name;
+                jp["category"]     = desc->category;
+                jp["doc"]          = desc->doc;
+                jp["author"]       = desc->author;
+                jp["version"]      = desc->version;
+
+                json ports = json::array();
+                for (auto& p : desc->ports) {
+                    json jport;
+                    jport["id"]           = p.id;
+                    jport["display_name"] = p.display_name;
+                    jport["doc"]          = p.doc;
+
+                    // Stringify enums
+                    switch (p.type) {
+                        case PluginPortType::AudioMono:   jport["type"] = "audio_mono"; break;
+                        case PluginPortType::AudioStereo: jport["type"] = "audio_stereo"; break;
+                        case PluginPortType::Event:       jport["type"] = "event"; break;
+                        case PluginPortType::Control:     jport["type"] = "control"; break;
+                    }
+                    switch (p.role) {
+                        case PortRole::Input:    jport["role"] = "input"; break;
+                        case PortRole::Output:   jport["role"] = "output"; break;
+                        case PortRole::Sidechain:jport["role"] = "sidechain"; break;
+                        case PortRole::Monitor:  jport["role"] = "monitor"; break;
+                    }
+
+                    if (p.type == PluginPortType::Control) {
+                        switch (p.hint) {
+                            case ControlHint::Continuous:  jport["hint"] = "continuous"; break;
+                            case ControlHint::Toggle:      jport["hint"] = "toggle"; break;
+                            case ControlHint::Integer:     jport["hint"] = "integer"; break;
+                            case ControlHint::Categorical: jport["hint"] = "categorical"; break;
+                            case ControlHint::Radio:       jport["hint"] = "radio"; break;
+                            case ControlHint::Meter:       jport["hint"] = "meter"; break;
+                            case ControlHint::GraphEditor: jport["hint"] = "graph_editor"; break;
+                        }
+                        jport["default"] = p.default_value;
+                        jport["min"]     = p.min_value;
+                        jport["max"]     = p.max_value;
+                        jport["step"]    = p.step;
+                        if (!p.choices.empty())
+                            jport["choices"] = p.choices;
+                        if (!p.graph_type.empty())
+                            jport["graph_type"] = p.graph_type;
+                    }
+
+                    ports.push_back(jport);
+                }
+                jp["ports"] = ports;
+
+                json config_params = json::array();
+                for (auto& cp : desc->config_params) {
+                    json jcp;
+                    jcp["id"]           = cp.id;
+                    jcp["display_name"] = cp.display_name;
+                    jcp["doc"]          = cp.doc;
+                    switch (cp.type) {
+                        case ConfigType::String:      jcp["type"] = "string"; break;
+                        case ConfigType::FilePath:    jcp["type"] = "filepath"; break;
+                        case ConfigType::Integer:     jcp["type"] = "integer"; break;
+                        case ConfigType::Float:       jcp["type"] = "float"; break;
+                        case ConfigType::Bool:        jcp["type"] = "bool"; break;
+                        case ConfigType::Categorical: jcp["type"] = "categorical"; break;
+                    }
+                    jcp["default"]     = cp.default_value;
+                    if (!cp.file_filter.empty())
+                        jcp["file_filter"] = cp.file_filter;
+                    if (!cp.choices.empty())
+                        jcp["choices"] = cp.choices;
+                    config_params.push_back(jcp);
+                }
+                jp["config_params"] = config_params;
+
+                plugins.push_back(jp);
+            }
+            return {{"status", "ok"}, {"plugins", plugins}};
         }
 
         // -------------------------------------------------------------------

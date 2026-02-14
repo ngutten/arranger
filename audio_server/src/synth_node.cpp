@@ -9,6 +9,8 @@
 // Compile with -DAS_DEBUG to activate; all macros are no-ops otherwise.
 
 #include "synth_node.h"
+#include "plugin_api.h"
+#include "plugin_adapter.h"
 #include "debug.h"
 #include <cmath>
 #include <cstdio>
@@ -1046,6 +1048,19 @@ void NoteGateNode::recompute_value_() {
 
 std::unique_ptr<Node> make_node(const NodeDesc& desc, std::string& err) {
     AS_LOG("graph", "make_node: id='%s' type='%s'", desc.id.c_str(), desc.type.c_str());
+
+    // --- Try plugin registry first ---
+    auto plugin = PluginRegistry::create(desc.type);
+    if (plugin) {
+        AS_LOG("graph", "  -> resolved via plugin registry: '%s'", desc.type.c_str());
+        // Apply config params from the NodeDesc
+        for (auto& [k, v] : desc.params) {
+            plugin->configure(k, std::to_string(v));
+        }
+        return std::make_unique<PluginAdapterNode>(desc.id, std::move(plugin));
+    }
+
+    // --- Legacy built-in types ---
     if (desc.type == "sine")
         return std::make_unique<SineNode>(desc.id);
     if (desc.type == "mixer")
