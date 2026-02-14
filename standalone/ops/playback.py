@@ -25,7 +25,8 @@ def play_note(state, engine, player, pitch, velocity, track_id=None):
 
     # Use engine if available
     if engine:
-        engine.play_single_note(pitch, velocity, channel, duration=0.5)
+        engine.play_single_note(pitch, velocity, channel, duration=0.5,
+                                track_id=track_id)
         return
 
     # Legacy fallback
@@ -57,11 +58,16 @@ def play_beat_hit(state, engine, player, inst_id):
 
     # Use engine if available
     if engine:
-        if inst.channel != 9:
-            engine._send_cmd('_setup_program', inst.channel, inst.bank, inst.program)
-        engine.play_single_note(inst.pitch, inst.velocity,
-                                inst.channel, duration=0.5)
-        return
+        bt = next(iter(state.beat_tracks), None)
+        if bt is not None:
+            if inst.channel != 9:
+                engine.set_channel_program(inst.channel, inst.bank, inst.program)
+            engine.play_single_note(inst.pitch, inst.velocity,
+                                    inst.channel, duration=0.5,
+                                    track_id=bt.id)
+            return
+        # No beat track yet (pattern being edited before placement) —
+        # fall through to legacy path below.
 
     # Legacy fallback
     sf2_path = _get_sf2_path(state.sf2)

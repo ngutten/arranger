@@ -22,6 +22,10 @@ DEFAULTS = {
     'midi_input_device': '',   # empty string = none selected
     'sf2_path': '',            # empty string = no default soundfont
     'autosave_interval': 60,   # seconds; 0 to disable
+    # 'fluidsynth' = internal Python engine (default, no external dep)
+    # 'server'     = C++ audio_server process via IPC
+    'audio_backend': 'fluidsynth',
+    'server_address': '',      # empty = platform default (/tmp/audio_server.sock or named pipe)
 }
 
 
@@ -33,6 +37,8 @@ class Settings:
         self.midi_input_device: str = DEFAULTS['midi_input_device']
         self.sf2_path: str = DEFAULTS['sf2_path']
         self.autosave_interval: int = DEFAULTS['autosave_interval']
+        self.audio_backend: str = DEFAULTS['audio_backend']
+        self.server_address: str = DEFAULTS['server_address']
         self._load()
 
     def _load(self):
@@ -46,6 +52,8 @@ class Settings:
             self.midi_input_device = str(d.get('midi_input_device', self.midi_input_device))
             self.sf2_path = str(d.get('sf2_path', self.sf2_path))
             self.autosave_interval = int(d.get('autosave_interval', self.autosave_interval))
+            self.audio_backend = str(d.get('audio_backend', self.audio_backend))
+            self.server_address = str(d.get('server_address', self.server_address))
         except Exception:
             pass  # keep defaults on any parse error
 
@@ -60,6 +68,8 @@ class Settings:
                     'midi_input_device': self.midi_input_device,
                     'sf2_path': self.sf2_path,
                     'autosave_interval': self.autosave_interval,
+                    'audio_backend': self.audio_backend,
+                    'server_address': self.server_address,
                 }, f, indent=2)
         except Exception:
             pass  # non-fatal if we can't write

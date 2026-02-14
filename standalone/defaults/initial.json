@@ -29,9 +29,23 @@
   ],
   "placements": [],
   "beatKit": [],
-  "beatPatterns": [],
-  "beatTracks": [],
+  "beatPatterns": [
+    {
+      "id": 4,
+      "name": "Beat 1",
+      "length": 4,
+      "subdivision": 4,
+      "color": "#e94560",
+      "grid": {}
+    }
+  ],
+  "beatTracks": [
+    {
+      "id": 3,
+      "name": "Beat 1"
+    }
+  ],
   "beatPlacements": [],
-  "sf2Path": "instruments/GeneralUser-GS.sf2",
-  "nextId": 3
+  "sf2Path": "/home/nichg/Dropbox/llmexpts/arranger/arranger/instruments/GeneralUser-GS.sf2",
+  "nextId": 5
 }

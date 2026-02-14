@@ -262,9 +262,9 @@ class SF2Dialog(QDialog):
 class ConfigDialog(QDialog):
     """Application configuration dialog.
 
-    Covers: MIDI input device selection, default soundfont, and (read-only
-    display of) audio settings.  Changes are saved to the user settings file
-    on OK.
+    Covers: MIDI input device selection, default soundfont, audio backend
+    selection (fluidsynth internal vs C++ audio_server), and read-only display
+    of audio settings.  Changes are saved on OK.
     """
 
     def __init__(self, parent, app):
@@ -272,7 +272,7 @@ class ConfigDialog(QDialog):
         self.app = app
         self.settings = app.settings
         self.setWindowTitle('Configuration')
-        self.setFixedSize(420, 280)
+        self.setFixedSize(440, 360)
         self.setModal(True)
 
         layout = QVBoxLayout(self)
@@ -302,6 +302,29 @@ class ConfigDialog(QDialog):
         form.addRow('Default SF2:', sf2_row)
         self._sf2_path = self.settings.sf2_path
 
+        # ---- Audio backend ----
+        self.backend_combo = QComboBox()
+        self.backend_combo.addItem('FluidSynth (built-in)', 'fluidsynth')
+        self.backend_combo.addItem('C++ Audio Server', 'server')
+        current_idx = 1 if self.settings.audio_backend == 'server' else 0
+        self.backend_combo.setCurrentIndex(current_idx)
+        self.backend_combo.currentIndexChanged.connect(self._on_backend_changed)
+        form.addRow('Audio Backend:', self.backend_combo)
+
+        # Server address row (shown only when 'server' is selected)
+        self._addr_row_label = QLabel('Server Address:')
+        self._addr_edit = QLineEdit()
+        self._addr_edit.setPlaceholderText('(default: /tmp/audio_server.sock)')
+        self._addr_edit.setText(self.settings.server_address)
+        form.addRow(self._addr_row_label, self._addr_edit)
+
+        # Server status indicator
+        self._server_status = QLabel('')
+        self._server_status.setStyleSheet('font-size: 8pt;')
+        form.addRow('', self._server_status)
+
+        self._update_server_rows()
+
         # ---- Audio info (read-only) ----
         audio_info = QLabel(
             f'{self.settings.sample_rate} Hz  ·  block {self.settings.block_size}'
@@ -313,7 +336,8 @@ class ConfigDialog(QDialog):
 
         note = QLabel(
             'Audio settings (sample rate, block size) are set in\n'
-            '~/.config/sequencer/settings.json and take effect on restart.'
+            '~/.config/sequencer/settings.json and take effect on restart.\n'
+            'Backend changes take effect immediately.'
         )
         note.setStyleSheet('color: #666; font-size: 8pt;')
         layout.addWidget(note)
@@ -330,6 +354,36 @@ class ConfigDialog(QDialog):
         btn_layout.addWidget(ok_btn)
         btn_layout.addWidget(cancel_btn)
         layout.addLayout(btn_layout)
+
+    def _on_backend_changed(self, _index):
+        self._update_server_rows()
+
+    def _update_server_rows(self):
+        is_server = self.backend_combo.currentData() == 'server'
+        self._addr_row_label.setVisible(is_server)
+        self._addr_edit.setVisible(is_server)
+        self._server_status.setVisible(is_server)
+        if is_server:
+            self._refresh_server_status()
+
+    def _refresh_server_status(self):
+        """Quick ping to check if the server is reachable (non-blocking)."""
+        import threading
+        def _ping():
+            try:
+                from ..core.server_engine import _IpcClient, DEFAULT_ADDRESS
+                addr = self._addr_edit.text().strip() or DEFAULT_ADDRESS
+                c = _IpcClient(addr)
+                c.connect(timeout=1.0)
+                resp = c.send({"cmd": "ping"})
+                c.disconnect()
+                ver = resp.get('version', '?')
+                self._server_status.setText(f'✓ Connected  (server v{ver})')
+                self._server_status.setStyleSheet('color: #6d6; font-size: 8pt;')
+            except Exception as e:
+                self._server_status.setText(f'✗ Not reachable: {e}')
+                self._server_status.setStyleSheet('color: #d66; font-size: 8pt;')
+        threading.Thread(target=_ping, daemon=True).start()
 
     def _populate_midi_ports(self):
         """Enumerate rtmidi input ports; fall back gracefully if unavailable."""
@@ -372,7 +426,6 @@ class ConfigDialog(QDialog):
     def _ok(self):
         # MIDI device
         idx = self.midi_combo.currentIndex()
-        # index 0 is '(none)', ports start at 1
         if idx > 0 and (idx - 1) < len(self._midi_ports):
             self.settings.midi_input_device = self._midi_ports[idx - 1]
         else:
@@ -381,21 +434,31 @@ class ConfigDialog(QDialog):
         # SF2 path
         self.settings.sf2_path = self._sf2_path
 
+        # Audio backend — switch immediately if it changed
+        new_backend = self.backend_combo.currentData()
+        new_addr = self._addr_edit.text().strip()
+        backend_changed = (
+            new_backend != self.settings.audio_backend or
+            new_addr != self.settings.server_address
+        )
+
         self.settings.save()
 
-        # Apply SF2 immediately if it changed and engine is running
-        if self._sf2_path and self.app.engine:
-            try:
-                self.app.engine.load_sf2(self._sf2_path)
-                from ..state import SF2Info  # noqa — might not exist; use app helper
-            except Exception:
-                pass
-            try:
-                from ..core.sf2 import SF2Info
-                self.app.state.sf2 = SF2Info(self._sf2_path)
-                self.app.state.notify('sf2_loaded')
-            except Exception:
-                pass
+        if backend_changed and hasattr(self.app, 'switch_backend'):
+            self.app.switch_backend(new_backend, new_addr)
+        else:
+            # Apply SF2 immediately if it changed and engine is running
+            if self._sf2_path and self.app.engine:
+                try:
+                    self.app.engine.load_sf2(self._sf2_path)
+                except Exception:
+                    pass
+                try:
+                    from ..core.sf2 import SF2Info
+                    self.app.state.sf2 = SF2Info(self._sf2_path)
+                    self.app.state.notify('sf2_loaded')
+                except Exception:
+                    pass
 
         # Notify app so Rec button can update its enabled state
         if hasattr(self.app, '_on_config_changed'):

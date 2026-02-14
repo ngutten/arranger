@@ -990,6 +990,14 @@ class AudioEngine:
         # Send note-on via command queue (processed in audio thread)
         self._send_cmd('_note_preview_on', pitch, velocity, channel, duration)
 
+    def set_channel_program(self, channel: int, bank: int, program: int):
+        """Set a MIDI channel's program immediately (preview path only).
+
+        Used by ops/playback before firing a beat instrument preview note so
+        the correct patch is loaded before the note-on hits the audio thread.
+        """
+        self._send_cmd('_setup_program', channel, bank, program)
+
     def _handle_note_preview(self, pitch, velocity, channel, duration):
         """Handle note preview — called from _process_commands on audio thread."""
         self._instrument.note_on(pitch, velocity, channel)

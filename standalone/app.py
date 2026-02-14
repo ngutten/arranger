@@ -30,6 +30,12 @@ try:
 except ImportError:
     _HAS_ENGINE = False
 
+try:
+    from .core.server_engine import ServerEngine
+    _HAS_SERVER_ENGINE = True
+except ImportError:
+    _HAS_SERVER_ENGINE = False
+
 from .ui.topbar import TopBar
 from .ui.pattern_list import PatternList
 from .ui.arrangement import ArrangementView
@@ -82,7 +88,9 @@ class App(QMainWindow):
         self._build_ui()
         self._bind_keys()
         self._init_state()
-
+        
+        self.new_project()
+        
         # Connect state observer — must be after _init_state so engine exists
         self.state.on_change(self._on_state_change)
         
@@ -323,7 +331,22 @@ class App(QMainWindow):
         self._refresh_all()
 
     def _init_engine(self):
-        """Initialize the realtime audio engine."""
+        """Initialize the audio engine according to settings.audio_backend."""
+        backend = self.settings.audio_backend  # 'fluidsynth' or 'server'
+
+        if backend == 'server':
+            if not _HAS_SERVER_ENGINE:
+                print("[App] ServerEngine not available; falling back to fluidsynth backend")
+            else:
+                try:
+                    from .core.server_engine import DEFAULT_ADDRESS
+                    addr = self.settings.server_address or DEFAULT_ADDRESS
+                    self.engine = ServerEngine(self.state, self.settings, address=addr)
+                    return
+                except Exception as e:
+                    print(f"[App] ServerEngine init failed: {e}; falling back to fluidsynth")
+
+        # Default / fallback: internal AudioEngine
         if not _HAS_ENGINE:
             print("[App] AudioEngine not available (missing sounddevice/pyfluidsynth?)")
             return
@@ -627,6 +650,41 @@ class App(QMainWindow):
         """Open the configuration dialog."""
         dlg = ConfigDialog(self, self)
         dlg.exec()
+
+    def switch_backend(self, backend: str, server_address: str = '') -> bool:
+        """Switch the audio backend at runtime.  Returns True if successful.
+
+        Called by ConfigDialog when the user changes the backend selector.
+        Tears down the running engine, reinitialises with the new backend, and
+        reloads the SF2 if one is set.  Safe to call while not playing.
+        """
+        if self.state.playing:
+            self.stop_play()
+
+        # Tear down current engine
+        if self.engine:
+            try:
+                self.engine.shutdown()
+            except Exception:
+                pass
+            self.engine = None
+
+        # Persist the choice
+        self.settings.audio_backend = backend
+        self.settings.server_address = server_address
+        self.settings.save()
+
+        # Reinitialise
+        self._init_engine()
+
+        # Re-apply SF2 if one is loaded
+        if self.engine and self.state.sf2:
+            from .ops.export import _get_sf2_path
+            sf2_path = _get_sf2_path(self.state.sf2)
+            if sf2_path:
+                self.engine.load_sf2(sf2_path)
+
+        return self.engine is not None
 
     def _on_config_changed(self):
         """Called by ConfigDialog after settings are saved; update dependent UI."""
