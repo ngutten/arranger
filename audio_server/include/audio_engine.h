@@ -120,11 +120,22 @@ private:
     void* stream_ = nullptr;  // PaStream* — opaque to avoid PortAudio header in API
 
     // Graph — swapped atomically. Audio thread reads active_graph_.
+    //
+    // Retirement protocol
+    // -------------------
+    // graph_epoch_ is incremented by the audio thread at the END of every
+    // process_block() call (after graph->process() returns).  set_graph()
+    // records the epoch before storing the new graph pointer, then waits
+    // until the epoch advances before destroying the old graph.  This
+    // guarantees the audio thread has completed at least one full block with
+    // the new graph (and therefore is no longer inside any old-graph code)
+    // before we free the retiring graph.
     std::unique_ptr<Graph>       pending_graph_;
     std::atomic<Graph*>          active_graph_  { nullptr };
-    std::unique_ptr<Graph>       owned_graph_;     // current graph (audio thread reads this)
-    std::unique_ptr<Graph>       retiring_graph_;  // previous graph, freed on next set_graph
-    std::mutex                   graph_mutex_;     // protects owned_graph_ / retiring_graph_
+    std::unique_ptr<Graph>       owned_graph_;
+    std::unique_ptr<Graph>       retiring_graph_;
+    std::mutex                   graph_mutex_;
+    std::atomic<uint64_t>        graph_epoch_   { 0 };
 
     // Dispatcher — lives on audio thread
     Dispatcher dispatcher_;
@@ -139,14 +150,27 @@ private:
     LoopState*               active_loop_  { nullptr };
 
     // Simple command queue (same pattern as Python engine)
-    enum class Cmd { Play, Stop, Seek, AllNotesOff };
-    struct CmdEntry { Cmd cmd; double arg = 0.0; };
+    enum class Cmd { Play, Stop, Seek, AllNotesOff, SetParam };
+    struct CmdEntry {
+        Cmd         cmd;
+        double      arg = 0.0;
+        std::string node_id;
+        std::string param;
+        float       value = 0.0f;
+    };
     std::vector<CmdEntry>    cmd_queue_;
     std::mutex               cmd_mutex_;
 
     float bpm_ = 120.0f;  // set from graph JSON or set_bpm(); read by callback + render
 
+    // Heap-allocated scratch buffers for the PortAudio callback.
+    // Allocated in open() to avoid the 32 KB stack overflow that two
+    // MAX_BLOCK_SIZE float arrays would cause in an 8 KB ALSA callback stack.
+    std::vector<float> scratch_L_;
+    std::vector<float> scratch_R_;
+
     void send_cmd(Cmd c, double arg = 0.0);
+    void send_param_cmd(const std::string& node_id, const std::string& param, float value);
 
     // PortAudio callback — static trampoline
     static int pa_callback(

@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # ---------------------------------------------------------------------------
 # Build options
 # ---------------------------------------------------------------------------
-option(ENABLE_LV2    "Build with LV2 plugin hosting (requires lilv)"  ON)
+option(ENABLE_LV2    "Build with LV2 plugin hosting (requires lilv)"  OFF)
 option(ENABLE_SF2    "Build with SF2/FluidSynth support"              ON)
 option(ENABLE_TESTS  "Build test programs"                            ON)
 
@@ -136,11 +136,20 @@ if(PLATFORM_WINDOWS)
     target_link_libraries(audio_server_lib PUBLIC ws2_32)
 endif()
 
+   
 # ---------------------------------------------------------------------------
 # Server executable
 # ---------------------------------------------------------------------------
 add_executable(audio_server src/main.cpp)
 target_link_libraries(audio_server PRIVATE audio_server_lib)
+
+# Debugging
+#target_compile_options(audio_server PRIVATE
+#    -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1)
+#target_link_options(audio_server PRIVATE
+#    -fsanitize=address,undefined)
+
+add_compile_definitions(AS_DEBUG)
 
 # ---------------------------------------------------------------------------
 # Tests

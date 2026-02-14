@@ -992,11 +992,17 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable):
         return w
 
     if t == "lv2":
-        # LV2 node: show URI (small, dimmed) plus a spinbox for every control
-        # input port that has range metadata.  Spinboxes are disabled (greyed)
-        # whenever a wire is connected to the corresponding port — the canvas
-        # calls w.refresh_wired_ports(set_of_port_ids) on each repaint.
-        from PySide6.QtWidgets import QDoubleSpinBox as _DSB, QScrollArea
+        # LV2 node: show URI (small, dimmed) plus appropriate widgets for every
+        # control input port.  Widget type is chosen from port metadata hints:
+        #   is_toggle     → QCheckBox
+        #   is_enumeration + scale_points → QComboBox
+        #   is_integer    → QSpinBox (integer steps)
+        #   otherwise     → QDoubleSpinBox (continuous)
+        # Widgets are disabled (greyed) whenever a wire drives the port.
+        from PySide6.QtWidgets import (
+            QDoubleSpinBox as _DSB, QScrollArea, QCheckBox, QComboBox,
+            QSpinBox as _ISB,
+        )
 
         raw_ports = node.params.get("_ports", [])
         ctrl_inputs = [p for p in raw_ports
@@ -1015,7 +1021,6 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable):
         lay.addRow(QLabel("URI:"), uri_lbl)
 
         # Dual-mono badge — shown when the plugin is mono and will be run ×2
-        # (the flag is populated lazily by ports(), so call it now if needed)
         if "_dual_mono" not in node.params:
             node.ports()
         if node.params.get("_dual_mono"):
@@ -1025,12 +1030,11 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable):
                 " border: 1px solid #2a4a2a; border-radius: 3px; padding: 1px 4px;")
             lay.addRow(badge)
 
-        # One spinbox per control input port
-        # dict: symbol → QDoubleSpinBox
-        _ctrl_spins: dict = {}
+        # dict: symbol → widget (QCheckBox / QComboBox / QSpinBox / QDoubleSpinBox)
+        _ctrl_widgets: dict = {}
 
-        SPIN_STYLE_ACTIVE   = "background: #0d1117; color: #ccc; border: 1px solid #2a3a5c;"
-        SPIN_STYLE_DISABLED = "background: #111; color: #444; border: 1px solid #1a1a1a;"
+        STYLE_ACTIVE   = "background: #0d1117; color: #ccc; border: 1px solid #2a3a5c;"
+        STYLE_DISABLED = "background: #111; color: #444; border: 1px solid #1a1a1a;"
 
         for p in ctrl_inputs:
             sym     = p.get("symbol", "")
@@ -1038,43 +1042,101 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable):
             p_min   = float(p.get("min",     0.0))
             p_max   = float(p.get("max",     1.0))
             p_def   = float(p.get("default", 0.0))
-            # Clamp default to range
             p_def   = max(p_min, min(p_max, p_def))
-            # Compute a reasonable step and decimal count from the range
-            span    = p_max - p_min if p_max != p_min else 1.0
-            if span <= 0.1:
-                step, dec = 0.001, 4
-            elif span <= 2.0:
-                step, dec = 0.01, 3
-            elif span <= 20.0:
-                step, dec = 0.1, 2
-            elif span <= 200.0:
-                step, dec = 1.0, 1
-            else:
-                step, dec = 10.0, 0
+            stored  = node.params.get(sym, p_def)
 
-            spin = _DSB()
-            spin.setRange(p_min, p_max)
-            spin.setSingleStep(step)
-            spin.setDecimals(dec)
-            stored = node.params.get(sym, p_def)
-            spin.setValue(float(stored))
-            spin.setStyleSheet(SPIN_STYLE_ACTIVE)
-            spin.setMaximumWidth(90)
-            sym_capture = sym
-            spin.valueChanged.connect(
-                lambda v, k=sym_capture: on_change(node.node_id, k, v))
-            row_lbl = QLabel(lbl_txt + ":")
-            row_lbl.setStyleSheet("color: #aaa; font-size: 8px;")
-            lay.addRow(row_lbl, spin)
-            _ctrl_spins[sym] = spin
+            is_toggle = p.get("is_toggle", False)
+            is_integer = p.get("is_integer", False)
+            is_enum = p.get("is_enumeration", False)
+            scale_pts = p.get("scale_points", [])
+
+            sym_capture = sym  # capture for lambdas
+
+            if is_toggle:
+                # Boolean on/off → checkbox
+                cb = QCheckBox()
+                cb.setChecked(float(stored) > 0.5)
+                cb.setStyleSheet("color: #ccc;")
+                cb.toggled.connect(
+                    lambda checked, k=sym_capture: on_change(
+                        node.node_id, k, 1.0 if checked else 0.0))
+                row_lbl = QLabel(lbl_txt + ":")
+                row_lbl.setStyleSheet("color: #aaa; font-size: 8px;")
+                lay.addRow(row_lbl, cb)
+                _ctrl_widgets[sym] = cb
+
+            elif is_enum and scale_pts:
+                # Enumeration with named choices → combo box
+                combo = QComboBox()
+                combo.setStyleSheet(STYLE_ACTIVE)
+                combo.setMaximumWidth(140)
+                # Sort scale points by value for consistent ordering
+                pts = sorted(scale_pts, key=lambda sp: float(sp.get("value", 0)))
+                current_idx = 0
+                for idx, sp in enumerate(pts):
+                    val = float(sp.get("value", 0))
+                    label = sp.get("label", str(val))
+                    combo.addItem(label, val)
+                    if abs(val - float(stored)) < 0.001:
+                        current_idx = idx
+                combo.setCurrentIndex(current_idx)
+                combo.currentIndexChanged.connect(
+                    lambda idx, k=sym_capture, c=combo: on_change(
+                        node.node_id, k, c.itemData(idx)))
+                row_lbl = QLabel(lbl_txt + ":")
+                row_lbl.setStyleSheet("color: #aaa; font-size: 8px;")
+                lay.addRow(row_lbl, combo)
+                _ctrl_widgets[sym] = combo
+
+            elif is_integer:
+                # Integer-valued continuous → QSpinBox
+                ispin = _ISB()
+                ispin.setRange(int(p_min), int(p_max))
+                ispin.setValue(int(round(float(stored))))
+                ispin.setStyleSheet(STYLE_ACTIVE)
+                ispin.setMaximumWidth(90)
+                ispin.valueChanged.connect(
+                    lambda v, k=sym_capture: on_change(node.node_id, k, float(v)))
+                row_lbl = QLabel(lbl_txt + ":")
+                row_lbl.setStyleSheet("color: #aaa; font-size: 8px;")
+                lay.addRow(row_lbl, ispin)
+                _ctrl_widgets[sym] = ispin
+
+            else:
+                # Continuous float → QDoubleSpinBox
+                span = p_max - p_min if p_max != p_min else 1.0
+                if span <= 0.1:
+                    step, dec = 0.001, 4
+                elif span <= 2.0:
+                    step, dec = 0.01, 3
+                elif span <= 20.0:
+                    step, dec = 0.1, 2
+                elif span <= 200.0:
+                    step, dec = 1.0, 1
+                else:
+                    step, dec = 10.0, 0
+
+                spin = _DSB()
+                spin.setRange(p_min, p_max)
+                spin.setSingleStep(step)
+                spin.setDecimals(dec)
+                spin.setValue(float(stored))
+                spin.setStyleSheet(STYLE_ACTIVE)
+                spin.setMaximumWidth(90)
+                spin.valueChanged.connect(
+                    lambda v, k=sym_capture: on_change(node.node_id, k, v))
+                row_lbl = QLabel(lbl_txt + ":")
+                row_lbl.setStyleSheet("color: #aaa; font-size: 8px;")
+                lay.addRow(row_lbl, spin)
+                _ctrl_widgets[sym] = spin
 
         def refresh_wired_ports(wired: set):
             """Called by canvas to grey out ports driven by a wire."""
-            for sym, spin in _ctrl_spins.items():
+            for sym, widget in _ctrl_widgets.items():
                 driven = sym in wired
-                spin.setEnabled(not driven)
-                spin.setStyleSheet(SPIN_STYLE_DISABLED if driven else SPIN_STYLE_ACTIVE)
+                widget.setEnabled(not driven)
+                if hasattr(widget, 'setStyleSheet') and not isinstance(widget, QCheckBox):
+                    widget.setStyleSheet(STYLE_DISABLED if driven else STYLE_ACTIVE)
 
         w.refresh_wired_ports = refresh_wired_ports
         return w

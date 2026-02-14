@@ -129,6 +129,13 @@ std::string AudioEngine::open() {
         return std::string("PortAudio open error: ") + Pa_GetErrorText(err);
     }
 
+    // Allocate scratch buffers on the heap so the audio callback doesn't
+    // blow the 8 KB ALSA stack with 2×MAX_BLOCK_SIZE floats.
+    // Use MAX_BLOCK_SIZE, not cfg_.block_size — PortAudio may deliver more
+    // frames than the requested block size (it's a hint, not a guarantee).
+    scratch_L_.resize(MAX_BLOCK_SIZE);
+    scratch_R_.resize(MAX_BLOCK_SIZE);
+
     Pa_StartStream(static_cast<PaStream*>(stream_));
     return {};
 }
@@ -169,19 +176,39 @@ std::string AudioEngine::set_graph(const std::string& graph_json) {
     {
         std::lock_guard<std::mutex> lk(graph_mutex_);
 
-        // Retire the previous "old" graph now — by the time set_graph is called
-        // again, at least one audio callback has completed and moved to the graph
-        // that was current_ at that point.  This one-generation lag ensures the
-        // audio thread is never inside a graph we're freeing.
-        retiring_graph_.reset();
+        // --- Safe retirement ---
+        // Record the epoch before we publish the new graph pointer.
+        // Once the audio thread observes the new pointer it will increment
+        // graph_epoch_ at the end of that block, so waiting for epoch+1
+        // guarantees it is no longer executing any code from owned_graph_.
+        uint64_t epoch_before = graph_epoch_.load(std::memory_order_acquire);
 
-        // Move the currently-active graph to retiring; it will be freed on the
-        // next set_graph call (safe because the audio thread will have moved to
-        // owned_graph_ before then).
         retiring_graph_ = std::move(owned_graph_);
-
-        owned_graph_ = std::move(g);
+        owned_graph_    = std::move(g);
         active_graph_.store(owned_graph_.get(), std::memory_order_release);
+
+        // Wait for the audio thread to complete at least one block with the
+        // new graph.  The stream may not be open yet (first set_graph call),
+        // in which case no callback will ever fire and we just free immediately.
+        if (stream_) {
+            // Spin with a short yield — typically resolves in < 1 callback
+            // period (~10 ms).  No busy-wait: sched_yield lets the audio
+            // thread run.  Timeout after 500 ms to avoid deadlock if the
+            // stream has stalled.
+            constexpr int MAX_ITER = 5000;
+            for (int i = 0; i < MAX_ITER; ++i) {
+                if (graph_epoch_.load(std::memory_order_acquire) > epoch_before)
+                    break;
+#ifndef AS_PLATFORM_WINDOWS
+                usleep(100);   // 0.1 ms
+#else
+                Sleep(1);
+#endif
+            }
+        }
+
+        // Now safe to destroy the old graph: the audio thread has moved on.
+        retiring_graph_.reset();
     }
     return {};
 }
@@ -211,6 +238,11 @@ void AudioEngine::stop() {
 }
 
 void AudioEngine::seek(double beat) {
+    // Update the reported position immediately so get_position reflects the
+    // seek even without a running audio stream.  The command queue entry is
+    // still needed for the audio thread to reindex the dispatcher and send
+    // all_notes_off.
+    current_beat_.store(beat, std::memory_order_relaxed);
     send_cmd(Cmd::Seek, beat);
 }
 
@@ -227,8 +259,26 @@ void AudioEngine::disable_loop() {
 }
 
 void AudioEngine::set_param(const std::string& nid, const std::string& param, float val) {
-    Graph* g = active_graph_.load(std::memory_order_acquire);
-    if (g) g->set_param(nid, param, val);
+    // Enqueue so the audio thread applies this at the start of the next block,
+    // avoiding a data race between this (IPC/main) thread and the audio thread
+    // which may be simultaneously reading &pi.value inside lilv_instance_run().
+    send_param_cmd(nid, param, val);
+}
+
+void AudioEngine::send_cmd(Cmd c, double arg) {
+    std::lock_guard<std::mutex> lk(cmd_mutex_);
+    cmd_queue_.push_back({c, arg});
+}
+
+void AudioEngine::send_param_cmd(const std::string& node_id,
+                                  const std::string& param, float value) {
+    std::lock_guard<std::mutex> lk(cmd_mutex_);
+    CmdEntry e;
+    e.cmd     = Cmd::SetParam;
+    e.node_id = node_id;
+    e.param   = param;
+    e.value   = value;
+    cmd_queue_.push_back(std::move(e));
 }
 
 // ---------------------------------------------------------------------------
@@ -320,22 +370,19 @@ std::string AudioEngine::set_node_config(const std::string& node_id,
     }
 
 #ifdef AS_ENABLE_LV2
-    // LV2Node: named parameter updates
+    // LV2Node: named parameter updates — route through the command queue to
+    // avoid a data race between this (IPC) thread and the audio thread which
+    // may simultaneously read &pi.value inside lilv_instance_run().
     if (auto* lv = dynamic_cast<LV2Node*>(node)) {
         for (auto& [key, val] : cfg.items()) {
             if (key == "lv2_uri") return "lv2_uri changes require a set_graph call";
-            lv->set_param(key, val.get<float>());
+            send_param_cmd(node_id, key, val.get<float>());
         }
         return {};
     }
 #endif
 
     return "node type does not support set_node_config";
-}
-
-void AudioEngine::send_cmd(Cmd c, double arg) {
-    std::lock_guard<std::mutex> lk(cmd_mutex_);
-    cmd_queue_.push_back({c, arg});
 }
 
 // ---------------------------------------------------------------------------
@@ -351,9 +398,13 @@ int AudioEngine::pa_callback(const void* /*input*/, void* output,
     auto* self = static_cast<AudioEngine*>(user_data);
     float* out = static_cast<float*>(output);
 
-    // De-interleave into L/R scratch — stack-allocated for lock-free path
-    alignas(16) float L[MAX_BLOCK_SIZE];
-    alignas(16) float R[MAX_BLOCK_SIZE];
+    // Clamp: PortAudio may deliver more frames than requested block size.
+    if (frames > MAX_BLOCK_SIZE) frames = MAX_BLOCK_SIZE;
+
+    // Use pre-allocated heap buffers — stack arrays of MAX_BLOCK_SIZE floats
+    // would blow the 8 KB ALSA callback stack.
+    float* L = self->scratch_L_.data();
+    float* R = self->scratch_R_.data();
 
     self->process_block(L, R, static_cast<int>(frames));
 
@@ -405,6 +456,11 @@ void AudioEngine::process_block(float* L, float* R, int frames) {
                     }
                     break;
                 }
+                case Cmd::SetParam: {
+                    Graph* g = active_graph_.load(std::memory_order_acquire);
+                    if (g) g->set_param(ce.node_id, ce.param, ce.value);
+                    break;
+                }
             }
         }
         cmd_queue_.clear();
@@ -445,6 +501,7 @@ void AudioEngine::process_block(float* L, float* R, int frames) {
             std::memset(L, 0, frames * sizeof(float));
             std::memset(R, 0, frames * sizeof(float));
         }
+        graph_epoch_.fetch_add(1, std::memory_order_release);
         return;
     }
 
@@ -490,6 +547,10 @@ void AudioEngine::process_block(float* L, float* R, int frames) {
         }
         current_beat_.store(0.0, std::memory_order_relaxed);
     }
+
+    // Signal to set_graph() that this block is complete and the audio thread
+    // is no longer touching the graph pointer that was active at block start.
+    graph_epoch_.fetch_add(1, std::memory_order_release);
 }
 
 // ---------------------------------------------------------------------------
@@ -498,7 +559,9 @@ void AudioEngine::process_block(float* L, float* R, int frames) {
 
 std::vector<float> AudioEngine::render_offline(float tail_seconds) {
     // Grab current graph and build a fresh schedule-driven render.
-    // This runs on the main thread; no PortAudio stream needed.
+    // This runs on the IPC thread.  The PortAudio callback also calls
+    // graph->process() on the audio thread, so we must stop the stream for
+    // the duration of this render to avoid a data race on the buffer pool.
 
     Graph* graph = active_graph_.load(std::memory_order_acquire);
     if (!graph) return {};
@@ -511,13 +574,16 @@ std::vector<float> AudioEngine::render_offline(float tail_seconds) {
     int    total_frames  = static_cast<int>(total_seconds * cfg_.sample_rate);
     int    block         = cfg_.block_size;
 
+    // Pause real-time stream so the callback doesn't race with our render.
+    // Pa_StopStream waits for the current callback to finish before returning.
+    bool stream_was_running = stream_ != nullptr;
+    double saved_beat = current_beat_.load(std::memory_order_relaxed);
+    if (stream_was_running)
+        Pa_StopStream(static_cast<PaStream*>(stream_));
+
     std::vector<float> output;
     output.reserve(total_frames * 2);
 
-    // We need a fresh Dispatcher pointed at a copy of the schedule.
-    // For now, use the current dispatcher but reset its position.
-    // (A proper offline render would clone the graph + schedule; this is
-    //  sufficient for the prototype since we're not playing in parallel.)
     dispatcher_.seek(0.0);
 
     double beat_pos = 0.0;
@@ -546,6 +612,14 @@ std::vector<float> AudioEngine::render_offline(float tail_seconds) {
 
         beat_pos = end_beat;
         frames_done += n;
+    }
+
+    // Resume the real-time stream, restoring beat position to pre-render state
+    // so live playback isn't disrupted by the offline render scrub.
+    if (stream_was_running) {
+        dispatcher_.seek(saved_beat);
+        current_beat_.store(saved_beat, std::memory_order_relaxed);
+        Pa_StartStream(static_cast<PaStream*>(stream_));
     }
 
     return output;

@@ -87,9 +87,11 @@ class GraphEditorWindow(QWidget):
         self._lv2_plugins: list[dict] = []   # fetched once on open
 
         self._build_ui()
-        # Connect before fetch so the signal is wired before the worker can emit
-        self._lv2_plugins_ready.connect(self._populate_lv2_menu)
-        self._fetch_lv2_plugins()
+        # LV2 plugin support is disabled for now (Calf and other plugins have
+        # internal bugs triggered by their own declared defaults).  The code
+        # is left in place for future re-enablement.
+        # self._lv2_plugins_ready.connect(self._populate_lv2_menu)
+        # self._fetch_lv2_plugins()
 
         # Apply dark palette matching the main window
         self.setStyleSheet("""
@@ -197,10 +199,10 @@ class GraphEditorWindow(QWidget):
         smp_action = synth_menu.addAction("Sampler  [future]")
         smp_action.triggered.connect(lambda: self._add_node("sampler"))
 
-        # Plugins — populated later in _fetch_lv2_plugins
-        self._plugins_menu = menu.addMenu("Plugins  (LV2)")
-        self._lv2_loading_action = self._plugins_menu.addAction("Loading…")
-        self._lv2_loading_action.setEnabled(False)
+        # Plugins (LV2) — disabled for now; kept for future re-enablement
+        # self._plugins_menu = menu.addMenu("Plugins  (LV2)")
+        # self._lv2_loading_action = self._plugins_menu.addAction("Loading…")
+        # self._lv2_loading_action.setEnabled(False)
 
         # Utilities
         util_menu = menu.addMenu("Utilities")

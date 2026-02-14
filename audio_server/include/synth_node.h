@@ -210,10 +210,22 @@ public:
                  std::vector<PortBuffer>& outputs) override;
     void set_param(const std::string& name, float value) override;
 
+    // MIDI event support — forwarded from TrackSourceNode
+    void note_on(int channel, int pitch, int velocity) override;
+    void note_off(int channel, int pitch) override;
+    void all_notes_off(int channel = -1) override;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+
+// Shared LilvWorld singleton — acquire/release around any lilv use.
+// Thread-safe; world is constructed once and remains read-only after that.
+// Returns void* to avoid pulling <lilv/lilv.h> into every translation unit;
+// callers that need the real type cast it after including lilv.h themselves.
+void* lv2_world_acquire();
+void  lv2_world_release();
 
 // List all installed LV2 plugins via lilv.
 // Returns JSON array: [{uri, name, author, ports:[{symbol,type,direction}]}]
