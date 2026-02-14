@@ -1,0 +1,303 @@
+// graph.cpp
+#include "graph.h"
+#include "synth_node.h"
+#include "nlohmann/json.hpp"
+
+#include <stdexcept>
+#include <unordered_set>
+#include <algorithm>
+#include <cstring>
+
+using json = nlohmann::json;
+
+// ---------------------------------------------------------------------------
+// BufferPool
+// ---------------------------------------------------------------------------
+
+void BufferPool::allocate(int num_buffers, int block_size) {
+    buffers_.assign(num_buffers, std::vector<float>(block_size, 0.0f));
+}
+
+float* BufferPool::get(int index) {
+    return buffers_.at(index).data();
+}
+
+// ---------------------------------------------------------------------------
+// Graph::from_json
+// ---------------------------------------------------------------------------
+
+std::unique_ptr<Graph> Graph::from_json(const std::string& j_str, std::string& err) {
+    json j;
+    try { j = json::parse(j_str); }
+    catch (const std::exception& e) {
+        err = std::string("JSON parse error: ") + e.what();
+        return nullptr;
+    }
+
+    auto g = std::make_unique<Graph>();
+
+    // --- Nodes ---
+    for (auto& jn : j.value("nodes", json::array())) {
+        NodeDesc desc;
+        desc.id          = jn.value("id", "");
+        desc.type        = jn.value("type", "sine");
+        desc.sf2_path    = jn.value("sf2_path", "");
+        desc.lv2_uri     = jn.value("lv2_uri", "");
+        desc.sample_path = jn.value("sample_path", "");
+        desc.channel_count = jn.value("channel_count", 2);
+        if (jn.contains("params")) {
+            for (auto& [k, v] : jn["params"].items()) {
+                desc.params[k] = v.get<float>();
+            }
+        }
+
+        std::string node_err;
+        auto node = make_node(desc, node_err);
+        if (!node) {
+            err = "Failed to create node '" + desc.id + "': " + node_err;
+            return nullptr;
+        }
+
+        NodeEntry entry;
+        entry.node  = std::move(node);
+        entry.ports = entry.node->declare_ports();
+
+        g->node_index_[desc.id] = static_cast<int>(g->nodes_.size());
+        g->nodes_.push_back(std::move(entry));
+    }
+
+    // --- Connections ---
+    for (auto& jc : j.value("connections", json::array())) {
+        g->connections_.push_back({
+            jc.value("from_node", ""),
+            jc.value("from_port", ""),
+            jc.value("to_node",   ""),
+            jc.value("to_port",   ""),
+        });
+    }
+
+    return g;
+}
+
+// ---------------------------------------------------------------------------
+// Graph::activate
+// ---------------------------------------------------------------------------
+
+bool Graph::activate(float sample_rate, int max_block_size) {
+    block_size_ = max_block_size;
+
+    std::string err;
+    if (!topo_sort(err)) {
+        // topo_sort failure is non-fatal: fall back to declaration order
+        // (connections may still work for simple linear chains)
+        eval_order_.clear();
+        for (auto& e : nodes_) eval_order_.push_back(e.node->id);
+    }
+
+    assign_buffers();
+
+    for (auto& entry : nodes_) {
+        entry.node->activate(sample_rate, max_block_size);
+        // Apply initial params
+        // (params were stored in NodeDesc; we apply them via set_param after activate)
+    }
+
+    // Wire downstream processor nodes into each TrackSourceNode.
+    // A track source fans out to every node that has its events_out port
+    // connected to an input port of that node.
+    for (auto& entry : nodes_) {
+        auto* src = dynamic_cast<TrackSourceNode*>(entry.node.get());
+        if (!src) continue;
+
+        std::vector<Node*> downstream;
+        for (auto& c : connections_) {
+            if (c.from_node != entry.node->id) continue;
+            auto ni = node_index_.find(c.to_node);
+            if (ni == node_index_.end()) continue;
+            Node* dest = nodes_[ni->second].node.get();
+            // Avoid duplicates (multiple ports from same source → same dest)
+            bool already = false;
+            for (auto* d : downstream) if (d == dest) { already = true; break; }
+            if (!already) downstream.push_back(dest);
+        }
+        src->set_downstream(std::move(downstream));
+    }
+
+    activated_ = true;
+    return true;
+}
+
+void Graph::deactivate() {
+    for (auto& entry : nodes_) entry.node->deactivate();
+    activated_ = false;
+}
+
+// ---------------------------------------------------------------------------
+// Graph::topo_sort  (Kahn's algorithm)
+// ---------------------------------------------------------------------------
+
+bool Graph::topo_sort(std::string& err) {
+    // Build adjacency: for each connection, from_node must come before to_node
+    std::unordered_map<std::string, std::vector<std::string>> adj;
+    std::unordered_map<std::string, int> in_degree;
+
+    for (auto& e : nodes_) {
+        in_degree[e.node->id] = 0;
+        adj[e.node->id] = {};
+    }
+
+    for (auto& c : connections_) {
+        if (c.from_node == c.to_node) continue;
+        adj[c.from_node].push_back(c.to_node);
+        in_degree[c.to_node]++;
+    }
+
+    std::vector<std::string> queue;
+    for (auto& [id, deg] : in_degree) {
+        if (deg == 0) queue.push_back(id);
+    }
+
+    eval_order_.clear();
+    while (!queue.empty()) {
+        auto n = queue.back(); queue.pop_back();
+        eval_order_.push_back(n);
+        for (auto& m : adj[n]) {
+            if (--in_degree[m] == 0) queue.push_back(m);
+        }
+    }
+
+    if (eval_order_.size() != nodes_.size()) {
+        err = "Cycle detected in signal graph";
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Graph::assign_buffers
+// ---------------------------------------------------------------------------
+
+void Graph::assign_buffers() {
+    // Count total buffers needed: one per output port across all nodes,
+    // plus a "null" buffer at index 0 for unconnected inputs.
+    int buf_count = 1; // 0 = silent/zero buffer
+
+    for (auto& entry : nodes_) {
+        int in_count  = 0, out_count = 0;
+        for (auto& p : entry.ports) {
+            if (p.is_output) out_count++;
+            else             in_count++;
+        }
+        entry.output_buf_indices.assign(out_count, 0);
+        entry.input_buf_indices.assign(in_count, 0);
+
+        for (auto& idx : entry.output_buf_indices) {
+            idx = buf_count++;
+        }
+    }
+
+    pool_.allocate(buf_count, block_size_);
+
+    // Wire input buffers from connections
+    // Build port-name → buffer index map for outputs
+    std::unordered_map<std::string, int> port_buf; // "node_id/port_name" → buf_idx
+
+    for (auto& entry : nodes_) {
+        int out_i = 0;
+        for (int pi = 0; pi < (int)entry.ports.size(); ++pi) {
+            auto& p = entry.ports[pi];
+            if (p.is_output) {
+                std::string key = entry.node->id + "/" + p.name;
+                port_buf[key] = entry.output_buf_indices[out_i++];
+            }
+        }
+    }
+
+    // Assign input buffers from connections
+    for (auto& c : connections_) {
+        std::string src_key = c.from_node + "/" + c.from_port;
+        auto it = port_buf.find(src_key);
+        if (it == port_buf.end()) continue;
+        int src_buf = it->second;
+
+        // Find to_node entry
+        auto ni = node_index_.find(c.to_node);
+        if (ni == node_index_.end()) continue;
+        auto& to_entry = nodes_[ni->second];
+
+        int in_i = 0;
+        for (auto& p : to_entry.ports) {
+            if (p.is_output) continue;
+            if (p.name == c.to_port) {
+                to_entry.input_buf_indices[in_i] = src_buf;
+                break;
+            }
+            in_i++;
+        }
+    }
+
+    // Cache mixer output pointers
+    auto mixer_it = node_index_.find("mixer");
+    if (mixer_it != node_index_.end()) {
+        auto& me = nodes_[mixer_it->second];
+        int out_i = 0;
+        for (int pi = 0; pi < (int)me.ports.size(); ++pi) {
+            auto& p = me.ports[pi];
+            if (!p.is_output) continue;
+            if (p.name == "audio_out_L")
+                output_L_ = pool_.get(me.output_buf_indices[out_i]);
+            else if (p.name == "audio_out_R")
+                output_R_ = pool_.get(me.output_buf_indices[out_i]);
+            out_i++;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Graph::process
+// ---------------------------------------------------------------------------
+
+void Graph::process(const ProcessContext& ctx) {
+    if (!activated_) return;
+
+    // Zero the null buffer (index 0)
+    std::memset(pool_.get(0), 0, ctx.block_size * sizeof(float));
+
+    for (auto& node_id : eval_order_) {
+        auto ni = node_index_.find(node_id);
+        if (ni == node_index_.end()) continue;
+        auto& entry = nodes_[ni->second];
+
+        // Build PortBuffer vectors for this node
+        std::vector<PortBuffer> inputs, outputs;
+
+        int in_i = 0, out_i = 0;
+        for (auto& p : entry.ports) {
+            PortBuffer pb;
+            pb.type = p.type;
+            if (p.is_output) {
+                pb.audio = pool_.get(entry.output_buf_indices[out_i++]);
+                outputs.push_back(pb);
+            } else {
+                pb.audio = pool_.get(entry.input_buf_indices[in_i++]);
+                inputs.push_back(pb);
+            }
+        }
+
+        entry.node->process(ctx, inputs, outputs);
+    }
+}
+
+const float* Graph::output_L() const { return output_L_; }
+const float* Graph::output_R() const { return output_R_; }
+
+void Graph::set_param(const std::string& nid, const std::string& param, float val) {
+    auto* n = find_node(nid);
+    if (n) n->set_param(param, val);
+}
+
+Node* Graph::find_node(const std::string& id) const {
+    auto it = node_index_.find(id);
+    if (it == node_index_.end()) return nullptr;
+    return nodes_[it->second].node.get();
+}
