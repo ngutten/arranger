@@ -100,6 +100,11 @@ add_library(audio_server_lib STATIC
     src/audio_engine.cpp
     src/plugin_registry.cpp
     src/plugin_adapter.cpp
+    # Built-in plugins (Phase 2)
+    plugins/builtin/sine_plugin.cpp
+    plugins/builtin/note_gate_plugin.cpp
+    plugins/builtin/control_source_plugin.cpp
+    plugins/builtin/mixer_plugin.cpp
 )
 
 target_include_directories(audio_server_lib PUBLIC
@@ -132,6 +137,7 @@ endif()
 if(ENABLE_SF2)
     target_include_directories(audio_server_lib PUBLIC ${FLUIDSYNTH_INCLUDE_DIRS})
     target_link_libraries(audio_server_lib PUBLIC ${FLUIDSYNTH_LIBRARIES})
+    target_sources(audio_server_lib PRIVATE plugins/builtin/fluidsynth_plugin.cpp)
 endif()
 
 if(PLATFORM_WINDOWS)

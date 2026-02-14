@@ -1,86 +1,85 @@
 # Plugin System Implementation — Progress Log
 
-## Status: Phase 1 COMPLETE (structural)
+## Status: Phase 2 IN PROGRESS (4/5 built-ins ported)
 
-## What was done
+## Phase 1: COMPLETE — API header + registry + adapter
 
-### Phase 1: API header + registry + adapter
+See previous log for details. All infrastructure in place.
 
-All files created and integrated into the build:
+## Phase 2: Port existing built-ins
 
-**New files:**
+### Completed plugins
 
-1. **`include/plugin_api.h`** — The standalone plugin API header. Contains:
-   - `PluginPortType` enum: AudioMono, AudioStereo, Event, Control
-   - `ControlHint` enum: Continuous, Toggle, Integer, Categorical, Radio, Meter, GraphEditor
-   - `PortRole` enum: Input, Output, Sidechain, Monitor
-   - `PortDescriptor` — full port metadata (id, display_name, doc, type, role, hint, min/max/default, choices, graph_type)
-   - `ConfigParam` / `ConfigType` — non-port configuration (file paths, etc.)
-   - `PluginDescriptor` — complete self-description (id, display_name, category, doc, ports, config_params)
-   - `PluginProcessContext` — block timing info
-   - `MidiEvent` — MIDI event with sample-accurate frame offset
-   - `AudioPortBuffer`, `ControlPortBuffer`, `EventPortBuffer` — per-port buffer types
-   - `PluginBuffers` — named-map buffer container (audio, control, events maps with linear-scan get())
-   - `Plugin` — base class with descriptor(), activate(), deactivate(), configure(), process(), MIDI event methods, read_monitor(), get/set_graph_data()
-   - `PluginRegistry` — static self-registration singleton
-   - `REGISTER_PLUGIN(ClassName)` macro
+All plugins in `plugins/builtin/`, each a standalone `.cpp` file with only `#include "plugin_api.h"`.
 
-2. **`src/plugin_registry.cpp`** — Registry singleton + PluginBuffers map accessor implementations
+1. **`sine_plugin.cpp`** — `builtin.sine`
+   - Polyphonic sine synth with release envelope
+   - AudioStereo output + Continuous gain control input
+   - The gain control port replaces the old `set_param("gain", v)` — it now flows through the graph as a connectable control port
+   - Equivalent behavior to legacy SineNode
 
-3. **`include/plugin_adapter.h`** — `PluginAdapterNode : public Node` declaration with port mapping structures
+2. **`note_gate_plugin.cpp`** — `builtin.note_gate`
+   - MIDI event → control signal converter (Gate/Velocity/Pitch/NoteCount modes)
+   - Event input + Control output + 3 control inputs (mode, pitch_lo, pitch_hi)
+   - Mode/pitch_lo/pitch_hi are now graph-connectable control ports with appropriate ControlHints (Categorical for mode, Integer for pitch bounds) — the old `set_param()` approach had no type metadata
+   - The mode/band params can now be modulated from other control sources in the graph
 
-4. **`src/plugin_adapter.cpp`** — Full adapter implementation:
-   - `build_port_mapping()` — translates PluginDescriptor ports into engine PortDecl + mapping tables
-   - `declare_ports()` — exposes AudioStereo as two AudioMono PortDecls, event ports are invisible to engine
-   - `process()` — walks descriptor in declaration order to correctly wire flat input[]/output[] vectors to named PluginBuffers
-   - MIDI event methods accumulate into EventPortBuffer and forward to plugin convenience virtuals
-   - `set_param()` → atomic pending value on matching control port
-   - `push_control()` → first non-output control port
+3. **`control_source_plugin.cpp`** — `builtin.control_source`
+   - Passes automation values from Dispatcher → control output
+   - Has a control_in input (receives push_control values via adapter's pending value mechanism) and a control_out output
+   - Design note: the original used a ring buffer for push_control(); the plugin version uses the adapter's atomic pending_value on the input control port, which serves the same purpose with less code
 
-**Modified files:**
+4. **`mixer_plugin.cpp`** — `builtin.mixer`
+   - N stereo inputs → 1 stereo output with per-channel + master gain
+   - Dynamic descriptor based on channel_count_ (set via configure() before adapter construction)
+   - Each channel gets an AudioStereo input + Continuous gain control
+   - ConfigParam for channel_count so frontend can resize
 
-5. **`src/synth_node.cpp`** — `make_node()` now checks `PluginRegistry::create(desc.type)` first; falls through to legacy types if not found. Added includes for plugin_api.h and plugin_adapter.h.
+5. **`fluidsynth_plugin.cpp`** — `builtin.fluidsynth` *(AS_ENABLE_SF2 only)*
+   - SF2 soundfont MIDI synth
+   - AudioStereo output + ConfigParam for sf2_path (FilePath type)
+   - No longer throws on missing sf2_path — silently produces no audio until a valid soundfont is loaded via configure()
+   - Supports sf2 hot-reload: calling configure("sf2_path", ...) while activated unloads the old soundfont and loads the new one
 
-6. **`include/protocol.h`** — Added `CMD_LIST_REGISTERED_PLUGINS` command.
+### Changes to existing files
 
-7. **`src/main.cpp`** — Added handler for `list_registered_plugins` IPC command that serializes all PluginDescriptor data to JSON.
+- **`CMakeLists.txt`** — Added all 4 unconditional plugin sources + fluidsynth_plugin.cpp conditionally under ENABLE_SF2
+- **`src/synth_node.cpp` `make_node()`** — Updated plugin registry path to pass NodeDesc-specific fields (sf2_path, channel_count, pitch_lo, pitch_hi, gate_mode) through configure() before adapter construction
 
-8. **`CMakeLists.txt`** — Added `plugin_registry.cpp` and `plugin_adapter.cpp` to audio_server_lib.
+### Design notes
 
-### Design decisions made
+**Type naming**: Plugin IDs are `"builtin.sine"`, `"builtin.mixer"`, etc. The old type names (`"sine"`, `"mixer"`, etc.) still work via the legacy fallthrough in `make_node()`. Both paths coexist. The frontend will switch to the new IDs in Phase 3.
 
-- **TrackSourceNode and the output mixer remain engine primitives**, not plugins. They have intimate relationships with the scheduler/dispatcher.
-- **Event ports don't create PortDecls** in the graph engine. Input events arrive via Node's note_on/off virtual methods (from TrackSourceNode fan-out). Output events are stored in `event_output_storage_` and can be read by the engine after process().
-- **PluginBuffers uses linear-scan maps** (vector of pairs). For typical 1-4 entries per type, this is cache-friendly and avoids hash overhead. The engine pre-populates the structs each block; no allocation in the hot path.
-- **Stereo expansion**: AudioStereo ports become two AudioMono PortDecls (`id_L`, `id_R`). The plugin sees a single `AudioPortBuffer{left, right}`.
-- **Backward compatibility**: `make_node()` checks the registry first, then falls through to legacy built-ins. Old JSON graph descriptions continue to work.
-- **REGISTER_PLUGIN macro**: constructs a temporary instance to extract the descriptor ID, then stores the factory. Registration happens at static init time.
+**ControlSourcePlugin input port**: The original ControlSourceNode had only an output port and received values via `push_control()`. The plugin version adds a `control_in` input port that the adapter's `push_control()` writes to (via the atomic pending_value mechanism). This is functionally equivalent but makes the data flow explicit in the graph — and theoretically allows connecting other control sources to it directly.
 
-### Key architectural detail: buffer wiring in process()
+**NoteGatePlugin control ports**: The original used `set_param()` for mode/pitch_lo/pitch_hi. The plugin version exposes these as typed control ports with hints (Categorical, Integer). This means they can now be modulated from the graph rather than only set via IPC.
 
-The graph engine builds `inputs[]` and `outputs[]` by walking `declare_ports()` in order and splitting by `is_output`. The adapter's `process()` must walk `desc_.ports` in the same order to correctly map flat indices to named buffers. This is validated by the fact that `declare_ports()` and the process() wiring loop both iterate `desc_.ports` identically.
+**MixerPlugin dynamic descriptor**: The descriptor is generated dynamically based on `channel_count_`. The `REGISTER_PLUGIN` macro sees the default (2-channel) descriptor for the ID extraction. When a specific channel count is needed, `configure("channel_count", "N")` is called before the adapter constructor, which re-queries `descriptor()` and gets the correct port count.
+
+**FluidSynthPlugin error handling**: Changed from throw-on-missing-sf2 to graceful degradation. The plugin produces silence when no soundfont is loaded, and supports hot-reloading sf2 files at runtime.
+
+### Not ported (by design)
+
+- **TrackSourceNode** — Remains an engine primitive. Has intimate relationship with Dispatcher (preview injection, scheduled event fan-out). As discussed in the plan.
+- **LV2Node** — External plugin host, not a built-in to port. Stays as-is.
 
 ## What's next
 
-### Phase 2: Port existing built-ins
+### Remaining Phase 2 work
 
-Order of conversion (each is a standalone .cpp in `plugins/builtin/`):
-1. `SinePlugin` — simplest synth, first test of the full pipeline
-2. `NoteGatePlugin` — event→control conversion
-3. `ControlSourcePlugin` — control output
-4. `MixerPlugin` — variable port count (needs constructor arg)
-5. `FluidSynthPlugin` — tests ConfigParam (sf2_path)
-6. (TrackSourceNode stays as engine primitive)
+- Verify compilation and test the new plugins through the existing test suite
+- Consider adding `push_control()` virtual to Plugin base class for cleaner ControlSource pattern (optional refinement)
 
 ### Phase 3: Frontend integration
 
 1. Update `graph_model.py` to use `list_registered_plugins` response for port definitions
 2. Update `node_canvas.py` to render widgets based on ControlHint
 3. Update `graph_editor_window.py` to populate "Add Node" menu from registry
+4. Map old type names → new builtin.* IDs (or support both in the frontend)
 
 ### Phase 4: New plugins
 
-- EQ, compressor, delay, reverb (AudioStereo in → AudioStereo out + control ports)
+- EQ, compressor, delay, reverb
 - Arpeggiator (Event in → Event out)
-- Metronome (no input → Event out, with BPM-synced timing)
+- Metronome
 - MIDI output sink, file writer

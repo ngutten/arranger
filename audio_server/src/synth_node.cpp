@@ -1053,7 +1053,18 @@ std::unique_ptr<Node> make_node(const NodeDesc& desc, std::string& err) {
     auto plugin = PluginRegistry::create(desc.type);
     if (plugin) {
         AS_LOG("graph", "  -> resolved via plugin registry: '%s'", desc.type.c_str());
-        // Apply config params from the NodeDesc
+        // Pass NodeDesc-specific fields through configure()
+        if (!desc.sf2_path.empty())
+            plugin->configure("sf2_path", desc.sf2_path);
+        if (desc.channel_count != 2)  // only if non-default
+            plugin->configure("channel_count", std::to_string(desc.channel_count));
+        if (desc.pitch_lo != 0)
+            plugin->configure("pitch_lo", std::to_string(desc.pitch_lo));
+        if (desc.pitch_hi != 127)
+            plugin->configure("pitch_hi", std::to_string(desc.pitch_hi));
+        if (desc.gate_mode != 0)
+            plugin->configure("gate_mode", std::to_string(desc.gate_mode));
+        // Generic float params
         for (auto& [k, v] : desc.params) {
             plugin->configure(k, std::to_string(v));
         }
