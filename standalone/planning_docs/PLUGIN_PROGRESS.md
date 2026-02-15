@@ -1,85 +1,112 @@
 # Plugin System Implementation — Progress Log
 
-## Status: Phase 2 IN PROGRESS (4/5 built-ins ported)
+## Status: Phase 4 IN PROGRESS (2/N new plugins, event routing operational)
 
 ## Phase 1: COMPLETE — API header + registry + adapter
 
 See previous log for details. All infrastructure in place.
 
-## Phase 2: Port existing built-ins
+## Phase 2: COMPLETE — All built-ins ported
+
+All 5 built-in plugins ported (sine, note_gate, control_source, mixer, fluidsynth).
+See previous log for details.
+
+## Phase 3: COMPLETE — Frontend integration
+
+### Completed
+
+1. **`graph_model.py`** — Plugin descriptor cache + dynamic port derivation
+2. **`node_canvas.py`** — Auto-generated settings widgets from ControlHint
+3. **`graph_editor_window.py`** — Plugin-aware Add Node menu + synth detection
+4. **`server_engine.py`** — Descriptor fetch at connect time
+5. **`__init__.py`** — Exported new public API functions
+
+### Low-latency parameter path (NEW)
+
+**Problem**: Every settings widget change triggered a full `set_graph` push (graph rebuild), adding ~120ms latency to knob tweaks.
+
+**Solution**: Added a fast path that sends `set_param` directly to the server for numeric control values, bypassing the graph rebuild. The debounced full push still happens for consistency.
+
+Changes:
+- **`node_canvas.py`**: Added `param_changed` signal `(node_id, param_id, value)`. `_on_node_param_changed` emits it for all `int`/`float` values alongside the existing `graph_changed` signal.
+- **`graph_editor_window.py`**: Connects `param_changed` → `_on_param_changed_fast()`, which calls `server_engine.set_param()`. Resolves `_server_id()` for output node remapping.
+- **`server_engine.py`**: Added `set_param(node_id, param_id, value)` — sends `CMD_SET_PARAM` directly. The audio engine queues it and applies at the start of the next block.
+
+**Result**: Knob/slider changes hit the audio thread within one block (~1-5ms), while structural changes (channel_count, file paths) still go through the full graph rebuild.
+
+### Graph save/load round-trip
+
+Works correctly: `to_dict()` preserves `node_type` as the plugin ID, `from_dict()` restores it, `ports()` falls through to the descriptor cache. Only edge case: loading a graph before descriptors are fetched (no server connection) results in empty ports — same as LV2 behavior.
+
+## Phase 4: New plugins — IN PROGRESS
 
 ### Completed plugins
 
-All plugins in `plugins/builtin/`, each a standalone `.cpp` file with only `#include "plugin_api.h"`.
+6. **`reverb_plugin.cpp`** — `builtin.reverb`
+   - Schroeder/Freeverb-style stereo reverb effect
+   - AudioStereo in + AudioStereo out
+   - Controls: room_size (feedback), damping (LP in comb feedback), wet, dry, width
+   - Implementation: 4 parallel comb filters per channel (8 total, slightly detuned L vs R for stereo width) → 2 series allpass filters per channel
+   - Sample-rate-scaled delay line lengths (Freeverb-derived primes)
+   - Category: "Effect" (appears in Add Node → Plugins → Effect)
 
-1. **`sine_plugin.cpp`** — `builtin.sine`
-   - Polyphonic sine synth with release envelope
-   - AudioStereo output + Continuous gain control input
-   - The gain control port replaces the old `set_param("gain", v)` — it now flows through the graph as a connectable control port
-   - Equivalent behavior to legacy SineNode
+7. **`arpeggiator_plugin.cpp`** — `builtin.arpeggiator`
+   - Event in → Event out tempo-synced arpeggiator
+   - First plugin to exercise the Event output routing path
+   - Patterns: Up, Down, Up-Down, Random, As Played (all categorical controls)
+   - Rate: 1/4, 1/8, 1/8T, 1/16, 1/16T, 1/32 (categorical)
+   - Controls: gate length (0.05–1.0), octave range (1–4), velocity override (0=passthrough)
+   - Uses beat_position from ProcessContext for tempo sync
+   - Note tracking via note_on/off convenience methods; event emission via EventPortBuffer
+   - Audio-thread-safe: xorshift PRNG for Random mode, no allocations in process()
 
-2. **`note_gate_plugin.cpp`** — `builtin.note_gate`
-   - MIDI event → control signal converter (Gate/Velocity/Pitch/NoteCount modes)
-   - Event input + Control output + 3 control inputs (mode, pitch_lo, pitch_hi)
-   - Mode/pitch_lo/pitch_hi are now graph-connectable control ports with appropriate ControlHints (Categorical for mode, Integer for pitch bounds) — the old `set_param()` approach had no type metadata
-   - The mode/band params can now be modulated from other control sources in the graph
+### Event output routing infrastructure (NEW)
 
-3. **`control_source_plugin.cpp`** — `builtin.control_source`
-   - Passes automation values from Dispatcher → control output
-   - Has a control_in input (receives push_control values via adapter's pending value mechanism) and a control_out output
-   - Design note: the original used a ring buffer for push_control(); the plugin version uses the adapter's atomic pending_value on the input control port, which serves the same purpose with less code
+**Problem**: The graph engine had no mechanism to route events from a plugin's Event output port to downstream nodes. TrackSourceNode uses a bespoke `set_downstream()` mechanism, but there was no generic Event connection routing.
 
-4. **`mixer_plugin.cpp`** — `builtin.mixer`
-   - N stereo inputs → 1 stereo output with per-channel + master gain
-   - Dynamic descriptor based on channel_count_ (set via configure() before adapter construction)
-   - Each channel gets an AudioStereo input + Continuous gain control
-   - ConfigParam for channel_count so frontend can resize
+**Solution**: Added event output forwarding in `Graph::process()`. After each node processes, if it's a `PluginAdapterNode` with non-empty event outputs, the engine scans `connections_` for matching event connections and delivers events to downstream nodes via their `note_on/off/pitch_bend/program_change` methods.
 
-5. **`fluidsynth_plugin.cpp`** — `builtin.fluidsynth` *(AS_ENABLE_SF2 only)*
-   - SF2 soundfont MIDI synth
-   - AudioStereo output + ConfigParam for sf2_path (FilePath type)
-   - No longer throws on missing sf2_path — silently produces no audio until a valid soundfont is loaded via configure()
-   - Supports sf2 hot-reload: calling configure("sf2_path", ...) while activated unloads the old soundfont and loads the new one
+Changes:
+- **`graph.cpp`**: Added `#include "plugin_adapter.h"`. Extended `Graph::process()` with post-node event output routing via `dynamic_cast<PluginAdapterNode*>` + `event_outputs()`.
+- Topo-sort already considers all connections (including event connections), so ordering is correct: event-producing nodes process before event-consuming nodes.
+- Event delivery happens between the producer's `process()` and the consumer's `process()`, so the consumer sees the events on its next process call.
 
-### Changes to existing files
+**Routing flow for arpeggiator**:
+```
+TrackSourceNode::process()
+  → calls arpeggiator.note_on() (via set_downstream)
+ArpeggiatorPlugin::process()
+  → reads held_notes_, emits arpeggiated events to events_out EventPortBuffer
+Graph event routing
+  → reads arpeggiator's event_outputs()
+  → calls synth.note_on/off() for each event
+SynthPlugin::process()
+  → renders audio with arpeggiated notes active
+```
 
-- **`CMakeLists.txt`** — Added all 4 unconditional plugin sources + fluidsynth_plugin.cpp conditionally under ENABLE_SF2
-- **`src/synth_node.cpp` `make_node()`** — Updated plugin registry path to pass NodeDesc-specific fields (sf2_path, channel_count, pitch_lo, pitch_hi, gate_mode) through configure() before adapter construction
+### Build changes
+
+- **`CMakeLists.txt`**: Added `reverb_plugin.cpp` and `arpeggiator_plugin.cpp` to `audio_server_lib` sources (unconditional — no external dependencies).
 
 ### Design notes
 
-**Type naming**: Plugin IDs are `"builtin.sine"`, `"builtin.mixer"`, etc. The old type names (`"sine"`, `"mixer"`, etc.) still work via the legacy fallthrough in `make_node()`. Both paths coexist. The frontend will switch to the new IDs in Phase 3.
+**Convenience method vs EventPortBuffer duplication**: The PluginAdapterNode calls both `plugin_->note_on()` AND accumulates events into the EventPortBuffer. For plugins that use both paths (like the arpeggiator), this could cause double-counting. The arpeggiator avoids this by only using the convenience methods for note tracking, ignoring the EventPortBuffer input. Future consideration: add a flag or convention for plugins that prefer one path over the other.
 
-**ControlSourcePlugin input port**: The original ControlSourceNode had only an output port and received values via `push_control()`. The plugin version adds a `control_in` input port that the adapter's `push_control()` writes to (via the atomic pending_value mechanism). This is functionally equivalent but makes the data flow explicit in the graph — and theoretically allows connecting other control sources to it directly.
-
-**NoteGatePlugin control ports**: The original used `set_param()` for mode/pitch_lo/pitch_hi. The plugin version exposes these as typed control ports with hints (Categorical, Integer). This means they can now be modulated from the graph rather than only set via IPC.
-
-**MixerPlugin dynamic descriptor**: The descriptor is generated dynamically based on `channel_count_`. The `REGISTER_PLUGIN` macro sees the default (2-channel) descriptor for the ID extraction. When a specific channel count is needed, `configure("channel_count", "N")` is called before the adapter constructor, which re-queries `descriptor()` and gets the correct port count.
-
-**FluidSynthPlugin error handling**: Changed from throw-on-missing-sf2 to graceful degradation. The plugin produces silence when no soundfont is loaded, and supports hot-reloading sf2 files at runtime.
-
-### Not ported (by design)
-
-- **TrackSourceNode** — Remains an engine primitive. Has intimate relationship with Dispatcher (preview injection, scheduled event fan-out). As discussed in the plan.
-- **LV2Node** — External plugin host, not a built-in to port. Stays as-is.
+**Event routing performance**: The current event routing scans all connections for each event-producing node. This is O(connections × event_producers) per block. Fine for typical graphs (10-50 connections, 0-2 event producers). If this becomes a bottleneck, pre-compute event routing tables in activate().
 
 ## What's next
 
-### Remaining Phase 2 work
+### Phase 4 continued
 
-- Verify compilation and test the new plugins through the existing test suite
-- Consider adding `push_control()` virtual to Plugin base class for cleaner ControlSource pattern (optional refinement)
-
-### Phase 3: Frontend integration
-
-1. Update `graph_model.py` to use `list_registered_plugins` response for port definitions
-2. Update `node_canvas.py` to render widgets based on ControlHint
-3. Update `graph_editor_window.py` to populate "Add Node" menu from registry
-4. Map old type names → new builtin.* IDs (or support both in the frontend)
-
-### Phase 4: New plugins
-
-- EQ, compressor, delay, reverb
-- Arpeggiator (Event in → Event out)
-- Metronome
+- EQ (parametric — exercises GraphEditor hint for EQ curve)
+- Compressor (exercises Sidechain port role)
+- Delay (tempo-synced, stereo)
+- Metronome (generates click track — Event output + Audio output)
 - MIDI output sink, file writer
+
+### Future considerations
+
+- Pre-compute event routing tables in Graph::activate() for better perf
+- Add convention for plugins to opt out of convenience method forwarding
+- Consider CC (control change) forwarding in event routing
+- Arpeggiator: add swing parameter, latch mode

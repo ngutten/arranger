@@ -124,6 +124,7 @@ class NodeGraphCanvas(QWidget):
 
     graph_changed = Signal()
     node_right_clicked = Signal(object, QPoint)   # (GraphNode, global_pos)
+    param_changed = Signal(str, str, float)        # (node_id, param_id, value) — low-latency path
 
     def __init__(self, model: GraphModel, parent=None,
                  settings_factory: Callable = None):
@@ -375,6 +376,11 @@ class NodeGraphCanvas(QWidget):
                 self._create_settings_widget(node)
                 self.graph_changed.emit()
             else:
+                # Emit low-latency set_param for numeric values so the audio
+                # thread sees the change immediately (the debounced graph push
+                # still happens for consistency).
+                if isinstance(value, (int, float)):
+                    self.param_changed.emit(node_id, key, float(value))
                 self.graph_changed.emit()
             self.update()
 
@@ -1185,7 +1191,228 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable):
         return w
 
     # track_source, control_source, unknown: no settings
+    # Plugin-backed nodes: auto-generate from descriptor
+    from .graph_model import get_plugin_descriptor
+    desc = get_plugin_descriptor(t)
+    if desc:
+        return _make_plugin_settings_widget(node, desc, parent, on_change)
     return None
+
+
+def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change: Callable):
+    """Auto-generate a settings panel from a plugin descriptor.
+
+    Generates widgets for:
+      - Control input ports (based on ControlHint)
+      - ConfigParams (file pickers, dropdowns, spinboxes, etc.)
+    """
+    from PySide6.QtWidgets import (
+        QWidget, QFormLayout, QLabel, QDoubleSpinBox, QSpinBox,
+        QLineEdit, QPushButton, QHBoxLayout, QCheckBox, QComboBox,
+    )
+    from PySide6.QtCore import Qt as _Qt
+
+    ports = desc.get("ports", [])
+    config_params = desc.get("config_params", [])
+
+    # Filter to control input ports only
+    ctrl_inputs = [p for p in ports
+                   if p.get("type") == "control" and p.get("role") == "input"]
+
+    if not ctrl_inputs and not config_params:
+        return None
+
+    w = QWidget(parent)
+    w.setStyleSheet("background: transparent; color: #ccc;")
+    lay = QFormLayout(w)
+    lay.setContentsMargins(4, 2, 4, 2)
+    lay.setSpacing(3)
+
+    STYLE_ACTIVE = "background: #0d1117; color: #ccc; border: 1px solid #2a3a5c;"
+    STYLE_DISABLED = "background: #111; color: #444; border: 1px solid #1a1a1a;"
+
+    _ctrl_widgets: dict = {}
+
+    # --- Config params first (file pickers, etc.) ---
+    for cp in config_params:
+        cp_id = cp.get("id", "")
+        cp_display = cp.get("display_name", cp_id)
+        cp_type = cp.get("type", "string")
+        cp_default = cp.get("default", "")
+        stored = node.params.get(cp_id, cp_default)
+
+        if cp_type == "filepath":
+            row = QWidget()
+            row_lay = QHBoxLayout(row)
+            row_lay.setContentsMargins(0, 0, 0, 0)
+            row_lay.setSpacing(3)
+            edit = QLineEdit(str(stored))
+            edit.setPlaceholderText(cp.get("doc", ""))
+            edit.setReadOnly(True)
+            edit.setStyleSheet("color: #aaa; background: #0d1117; border: 1px solid #2a3a5c;")
+            row_lay.addWidget(edit)
+            browse_btn = QPushButton("…")
+            browse_btn.setMaximumWidth(24)
+            browse_btn.setStyleSheet("background: #1a2236; color: #ccc;")
+
+            file_filter = cp.get("file_filter", "All Files (*)")
+            def _browse(checked=False, e=edit, cid=cp_id, ff=file_filter):
+                from PySide6.QtWidgets import QFileDialog
+                path, _ = QFileDialog.getOpenFileName(w, f"Select {cp_display}", "", ff)
+                if path:
+                    e.setText(path)
+                    on_change(node.node_id, cid, path)
+            browse_btn.clicked.connect(_browse)
+            row_lay.addWidget(browse_btn)
+            lay.addRow(QLabel(cp_display + ":"), row)
+
+        elif cp_type == "categorical":
+            combo = QComboBox()
+            combo.setStyleSheet(STYLE_ACTIVE)
+            choices = cp.get("choices", [])
+            combo.addItems(choices)
+            try:
+                idx = choices.index(str(stored))
+            except ValueError:
+                idx = 0
+            combo.setCurrentIndex(idx)
+            combo.currentTextChanged.connect(
+                lambda text, cid=cp_id: on_change(node.node_id, cid, text))
+            lay.addRow(QLabel(cp_display + ":"), combo)
+
+        elif cp_type == "integer":
+            spin = QSpinBox()
+            spin.setRange(0, 999999)
+            spin.setValue(int(stored) if stored else 0)
+            spin.setStyleSheet(STYLE_ACTIVE)
+            spin.setMaximumWidth(80)
+            spin.valueChanged.connect(
+                lambda v, cid=cp_id: on_change(node.node_id, cid, v))
+            lay.addRow(QLabel(cp_display + ":"), spin)
+
+        elif cp_type == "bool":
+            cb = QCheckBox()
+            cb.setChecked(str(stored).lower() in ("1", "true", "yes"))
+            cb.toggled.connect(
+                lambda checked, cid=cp_id: on_change(node.node_id, cid, 1 if checked else 0))
+            lay.addRow(QLabel(cp_display + ":"), cb)
+
+        elif cp_type == "float":
+            spin = QDoubleSpinBox()
+            spin.setRange(-1e6, 1e6)
+            spin.setValue(float(stored) if stored else 0.0)
+            spin.setStyleSheet(STYLE_ACTIVE)
+            spin.setMaximumWidth(80)
+            spin.valueChanged.connect(
+                lambda v, cid=cp_id: on_change(node.node_id, cid, v))
+            lay.addRow(QLabel(cp_display + ":"), spin)
+
+        else:  # string
+            edit = QLineEdit(str(stored))
+            edit.setStyleSheet(STYLE_ACTIVE)
+            edit.textChanged.connect(
+                lambda text, cid=cp_id: on_change(node.node_id, cid, text))
+            lay.addRow(QLabel(cp_display + ":"), edit)
+
+    # --- Control input ports ---
+    for p in ctrl_inputs:
+        pid = p.get("id", "")
+        display = p.get("display_name", pid)
+        hint = p.get("hint", "continuous")
+        p_min = float(p.get("min", 0.0))
+        p_max = float(p.get("max", 1.0))
+        p_def = float(p.get("default", 0.0))
+        p_step = float(p.get("step", 0.0))
+        choices = p.get("choices", [])
+        stored = node.params.get(pid, p_def)
+
+        pid_capture = pid
+
+        if hint == "toggle":
+            cb = QCheckBox()
+            cb.setChecked(float(stored) > 0.5)
+            cb.setStyleSheet("color: #ccc;")
+            cb.toggled.connect(
+                lambda checked, k=pid_capture: on_change(
+                    node.node_id, k, 1.0 if checked else 0.0))
+            lbl = QLabel(display + ":")
+            lbl.setStyleSheet("color: #aaa; font-size: 8px;")
+            lay.addRow(lbl, cb)
+            _ctrl_widgets[pid] = cb
+
+        elif hint in ("categorical", "radio") and choices:
+            combo = QComboBox()
+            combo.setStyleSheet(STYLE_ACTIVE)
+            combo.setMaximumWidth(140)
+            for i, ch in enumerate(choices):
+                combo.addItem(ch, float(i))
+            current_idx = max(0, min(len(choices) - 1, int(round(float(stored)))))
+            combo.setCurrentIndex(current_idx)
+            combo.currentIndexChanged.connect(
+                lambda idx, k=pid_capture: on_change(node.node_id, k, float(idx)))
+            lbl = QLabel(display + ":")
+            lbl.setStyleSheet("color: #aaa; font-size: 8px;")
+            lay.addRow(lbl, combo)
+            _ctrl_widgets[pid] = combo
+
+        elif hint == "integer":
+            spin = QSpinBox()
+            spin.setRange(int(p_min), int(p_max))
+            spin.setValue(int(round(float(stored))))
+            if p_step > 0:
+                spin.setSingleStep(int(p_step))
+            spin.setStyleSheet(STYLE_ACTIVE)
+            spin.setMaximumWidth(80)
+            spin.valueChanged.connect(
+                lambda v, k=pid_capture: on_change(node.node_id, k, float(v)))
+            lbl = QLabel(display + ":")
+            lbl.setStyleSheet("color: #aaa; font-size: 8px;")
+            lay.addRow(lbl, spin)
+            _ctrl_widgets[pid] = spin
+
+        elif hint == "meter":
+            # Read-only meter — just show label for now (future: VU bar)
+            val_lbl = QLabel(f"{float(stored):.2f}")
+            val_lbl.setStyleSheet("color: #6bcb77; font-size: 8px;")
+            lay.addRow(QLabel(display + ":"), val_lbl)
+
+        else:
+            # Continuous (default)
+            span = p_max - p_min if p_max != p_min else 1.0
+            if span <= 0.1:
+                step, dec = 0.001, 4
+            elif span <= 2.0:
+                step, dec = 0.01, 3
+            elif span <= 20.0:
+                step, dec = 0.1, 2
+            elif span <= 200.0:
+                step, dec = 1.0, 1
+            else:
+                step, dec = 10.0, 0
+
+            spin = QDoubleSpinBox()
+            spin.setRange(p_min, p_max)
+            spin.setSingleStep(step)
+            spin.setDecimals(dec)
+            spin.setValue(float(stored))
+            spin.setStyleSheet(STYLE_ACTIVE)
+            spin.setMaximumWidth(90)
+            spin.valueChanged.connect(
+                lambda v, k=pid_capture: on_change(node.node_id, k, v))
+            lbl = QLabel(display + ":")
+            lbl.setStyleSheet("color: #aaa; font-size: 8px;")
+            lay.addRow(lbl, spin)
+            _ctrl_widgets[pid] = spin
+
+    def refresh_wired_ports(wired: set):
+        for sym, widget in _ctrl_widgets.items():
+            driven = sym in wired
+            widget.setEnabled(not driven)
+            if hasattr(widget, 'setStyleSheet') and not isinstance(widget, QCheckBox):
+                widget.setStyleSheet(STYLE_DISABLED if driven else STYLE_ACTIVE)
+
+    w.refresh_wired_ports = refresh_wired_ports
+    return w
 
 
 # ---------------------------------------------------------------------------

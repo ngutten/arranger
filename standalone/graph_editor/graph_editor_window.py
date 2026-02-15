@@ -128,6 +128,7 @@ class GraphEditorWindow(QWidget):
         self._canvas = NodeGraphCanvas(self.model, self)
         self._canvas.graph_changed.connect(self._on_graph_changed_canvas)
         self._canvas.node_right_clicked.connect(self._on_node_right_click)
+        self._canvas.param_changed.connect(self._on_param_changed_fast)
 
         # Toolbar
         toolbar = QHBoxLayout()
@@ -217,7 +218,55 @@ class GraphEditorWindow(QWidget):
         output_action = menu.addAction("Output (final mix)")
         output_action.triggered.connect(lambda: self._add_node("output"))
 
+        # --- Registered plugins (new plugin API) ---
+        # Add plugins from the descriptor cache that aren't already in the
+        # hardcoded menus above.
+        self._plugin_menu_placeholder = menu  # store ref for dynamic rebuild
+        self._populate_plugin_menu(menu)
+
         return menu
+
+    def _populate_plugin_menu(self, menu: QMenu) -> None:
+        """Add registered plugins to the Add Node menu, grouped by category.
+
+        Skips plugins whose short name is already in the hardcoded menus
+        (sine, mixer, note_gate, control_source, fluidsynth) to avoid
+        duplicates during the transition period.
+        """
+        from .graph_model import _plugin_descriptors
+
+        # Types already represented in the hardcoded menus
+        _hardcoded = {"builtin.sine", "builtin.mixer", "builtin.note_gate",
+                      "builtin.control_source", "builtin.fluidsynth"}
+
+        # Group remaining plugins by category
+        by_cat: dict[str, list[dict]] = {}
+        for pid, desc in _plugin_descriptors.items():
+            if pid in _hardcoded:
+                continue
+            cat = desc.get("category", "Other")
+            by_cat.setdefault(cat, []).append(desc)
+
+        if not by_cat:
+            return
+
+        menu.addSeparator()
+        plugins_menu = menu.addMenu("Plugins")
+
+        for cat in sorted(by_cat.keys()):
+            if len(by_cat) == 1:
+                # Only one category — don't nest
+                target = plugins_menu
+            else:
+                target = plugins_menu.addMenu(cat)
+
+            for desc in sorted(by_cat[cat], key=lambda d: d.get("display_name", "")):
+                pid = desc.get("id", "")
+                name = desc.get("display_name", pid)
+                act = target.addAction(name)
+                act.triggered.connect(
+                    lambda checked=False, p=pid, n=name, d=desc:
+                    self._add_plugin_node(p, n, d))
 
     # -----------------------------------------------------------------------
     # LV2 plugin fetch
@@ -382,6 +431,40 @@ class GraphEditorWindow(QWidget):
         self._canvas.update()
         self._on_graph_changed_canvas()
 
+    def _add_plugin_node(self, plugin_id: str, name: str, desc: dict) -> None:
+        """Add a node backed by a registered plugin (new plugin API)."""
+        import uuid
+        nid = str(uuid.uuid4())
+
+        cx = self._canvas.view_to_scene(
+            QPointF(self._canvas.width() / 2, self._canvas.height() / 2)
+        )
+
+        # Pre-populate params with config param defaults
+        params = {}
+        for cp in desc.get("config_params", []):
+            cp_id = cp.get("id", "")
+            cp_def = cp.get("default", "")
+            if cp_def:
+                params[cp_id] = cp_def
+        # Pre-populate control input defaults
+        for port in desc.get("ports", []):
+            if port.get("type") == "control" and port.get("role") == "input":
+                params[port["id"]] = port.get("default", 0.0)
+
+        node = GraphNode(
+            node_type=plugin_id,
+            node_id=nid,
+            display_name=name,
+            x=cx.x() - 90, y=cx.y() - 50,
+            params=params,
+        )
+        self.model.add_node(node)
+        self._canvas._create_settings_widget(node)
+        self._canvas.selected_nodes = {nid}
+        self._canvas.update()
+        self._on_graph_changed_canvas()
+
     # -----------------------------------------------------------------------
     # Context menu on node right-click
     # -----------------------------------------------------------------------
@@ -389,7 +472,17 @@ class GraphEditorWindow(QWidget):
     def _on_node_right_click(self, node: GraphNode, global_pos: QPoint) -> None:
         menu = QMenu(self)
 
-        if node.node_type in ("fluidsynth", "sine", "sampler", "lv2"):
+        # A node is a "synth" (can be default target for new tracks) if it's
+        # a known synth type OR a plugin with Event input + Audio output.
+        is_synth = node.node_type in ("fluidsynth", "sine", "sampler", "lv2")
+        if not is_synth:
+            ports = node.ports()
+            has_event_in = any(p.ptype == PortType.MIDI and not p.is_output for p in ports)
+            has_audio_out = any(p.ptype in (PortType.AUDIO, PortType.AUDIO_MONO)
+                                and p.is_output for p in ports)
+            is_synth = has_event_in and has_audio_out
+
+        if is_synth:
             if node.is_default_synth:
                 act = menu.addAction("✓ Default synth for new tracks")
                 act.setEnabled(False)
@@ -429,6 +522,14 @@ class GraphEditorWindow(QWidget):
     def _on_graph_changed_canvas(self) -> None:
         """Called when canvas reports any mutation; schedules a debounced push."""
         self._push_timer.start()
+
+    def _on_param_changed_fast(self, node_id: str, param_id: str, value: float) -> None:
+        """Low-latency path: send set_param directly to server without graph rebuild."""
+        if self.server_engine and hasattr(self.server_engine, 'set_param'):
+            # Resolve the server-side node ID (output node serialises as "mixer")
+            node = self.model.get_node(node_id)
+            server_id = node._server_id() if node else node_id
+            self.server_engine.set_param(server_id, param_id, value)
 
     def _do_live_push(self) -> None:
         """Push the current graph to the server."""

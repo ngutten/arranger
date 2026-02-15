@@ -137,3 +137,5 @@ private:
 };
 
 REGISTER_PLUGIN(NoteGatePlugin);
+
+std::unique_ptr<Plugin> make_note_gate_plugin() { return std::make_unique<NoteGatePlugin>(); }

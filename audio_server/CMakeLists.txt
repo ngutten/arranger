@@ -100,11 +100,15 @@ add_library(audio_server_lib STATIC
     src/audio_engine.cpp
     src/plugin_registry.cpp
     src/plugin_adapter.cpp
+    src/builtin_plugins.cpp
     # Built-in plugins (Phase 2)
     plugins/builtin/sine_plugin.cpp
     plugins/builtin/note_gate_plugin.cpp
     plugins/builtin/control_source_plugin.cpp
     plugins/builtin/mixer_plugin.cpp
+    # Phase 4 plugins
+    plugins/builtin/reverb_plugin.cpp
+    plugins/builtin/arpeggiator_plugin.cpp
 )
 
 target_include_directories(audio_server_lib PUBLIC

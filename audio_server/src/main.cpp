@@ -15,6 +15,10 @@
 #include "plugin_api.h"
 #include "nlohmann/json.hpp"
 
+// Defined in builtin_plugins.cpp — explicit registration that defeats
+// the linker dead-stripping problem with static-lib self-registration.
+void register_builtin_plugins();
+
 #ifdef AS_ENABLE_LV2
 #include "synth_node.h"  // list_lv2_plugins
 #endif
@@ -354,6 +358,12 @@ int main(int argc, char** argv) {
         if (arg == "--sample-rate" && i+1 < argc) sample_rate  = std::stof(argv[++i]);
         if (arg == "--block-size"  && i+1 < argc) block_size   = std::stoi(argv[++i]);
     }
+
+    // Explicitly register all built-in plugins before anything queries the
+    // registry.  This is necessary because the plugins live in a static
+    // library and their self-registration statics (REGISTER_PLUGIN) are
+    // dead-stripped by the linker unless referenced from outside the lib.
+    register_builtin_plugins();
 
     std::signal(SIGINT,  handle_signal);
     std::signal(SIGTERM, handle_signal);

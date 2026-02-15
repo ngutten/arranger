@@ -155,4 +155,6 @@ private:
 
 REGISTER_PLUGIN(FluidSynthPlugin);
 
+std::unique_ptr<Plugin> make_fluidsynth_plugin() { return std::make_unique<FluidSynthPlugin>(); }
+
 #endif // AS_ENABLE_SF2

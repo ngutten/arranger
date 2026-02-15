@@ -344,6 +344,9 @@ class ServerEngine:
         self._poll_stop = threading.Event()
 
         self._connect()
+        # Fetch plugin descriptors after connection is established
+        if self._client is not None:
+            self._fetch_plugin_descriptors()
 
     # ------------------------------------------------------------------
     # Connection management
@@ -360,6 +363,23 @@ class ServerEngine:
             print(f"[ServerEngine] Could not connect: {e}")
             self._client = None
             return False
+
+    def _fetch_plugin_descriptors(self) -> None:
+        """Fetch registered plugin descriptors and cache them in graph_model.
+
+        Must be called outside _lock (it calls _send which acquires _lock).
+        """
+        try:
+            resp = self._send({"cmd": "list_registered_plugins"})
+            if resp and resp.get("status") == "ok":
+                plugins = resp.get("plugins", [])
+                from ..graph_editor.graph_model import set_plugin_descriptors
+                set_plugin_descriptors(plugins)
+                print(f"[ServerEngine] Cached {len(plugins)} plugin descriptors")
+        except Exception as e:
+            print(f"[ServerEngine] Failed to fetch plugin descriptors: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _send(self, request: dict) -> Optional[dict]:
         """Send a command and return the response, reconnecting once on failure."""
@@ -385,6 +405,23 @@ class ServerEngine:
     @property
     def is_connected(self) -> bool:
         return self._client is not None and self._client.connected
+
+    # ------------------------------------------------------------------
+    # Low-latency parameter updates
+    # ------------------------------------------------------------------
+
+    def set_param(self, node_id: str, param_id: str, value: float) -> None:
+        """Send a set_param command for immediate audio-thread update.
+
+        This bypasses the full graph rebuild path — the audio engine queues
+        the value change and applies it at the start of the next block.
+        """
+        self._send({
+            "cmd": "set_param",
+            "node_id": node_id,
+            "param_id": param_id,
+            "value": value,
+        })
 
     # ------------------------------------------------------------------
     # Graph / soundfont

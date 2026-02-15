@@ -1,6 +1,7 @@
 // graph.cpp
 #include "graph.h"
 #include "synth_node.h"
+#include "plugin_adapter.h"
 #include "nlohmann/json.hpp"
 
 #include <stdexcept>
@@ -48,11 +49,23 @@ std::unique_ptr<Graph> Graph::from_json(const std::string& j_str, std::string& e
         desc.pitch_lo    = jn.value("pitch_lo", 0);
         desc.pitch_hi    = jn.value("pitch_hi", 127);
         desc.gate_mode   = jn.value("gate_mode", 0);
+        // Collect string params for configure() calls on plugin-backed nodes.
+        // Numeric params go into desc.params (applied via set_param after activate).
+        std::unordered_map<std::string, std::string> string_params;
         if (jn.contains("params")) {
             for (auto& [k, v] : jn["params"].items()) {
-                desc.params[k] = v.get<float>();
+                if (v.is_number())
+                    desc.params[k] = v.get<float>();
+                else if (v.is_string())
+                    string_params[k] = v.get<std::string>();
             }
         }
+        // Also forward the dedicated NodeDesc string fields as configure() keys
+        // so plugin-backed nodes (e.g. builtin.fluidsynth) receive them even
+        // though make_node() only uses them for the legacy hardcoded node types.
+        if (!desc.sf2_path.empty())    string_params.emplace("sf2_path",    desc.sf2_path);
+        if (!desc.lv2_uri.empty())     string_params.emplace("lv2_uri",     desc.lv2_uri);
+        if (!desc.sample_path.empty()) string_params.emplace("sample_path", desc.sample_path);
 
         std::string node_err;
         auto node = make_node(desc, node_err);
@@ -61,10 +74,17 @@ std::unique_ptr<Graph> Graph::from_json(const std::string& j_str, std::string& e
             return nullptr;
         }
 
+        // For plugin-backed nodes, deliver string config params via configure().
+        // This is how sf2_path reaches FluidSynthPlugin before activate() is called.
+        if (auto* adapter = dynamic_cast<PluginAdapterNode*>(node.get())) {
+            for (auto& [k, v] : string_params)
+                adapter->plugin()->configure(k, v);
+        }
+
         NodeEntry entry;
         entry.node        = std::move(node);
         entry.ports       = entry.node->declare_ports();
-        entry.init_params = desc.params;   // applied after activate()
+        entry.init_params = desc.params;   // applied via set_param() after activate()
 
         g->node_index_[desc.id] = static_cast<int>(g->nodes_.size());
         g->nodes_.push_back(std::move(entry));
@@ -301,6 +321,37 @@ void Graph::process(const ProcessContext& ctx) {
         }
 
         entry.node->process(ctx, inputs, outputs);
+
+        // --- Route event outputs from PluginAdapterNodes ---
+        // If this node produced events on output ports, forward them to
+        // connected downstream nodes via note_on/off/etc.
+        auto* adapter = dynamic_cast<PluginAdapterNode*>(entry.node.get());
+        if (adapter) {
+            for (auto& [port_id, events] : adapter->event_outputs()) {
+                if (events.empty()) continue;
+                // Find all connections from this node's event output port
+                for (auto& c : connections_) {
+                    if (c.from_node != node_id || c.from_port != port_id) continue;
+                    auto dest_it = node_index_.find(c.to_node);
+                    if (dest_it == node_index_.end()) continue;
+                    Node* dest = nodes_[dest_it->second].node.get();
+                    // Deliver events via the MIDI convenience interface
+                    for (auto& ev : events) {
+                        uint8_t type = ev.status & 0xF0;
+                        int ch = ev.channel;
+                        if (type == 0x90 && ev.data2 > 0) {
+                            dest->note_on(ch, ev.data1, ev.data2);
+                        } else if (type == 0x80 || (type == 0x90 && ev.data2 == 0)) {
+                            dest->note_off(ch, ev.data1);
+                        } else if (type == 0xE0) {
+                            dest->pitch_bend(ch, ev.data1 | (ev.data2 << 7));
+                        } else if (type == 0xC0) {
+                            dest->program_change(ch, 0, ev.data1);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

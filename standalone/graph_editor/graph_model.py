@@ -133,6 +133,85 @@ NOTE_GATE_PORTS = [
 NOTE_GATE_MODES = ["Gate", "Velocity", "Pitch", "Note Count"]
 
 
+# ---------------------------------------------------------------------------
+# Plugin descriptor cache  (populated from list_registered_plugins response)
+# ---------------------------------------------------------------------------
+
+# Maps plugin ID ("builtin.sine", etc.) → descriptor dict from server.
+# Populated by set_plugin_descriptors() at startup / reconnect.
+_plugin_descriptors: dict[str, dict] = {}
+
+# Maps legacy type name → plugin ID for backward compatibility.
+# E.g. "sine" → "builtin.sine", "mixer" → "builtin.mixer", etc.
+_legacy_type_to_plugin_id: dict[str, str] = {}
+
+
+def set_plugin_descriptors(descriptors: list[dict]) -> None:
+    """Cache plugin descriptors fetched from the server.
+
+    Called once (or on reconnect) with the 'plugins' list from the
+    list_registered_plugins response.
+    """
+    global _plugin_descriptors, _legacy_type_to_plugin_id
+    _plugin_descriptors.clear()
+    _legacy_type_to_plugin_id.clear()
+    for desc in descriptors:
+        pid = desc.get("id", "")
+        if not pid:
+            continue
+        _plugin_descriptors[pid] = desc
+        # Build legacy mapping: "builtin.sine" → register under "sine" too
+        if pid.startswith("builtin."):
+            short = pid[len("builtin."):]
+            _legacy_type_to_plugin_id[short] = pid
+
+
+def get_plugin_descriptor(type_or_id: str) -> Optional[dict]:
+    """Look up a cached plugin descriptor by ID or legacy type name."""
+    if type_or_id in _plugin_descriptors:
+        return _plugin_descriptors[type_or_id]
+    pid = _legacy_type_to_plugin_id.get(type_or_id)
+    if pid:
+        return _plugin_descriptors.get(pid)
+    return None
+
+
+def plugin_id_for_type(type_name: str) -> Optional[str]:
+    """Return the plugin ID for a node type, or None if not plugin-backed."""
+    if type_name in _plugin_descriptors:
+        return type_name
+    return _legacy_type_to_plugin_id.get(type_name)
+
+
+def _plugin_ports_from_descriptor(desc: dict, params: dict) -> list["PortDef"]:
+    """Derive PortDef list from a plugin descriptor dict.
+
+    Handles the mapping from plugin port types to the UI's PortType enum,
+    including the AudioStereo → single AUDIO wire abstraction and
+    Event → MIDI equivalence.
+
+    For mixer-like plugins with dynamic channel_count, uses params to
+    determine the actual descriptor (falls back to the cached one).
+    """
+    ports_out = []
+    for p in desc.get("ports", []):
+        ptype_str = p.get("type", "")
+        role = p.get("role", "input")
+        is_out = role in ("output", "monitor")
+        pid = p.get("id", "")
+        display = p.get("display_name", pid)
+
+        if ptype_str == "audio_stereo":
+            ports_out.append(PortDef(display, pid, PortType.AUDIO, is_out))
+        elif ptype_str == "audio_mono":
+            ports_out.append(PortDef(display, pid, PortType.AUDIO_MONO, is_out))
+        elif ptype_str == "event":
+            ports_out.append(PortDef(display, pid, PortType.MIDI, is_out))
+        elif ptype_str == "control":
+            ports_out.append(PortDef(display, pid, PortType.CONTROL, is_out))
+    return ports_out
+
+
 def midi_note_name(pitch: int) -> str:
     """Return display name for a MIDI pitch, e.g. 60 → 'C4'."""
     names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
@@ -244,6 +323,10 @@ class GraphNode:
             self.params["_stereo_map"] = stereo_map
             self.params["_dual_mono"]  = dual_mono
             return ports
+        # Plugin-backed node: look up descriptor from cache
+        desc = get_plugin_descriptor(t)
+        if desc:
+            return _plugin_ports_from_descriptor(desc, self.params)
         return []
 
     def output_ports(self) -> list[PortDef]: return [p for p in self.ports() if p.is_output]
@@ -255,7 +338,14 @@ class GraphNode:
         return "mixer" if self.node_type == "output" else self.node_id
 
     def _server_type(self) -> str:
-        return "mixer" if self.node_type in ("output", "mixer") else self.node_type
+        if self.node_type in ("output", "mixer"):
+            return "mixer"
+        # If this is a known plugin, send the plugin ID so make_node()
+        # resolves via the registry.  Legacy short names also work.
+        pid = plugin_id_for_type(self.node_type)
+        if pid:
+            return pid
+        return self.node_type
 
     def to_server_dict(self) -> Optional[dict]:
         """Serialise as a server NodeDesc.
@@ -285,19 +375,34 @@ class GraphNode:
             d["pitch_hi"]  = self.params.get("pitch_hi", 127)
             d["gate_mode"] = self.params.get("gate_mode", 0)
 
+        # For plugin-backed nodes, pass config_params through the params dict
+        # so make_node() can forward them via configure()
+        # Only numeric config params go here — string values (e.g. sf2_path)
+        # travel via their dedicated top-level NodeDesc fields and would cause
+        # a type error when graph.cpp tries to read params as floats.
+        desc = get_plugin_descriptor(self.node_type)
+        if desc:
+            config_ids = {cp["id"] for cp in desc.get("config_params", [])}
+            for cid in config_ids:
+                if cid in self.params and isinstance(self.params[cid], (int, float)):
+                    d.setdefault("params", {})[cid] = self.params[cid]
+
+        # Internal cache keys to exclude from server payload
+        _internal_keys = {"sf2_path", "lv2_uri", "sample_path",
+                          "channel_count", "_ports", "_stereo_map", "_dual_mono",
+                          "_plugin_desc"}
         param_keys = {k: v for k, v in self.params.items()
-                      if k not in ("sf2_path", "lv2_uri", "sample_path",
-                                   "channel_count", "_ports", "_stereo_map", "_dual_mono")
+                      if k not in _internal_keys
                       and isinstance(v, (int, float))}
         if param_keys:
-            d["params"] = param_keys
+            d.setdefault("params", {}).update(param_keys)
 
         return d
 
     def to_dict(self) -> dict:
         # Exclude computed caches — rebuilt from _ports on load
         clean_params = {k: v for k, v in self.params.items()
-                        if k not in ("_stereo_map", "_dual_mono")}
+                        if k not in ("_stereo_map", "_dual_mono", "_plugin_desc")}
         return {
             "node_type":   self.node_type,
             "node_id":     self.node_id,
@@ -800,6 +905,11 @@ class GraphModel:
                         pair = sm.get(port_id)
                         if pair:
                             return pair[side]
+                    # Plugin-backed nodes go through PluginAdapterNode, which expands
+                    # an AudioStereo port named "audio_out" to "audio_out_L"/"audio_out_R".
+                    # The graph-model logical port "audio" maps to server "audio_out_{side}"
+                    # via _audio_port_to_lr, NOT the naive f"{port_id}_{side}" = "audio_L".
+                    # Both plugin-backed and legacy nodes use the same _audio_port_to_lr mapping.
                     return _audio_port_to_lr(port_id, side)
 
                 for side in ("L", "R"):
