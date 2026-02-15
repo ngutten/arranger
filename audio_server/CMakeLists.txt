@@ -102,16 +102,12 @@ add_library(audio_server_lib STATIC
     src/plugin_adapter.cpp
     src/builtin_plugins.cpp
     src/server_handler.cpp
-    # Built-in plugins (Phase 2)
+    # Statically linked built-in plugins
     plugins/builtin/sine_plugin.cpp
-    plugins/builtin/note_gate_plugin.cpp
     plugins/builtin/control_source_plugin.cpp
-    plugins/builtin/control_monitor_plugin.cpp
     plugins/builtin/mixer_plugin.cpp
-    # Phase 4 plugins
-    plugins/builtin/reverb_plugin.cpp
-    plugins/builtin/arpeggiator_plugin.cpp
-    plugins/builtin/control_lfo_plugin.cpp
+    # note_gate, control_monitor, reverb, arpeggiator, control_lfo are
+    # dynamic-only: built as arranger_plugin_*.so via ENABLE_PLUGIN_LIBS.
 )
 
 target_include_directories(audio_server_lib PUBLIC
@@ -211,22 +207,19 @@ if(ENABLE_PYTHON_BINDINGS)
         "${CMAKE_SOURCE_DIR}/../standalone")
 endif()
 
-# ---------------------------------------------------------------------------
-# Dynamic plugin libraries (optional)
-# ---------------------------------------------------------------------------
-# Builds each built-in plugin as a standalone MODULE shared library that can
-# be loaded at runtime via load_plugin_library() / the "load_plugin" command.
-#
-# These targets are independent of audio_server_lib: each .so links directly
-# against portaudio and the other system libs it needs.  plugin_api.h is
-# the only shared header.
-#
-# plugin_library(<name> SOURCES <src> [LINK_LIBRARIES <libs>])
-#   Creates target arranger_plugin_<name> as a MODULE library.
-#   Defines AS_PLUGIN_DYNAMIC (suppresses REGISTER_PLUGIN static init).
-#   Output goes to ${CMAKE_BINARY_DIR}/plugins/ for easy discovery.
 
-option(ENABLE_PLUGIN_LIBS "Build plugins as loadable shared libraries" OFF)
+# ---------------------------------------------------------------------------
+# Dynamic plugin libraries
+# ---------------------------------------------------------------------------
+# Builds selected plugins as standalone MODULE shared libraries loadable at
+# runtime via load_plugin_library() / the "load_plugin" command.
+#
+# Output goes to <project_root>/plugins/ so the Python binding and server
+# binary can find them without an install step.
+#
+# plugin_library(<n> SOURCES <src> [LINK_LIBRARIES <libs>])
+#   Creates target arranger_plugin_<n>.
+#   Defines AS_PLUGIN_DYNAMIC (suppresses REGISTER_PLUGIN static init).
 
 function(plugin_library name)
     cmake_parse_arguments(PL "" "" "SOURCES;LINK_LIBRARIES" ${ARGN})
@@ -246,7 +239,7 @@ function(plugin_library name)
     # Do NOT link plugin_registry.cpp here.  PluginRegistry::add() and
     # PluginRegistry::all() are resolved from the loading process's symbol
     # table at dlopen time.  The audio_server binary and arranger_engine.so
-    # both export these symbols (see -rdynamic / ENABLE_EXPORTS below).
+    # both export these symbols (see ENABLE_EXPORTS below).
     # Linking a second copy would create a separate singleton and break
     # registration.
 
@@ -257,9 +250,16 @@ function(plugin_library name)
         target_link_libraries(${target} PRIVATE ${PL_LINK_LIBRARIES})
     endif()
 
+    # Use an absolute path resolved at configure time to avoid CMake silently
+    # placing MODULE targets in the build tree.  Also set the per-config
+    # variants so Debug/Release builds don't add a subdirectory.
+    get_filename_component(_plugins_dir "${CMAKE_SOURCE_DIR}/../plugins" ABSOLUTE)
     set_target_properties(${target} PROPERTIES
-        PREFIX ""           # arranger_plugin_sine.so, not libarranger_plugin_sine.so
-        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins"
+        PREFIX ""
+        LIBRARY_OUTPUT_DIRECTORY           "${_plugins_dir}"
+        LIBRARY_OUTPUT_DIRECTORY_DEBUG     "${_plugins_dir}"
+        LIBRARY_OUTPUT_DIRECTORY_RELEASE   "${_plugins_dir}"
+        LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${_plugins_dir}"
     )
 endfunction()
 
@@ -267,34 +267,42 @@ endfunction()
 # that dlopen'd plugin .so files can resolve PluginRegistry::add() etc.
 set_target_properties(audio_server PROPERTIES ENABLE_EXPORTS ON)
 
-if(ENABLE_PLUGIN_LIBS)
-    plugin_library(sine        SOURCES plugins/builtin/sine_plugin.cpp)
-    plugin_library(note_gate   SOURCES plugins/builtin/note_gate_plugin.cpp)
-    plugin_library(control_source  SOURCES plugins/builtin/control_source_plugin.cpp)
-    plugin_library(control_monitor SOURCES plugins/builtin/control_monitor_plugin.cpp)
-    plugin_library(mixer       SOURCES plugins/builtin/mixer_plugin.cpp)
-    plugin_library(reverb      SOURCES plugins/builtin/reverb_plugin.cpp)
-    plugin_library(arpeggiator SOURCES plugins/builtin/arpeggiator_plugin.cpp)
-    plugin_library(control_lfo SOURCES plugins/builtin/control_lfo_plugin.cpp)
+# Ensure the output directory exists at configure time.
+file(MAKE_DIRECTORY "${CMAKE_SOURCE_DIR}/../plugins")
 
-    if(ENABLE_SF2)
-        plugin_library(fluidsynth
-            SOURCES plugins/builtin/fluidsynth_plugin.cpp
-            LINK_LIBRARIES ${FLUIDSYNTH_LIBRARIES}
-        )
-        target_include_directories(arranger_plugin_fluidsynth PRIVATE
-            ${FLUIDSYNTH_INCLUDE_DIRS})
-        target_compile_definitions(arranger_plugin_fluidsynth PRIVATE AS_ENABLE_SF2)
-    endif()
+# These five are always built as dynamic libraries (not in audio_server_lib).
+# sine / control_source / mixer remain statically linked.
+plugin_library(note_gate       SOURCES plugins/builtin/note_gate_plugin.cpp)
+plugin_library(control_monitor SOURCES plugins/builtin/control_monitor_plugin.cpp)
+plugin_library(reverb          SOURCES plugins/builtin/reverb_plugin.cpp)
+plugin_library(arpeggiator     SOURCES plugins/builtin/arpeggiator_plugin.cpp)
+plugin_library(control_lfo     SOURCES plugins/builtin/control_lfo_plugin.cpp)
+
+# MODULE libraries are excluded from ALL by default in CMake.
+# Tie them to audio_server so `make` / `make audio_server` builds them too.
+add_dependencies(audio_server
+    arranger_plugin_note_gate
+    arranger_plugin_control_monitor
+    arranger_plugin_reverb
+    arranger_plugin_arpeggiator
+    arranger_plugin_control_lfo
+)
+
+if(ENABLE_SF2)
+    plugin_library(fluidsynth
+        SOURCES plugins/builtin/fluidsynth_plugin.cpp
+        LINK_LIBRARIES ${FLUIDSYNTH_LIBRARIES}
+    )
+    target_include_directories(arranger_plugin_fluidsynth PRIVATE
+        ${FLUIDSYNTH_INCLUDE_DIRS})
+    target_compile_definitions(arranger_plugin_fluidsynth PRIVATE AS_ENABLE_SF2)
+    add_dependencies(audio_server arranger_plugin_fluidsynth)
 endif()
 
 # ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
 install(TARGETS audio_server DESTINATION bin)
-
-if(ENABLE_PLUGIN_LIBS)
-    install(DIRECTORY "${CMAKE_BINARY_DIR}/plugins/"
-            DESTINATION lib/arranger/plugins
-            FILES_MATCHING PATTERN "*.so" PATTERN "*.dll" PATTERN "*.dylib")
-endif()
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/../plugins/"
+        DESTINATION lib/arranger/plugins
+        FILES_MATCHING PATTERN "*.so" PATTERN "*.dll" PATTERN "*.dylib")

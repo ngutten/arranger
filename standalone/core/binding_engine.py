@@ -20,9 +20,35 @@ import threading
 import time
 from typing import Optional
 
-from ..arranger_engine import AudioServer, AudioEngineConfig
+from pathlib import Path
+
+from ..arranger_engine import AudioServer, AudioEngineConfig, load_plugin_library
 from .server_engine import _build_graph, _build_server_schedule
 from .settings import Settings
+
+# ---------------------------------------------------------------------------
+# Dynamic plugin loader
+# ---------------------------------------------------------------------------
+# Loads arranger_plugin_*.so from the plugins/ directory adjacent to the
+# project root (i.e. sibling of standalone/ and audio_server/).
+# Called once at module import so all plugins are registered before any
+# AudioServer is constructed.
+
+def _load_plugins_dir() -> None:
+    plugins_dir = Path(__file__).resolve().parent.parent.parent / "plugins"
+    if not plugins_dir.is_dir():
+        return
+
+    patterns = ["arranger_plugin_*.so", "arranger_plugin_*.dll", "arranger_plugin_*.dylib"]
+    for pattern in patterns:
+        for path in sorted(plugins_dir.glob(pattern)):
+            ok, plugin_id, error = load_plugin_library(str(path))
+            if ok:
+                print(f"[BindingEngine] loaded plugin: {plugin_id}")
+            else:
+                print(f"[BindingEngine] failed to load {path.name}: {error}")
+
+_load_plugins_dir()
 
 
 class BindingEngine:
