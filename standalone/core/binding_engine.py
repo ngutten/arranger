@@ -34,10 +34,31 @@ from .settings import Settings
 # Called once at module import so all plugins are registered before any
 # AudioServer is constructed.
 
+def _promote_engine_symbols() -> None:
+    # Re-open arranger_engine.so with RTLD_GLOBAL so its symbols (PluginRegistry,
+    # PluginBuffers map methods, etc.) are visible to subsequently dlopen'd plugins.
+    # Python imports extension modules with RTLD_LOCAL by default, which hides them.
+    # RTLD_NOLOAD|RTLD_GLOBAL promotes an already-loaded library without reloading it.
+    import ctypes
+    RTLD_GLOBAL = getattr(ctypes, 'RTLD_GLOBAL', None)
+    if RTLD_GLOBAL is None:
+        return  # Windows — not needed, symbol visibility works differently
+    RTLD_NOLOAD = 0x4  # Linux value; not exposed in ctypes constants
+    import importlib.util
+    spec = (importlib.util.find_spec("standalone.arranger_engine") or
+            importlib.util.find_spec("arranger_engine"))
+    if spec and spec.origin:
+        ctypes.CDLL(spec.origin, RTLD_NOLOAD | RTLD_GLOBAL)
+
+
 def _load_plugins_dir() -> None:
     plugins_dir = Path(__file__).resolve().parent.parent.parent / "plugins"
     if not plugins_dir.is_dir():
         return
+
+    # Promote arranger_engine.so symbols to global table before loading plugins,
+    # so PluginRegistry::add(), PluginBuffers::*Map::get() etc. resolve correctly.
+    _promote_engine_symbols()
 
     patterns = ["arranger_plugin_*.so", "arranger_plugin_*.dll", "arranger_plugin_*.dylib"]
     for pattern in patterns:
