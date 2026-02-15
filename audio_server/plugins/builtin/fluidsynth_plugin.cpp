@@ -154,6 +154,7 @@ private:
 };
 
 REGISTER_PLUGIN(FluidSynthPlugin);
+REGISTER_PLUGIN_DYNAMIC(FluidSynthPlugin);
 
 std::unique_ptr<Plugin> make_fluidsynth_plugin() { return std::make_unique<FluidSynthPlugin>(); }
 

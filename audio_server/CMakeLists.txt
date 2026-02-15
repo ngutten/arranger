@@ -202,6 +202,9 @@ if(ENABLE_PYTHON_BINDINGS)
     pybind11_add_module(arranger_engine bindings/bindings.cpp)
     target_link_libraries(arranger_engine PRIVATE audio_server_lib)
 
+    # Export PluginRegistry symbols so dlopen'd plugin .so files can resolve them.
+    set_target_properties(arranger_engine PROPERTIES ENABLE_EXPORTS ON)
+
     # Output into standalone/ so `from standalone.arranger_engine import ...` works.
     set_target_properties(arranger_engine PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY
@@ -209,6 +212,89 @@ if(ENABLE_PYTHON_BINDINGS)
 endif()
 
 # ---------------------------------------------------------------------------
+# Dynamic plugin libraries (optional)
+# ---------------------------------------------------------------------------
+# Builds each built-in plugin as a standalone MODULE shared library that can
+# be loaded at runtime via load_plugin_library() / the "load_plugin" command.
+#
+# These targets are independent of audio_server_lib: each .so links directly
+# against portaudio and the other system libs it needs.  plugin_api.h is
+# the only shared header.
+#
+# plugin_library(<name> SOURCES <src> [LINK_LIBRARIES <libs>])
+#   Creates target arranger_plugin_<name> as a MODULE library.
+#   Defines AS_PLUGIN_DYNAMIC (suppresses REGISTER_PLUGIN static init).
+#   Output goes to ${CMAKE_BINARY_DIR}/plugins/ for easy discovery.
+
+option(ENABLE_PLUGIN_LIBS "Build plugins as loadable shared libraries" OFF)
+
+function(plugin_library name)
+    cmake_parse_arguments(PL "" "" "SOURCES;LINK_LIBRARIES" ${ARGN})
+
+    set(target "arranger_plugin_${name}")
+
+    add_library(${target} MODULE ${PL_SOURCES})
+
+    target_include_directories(${target} PRIVATE
+        include/
+        ${PORTAUDIO_INCLUDE_DIRS}
+    )
+    if(_JSON_EXTRA_INCLUDE)
+        target_include_directories(${target} PRIVATE "${_JSON_EXTRA_INCLUDE}")
+    endif()
+
+    # Do NOT link plugin_registry.cpp here.  PluginRegistry::add() and
+    # PluginRegistry::all() are resolved from the loading process's symbol
+    # table at dlopen time.  The audio_server binary and arranger_engine.so
+    # both export these symbols (see -rdynamic / ENABLE_EXPORTS below).
+    # Linking a second copy would create a separate singleton and break
+    # registration.
+
+    # Suppress REGISTER_PLUGIN static-init so only register_plugin() fires.
+    target_compile_definitions(${target} PRIVATE AS_PLUGIN_DYNAMIC)
+
+    if(PL_LINK_LIBRARIES)
+        target_link_libraries(${target} PRIVATE ${PL_LINK_LIBRARIES})
+    endif()
+
+    set_target_properties(${target} PROPERTIES
+        PREFIX ""           # arranger_plugin_sine.so, not libarranger_plugin_sine.so
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins"
+    )
+endfunction()
+
+# Export symbols from the server binary and the Python extension module so
+# that dlopen'd plugin .so files can resolve PluginRegistry::add() etc.
+set_target_properties(audio_server PROPERTIES ENABLE_EXPORTS ON)
+
+if(ENABLE_PLUGIN_LIBS)
+    plugin_library(sine        SOURCES plugins/builtin/sine_plugin.cpp)
+    plugin_library(note_gate   SOURCES plugins/builtin/note_gate_plugin.cpp)
+    plugin_library(control_source  SOURCES plugins/builtin/control_source_plugin.cpp)
+    plugin_library(control_monitor SOURCES plugins/builtin/control_monitor_plugin.cpp)
+    plugin_library(mixer       SOURCES plugins/builtin/mixer_plugin.cpp)
+    plugin_library(reverb      SOURCES plugins/builtin/reverb_plugin.cpp)
+    plugin_library(arpeggiator SOURCES plugins/builtin/arpeggiator_plugin.cpp)
+    plugin_library(control_lfo SOURCES plugins/builtin/control_lfo_plugin.cpp)
+
+    if(ENABLE_SF2)
+        plugin_library(fluidsynth
+            SOURCES plugins/builtin/fluidsynth_plugin.cpp
+            LINK_LIBRARIES ${FLUIDSYNTH_LIBRARIES}
+        )
+        target_include_directories(arranger_plugin_fluidsynth PRIVATE
+            ${FLUIDSYNTH_INCLUDE_DIRS})
+        target_compile_definitions(arranger_plugin_fluidsynth PRIVATE AS_ENABLE_SF2)
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
 install(TARGETS audio_server DESTINATION bin)
+
+if(ENABLE_PLUGIN_LIBS)
+    install(DIRECTORY "${CMAKE_BINARY_DIR}/plugins/"
+            DESTINATION lib/arranger/plugins
+            FILES_MATCHING PATTERN "*.so" PATTERN "*.dll" PATTERN "*.dylib")
+endif()

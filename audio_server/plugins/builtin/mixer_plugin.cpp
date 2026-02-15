@@ -99,5 +99,6 @@ private:
 };
 
 REGISTER_PLUGIN(MixerPlugin);
+REGISTER_PLUGIN_DYNAMIC(MixerPlugin);
 
 std::unique_ptr<Plugin> make_mixer_plugin() { return std::make_unique<MixerPlugin>(); }

@@ -177,6 +177,7 @@ private:
 };
 
 REGISTER_PLUGIN(ReverbPlugin);
+REGISTER_PLUGIN_DYNAMIC(ReverbPlugin);
 
 // Factory for explicit registration from builtin_plugins.cpp
 std::unique_ptr<Plugin> make_reverb_plugin() {

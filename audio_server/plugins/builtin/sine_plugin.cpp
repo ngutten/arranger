@@ -116,5 +116,6 @@ private:
 };
 
 REGISTER_PLUGIN(SinePlugin);
+REGISTER_PLUGIN_DYNAMIC(SinePlugin);
 
 std::unique_ptr<Plugin> make_sine_plugin() { return std::make_unique<SinePlugin>(); }

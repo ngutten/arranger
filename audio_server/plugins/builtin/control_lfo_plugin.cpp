@@ -139,5 +139,6 @@ private:
 };
 
 REGISTER_PLUGIN(ControlLfoPlugin);
+REGISTER_PLUGIN_DYNAMIC(ControlLfoPlugin);
 
 std::unique_ptr<Plugin> make_control_lfo_plugin() { return std::make_unique<ControlLfoPlugin>(); }

@@ -462,6 +462,7 @@ private:
 };
 
 REGISTER_PLUGIN(ArpeggiatorPlugin);
+REGISTER_PLUGIN_DYNAMIC(ArpeggiatorPlugin);
 
 std::unique_ptr<Plugin> make_arpeggiator_plugin() {
     return std::make_unique<ArpeggiatorPlugin>();

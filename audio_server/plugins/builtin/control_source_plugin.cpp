@@ -45,5 +45,6 @@ public:
 };
 
 REGISTER_PLUGIN(ControlSourcePlugin);
+REGISTER_PLUGIN_DYNAMIC(ControlSourcePlugin);
 
 std::unique_ptr<Plugin> make_control_source_plugin() { return std::make_unique<ControlSourcePlugin>(); }

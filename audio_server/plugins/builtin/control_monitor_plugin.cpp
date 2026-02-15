@@ -136,6 +136,7 @@ private:
 };
 
 REGISTER_PLUGIN(ControlMonitorPlugin);
+REGISTER_PLUGIN_DYNAMIC(ControlMonitorPlugin);
 
 std::unique_ptr<Plugin> make_control_monitor_plugin() {
     return std::make_unique<ControlMonitorPlugin>();

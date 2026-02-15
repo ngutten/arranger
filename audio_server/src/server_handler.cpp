@@ -4,6 +4,7 @@
 #include "server_handler.h"
 #include "protocol.h"
 #include "plugin_api.h"
+#include "plugin_loader.h"
 
 #ifdef AS_ENABLE_LV2
 #include "synth_node.h"  // list_lv2_plugins
@@ -312,6 +313,21 @@ json ServerHandler::dispatch(const std::string& cmd, const json& req) {
             plugins.push_back(jp);
         }
         return {{"status", "ok"}, {"plugins", plugins}};
+    }
+
+    // -------------------------------------------------------------------
+    if (cmd == protocol::CMD_LOAD_PLUGIN) {
+        // {"cmd":"load_plugin","path":"/path/to/my_plugin.so"}
+        // Loads a plugin shared library and registers its plugin(s).
+        // Call before or between audio graph swaps — not while rendering.
+        std::string path = req.value("path", "");
+        if (path.empty())
+            return {{"status", "error"}, {"message", "load_plugin: 'path' required"}};
+
+        auto result = load_plugin_library(path);
+        if (!result.ok)
+            return {{"status", "error"}, {"message", result.error}};
+        return {{"status", "ok"}, {"plugin_id", result.plugin_id}};
     }
 
     // -------------------------------------------------------------------

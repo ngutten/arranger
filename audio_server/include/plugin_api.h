@@ -354,3 +354,41 @@ public:
     }();                                                                   \
     static bool _plugin_init_##PluginClass =                               \
         (::PluginRegistry::add(&_plugin_reg_##PluginClass), true)
+
+/// Place this alongside REGISTER_PLUGIN in every plugin .cpp that should also
+/// be loadable as a standalone shared library via load_plugin_library().
+///
+/// When the plugin is compiled into audio_server_lib (AS_PLUGIN_DYNAMIC not
+/// defined), this macro expands to nothing — register_plugin() must not exist
+/// in the static lib because every plugin .cpp would define the same extern "C"
+/// symbol, causing a multiple-definition link error.
+///
+/// When the plugin is compiled as a MODULE shared library (AS_PLUGIN_DYNAMIC
+/// defined by the CMake plugin_library() helper), this macro emits the
+/// extern "C" register_plugin() entry point the loader calls on dlopen, and
+/// also suppresses REGISTER_PLUGIN so static-init doesn't double-register.
+///
+/// Usage in plugin .cpp:
+///   REGISTER_PLUGIN(MySynth)          // static-link registration (always)
+///   REGISTER_PLUGIN_DYNAMIC(MySynth)  // dynamic-load entry point (guarded)
+#ifdef AS_PLUGIN_DYNAMIC
+#  undef REGISTER_PLUGIN
+#  define REGISTER_PLUGIN(PluginClass)  /* suppressed: register_plugin() handles it */
+#  define REGISTER_PLUGIN_DYNAMIC(PluginClass)                             \
+    extern "C" void register_plugin(::PluginRegistry* /*registry*/) {     \
+        static ::PluginRegistration _dyn_reg = [] {                        \
+            auto tmp = std::make_unique<PluginClass>();                    \
+            ::PluginRegistration reg;                                      \
+            reg.id = tmp->descriptor().id;                                 \
+            reg.factory = []() -> std::unique_ptr<Plugin> {                \
+                return std::make_unique<PluginClass>();                     \
+            };                                                             \
+            return reg;                                                    \
+        }();                                                               \
+        ::PluginRegistry::add(&_dyn_reg);                                  \
+    }
+#else
+// Static-lib build: REGISTER_PLUGIN_DYNAMIC is a no-op.
+// register_plugin() must NOT be defined here — it would collide across TUs.
+#  define REGISTER_PLUGIN_DYNAMIC(PluginClass)  /* no-op in static build */
+#endif

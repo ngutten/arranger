@@ -9,6 +9,7 @@
 #include "server_handler.h"
 #include "audio_engine.h"
 #include "plugin_api.h"
+#include "plugin_loader.h"
 
 namespace py = pybind11;
 
@@ -58,4 +59,15 @@ PYBIND11_MODULE(arranger_engine, m) {
 
     m.def("list_plugins", &_list_plugins,
           "Return brief descriptors for all registered plugins.");
+
+    // Load a plugin shared library and register its plugin(s).
+    // Returns (ok: bool, plugin_id: str, error: str).
+    // Call before AudioServer() or while no graph is running.
+    m.def("load_plugin_library",
+          [](const std::string& path) -> py::tuple {
+              auto r = load_plugin_library(path);
+              return py::make_tuple(r.ok, r.plugin_id, r.error);
+          },
+          py::arg("path"),
+          "Load a plugin .so/.dll and register it. Returns (ok, plugin_id, error).");
 }
