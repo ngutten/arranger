@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QPoint, QPointF, QTimer, Signal
 from PySide6.QtGui import QFont, QAction
 
-from .graph_model import GraphModel, GraphNode, PortType
+from .graph_model import GraphModel, GraphNode, PortType, default_hidden_ports_for_node
 from .node_canvas import NodeGraphCanvas
 
 
@@ -129,6 +129,7 @@ class GraphEditorWindow(QWidget):
         self._canvas.graph_changed.connect(self._on_graph_changed_canvas)
         self._canvas.node_right_clicked.connect(self._on_node_right_click)
         self._canvas.param_changed.connect(self._on_param_changed_fast)
+        self._canvas._server_engine = self.server_engine
 
         # Toolbar
         toolbar = QHBoxLayout()
@@ -458,6 +459,7 @@ class GraphEditorWindow(QWidget):
             display_name=name,
             x=cx.x() - 90, y=cx.y() - 50,
             params=params,
+            hidden_ports=default_hidden_ports_for_node(plugin_id),
         )
         self.model.add_node(node)
         self._canvas._create_settings_widget(node)
@@ -490,6 +492,36 @@ class GraphEditorWindow(QWidget):
                 act = menu.addAction("Set as default synth for new tracks")
                 act.triggered.connect(
                     lambda: self._set_default_synth(node))
+
+        # Port visibility submenu
+        all_ports = node.ports()
+        visible   = node.visible_ports()
+        hidden    = [p for p in all_ports if p.port_id in node.hidden_ports]
+
+        menu.addSeparator()
+        ports_menu = menu.addMenu("Ports")
+
+        if hidden:
+            for port in hidden:
+                lbl = port.name or port.port_id
+                act = ports_menu.addAction(f"↩ Reveal  \"{lbl}\"")
+                def _reveal(checked=False, p=port, n=node):
+                    self._canvas._reveal_port(n, p)
+                    self._canvas.update()
+                act.triggered.connect(_reveal)
+            def _reveal_all(checked=False, n=node):
+                self._canvas._reveal_all_ports(n)
+                self._canvas.update()
+            ports_menu.addAction("Reveal all hidden").triggered.connect(_reveal_all)
+            ports_menu.addSeparator()
+
+        # Offer to hide visible ports individually
+        for port in visible:
+            lbl = port.name or port.port_id
+            act = ports_menu.addAction(f"Hide  \"{lbl}\"")
+            act.triggered.connect(
+                lambda checked=False, p=port:
+                    self._canvas._hide_port(node, p))
 
         if node.node_type not in ("track_source",):
             menu.addSeparator()

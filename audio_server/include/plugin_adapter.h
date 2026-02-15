@@ -63,6 +63,11 @@ public:
         return event_output_storage_;
     }
 
+    /// Called by Graph::activate() after assign_buffers() to tell the adapter
+    /// which control input ports have live upstream connections.  Connected
+    /// ports use the graph value; unconnected ports use the pending default.
+    void set_control_connected(const std::string& port_id, bool connected);
+
 private:
     std::unique_ptr<Plugin> plugin_;
     PluginDescriptor        desc_;
@@ -86,7 +91,11 @@ private:
         // Heap-allocated because std::atomic is not movable, and this struct
         // lives in a std::vector.
         std::unique_ptr<std::atomic<float>> pending_value;
-        bool        has_pending = false;
+        bool        has_pending  = false;
+        // Set by Graph::activate() after assign_buffers() — true if a live
+        // upstream connection was wired to this input port.  When true, the
+        // graph value takes priority over the pending default/set_param value.
+        bool        is_connected = false;
 
         ControlPortMapping()
             : is_output(false), decl_index(0)

@@ -91,6 +91,12 @@ struct PortDescriptor {
     /// For GraphEditor hint: identifies the editor type.
     /// Convention strings: "eq_curve", "adsr_envelope", "breakpoint", etc.
     std::string   graph_type;
+
+    /// Whether this port should show as a connectable port in the graph editor
+    /// by default.  Set to false to start hidden; the user can always reveal via
+    /// right-click.  The UI also auto-hides Categorical/Radio/Toggle ports regardless
+    /// of this flag — this provides explicit opt-out for other hint types.
+    bool          show_port_default = true;
 };
 
 // ==========================================================================

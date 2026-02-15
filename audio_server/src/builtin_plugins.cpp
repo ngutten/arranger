@@ -35,9 +35,11 @@
 std::unique_ptr<Plugin> make_sine_plugin();
 std::unique_ptr<Plugin> make_note_gate_plugin();
 std::unique_ptr<Plugin> make_control_source_plugin();
+std::unique_ptr<Plugin> make_control_monitor_plugin();
 std::unique_ptr<Plugin> make_mixer_plugin();
 std::unique_ptr<Plugin> make_reverb_plugin();
 std::unique_ptr<Plugin> make_arpeggiator_plugin();
+std::unique_ptr<Plugin> make_control_lfo_plugin();
 
 // ---------------------------------------------------------------------------
 // Registration storage and helper
@@ -67,7 +69,7 @@ void register_builtin_plugins() {
     // Reserve the exact count BEFORE any push_back.  The registry holds raw
     // pointers into this vector; reallocation would invalidate them and
     // cause a segfault on the first registry query.
-    int count = 6;
+    int count = 8;
 #ifdef AS_ENABLE_SF2
     count += 1;
 #endif
@@ -76,9 +78,11 @@ void register_builtin_plugins() {
     register_one(make_sine_plugin);
     register_one(make_note_gate_plugin);
     register_one(make_control_source_plugin);
+    register_one(make_control_monitor_plugin);
     register_one(make_mixer_plugin);
     register_one(make_reverb_plugin);
     register_one(make_arpeggiator_plugin);
+    register_one(make_control_lfo_plugin);
 
 #ifdef AS_ENABLE_SF2
     extern std::unique_ptr<Plugin> make_fluidsynth_plugin();

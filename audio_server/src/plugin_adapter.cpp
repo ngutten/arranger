@@ -70,7 +70,9 @@ void PluginAdapterNode::build_port_mapping() {
             m.is_output       = is_out;
             m.decl_index      = decl_index++;
             m.pending_value->store(pd.default_value, std::memory_order_relaxed);
-            m.has_pending      = false;
+            // For input ports, treat the default_value as a pending override so
+            // that unconnected ports read their declared default rather than 0.
+            m.has_pending = !is_out;
             control_map_.push_back(std::move(m));
             break;
         }
@@ -237,8 +239,12 @@ void PluginAdapterNode::process(
             } else {
                 // Read from graph connection
                 cb.value = inputs[in_i++].control;
-                // Override with set_param() value if pending
-                if (control_map_[ctrl_map_i].has_pending) {
+                // Apply pending default/set_param value only when there is no
+                // live upstream connection.  If is_connected is true, the graph
+                // value wins — this is what lets an LFO (or any control source)
+                // drive a parameter that also has a UI-set default.
+                if (control_map_[ctrl_map_i].has_pending &&
+                    !control_map_[ctrl_map_i].is_connected) {
                     cb.value = control_map_[ctrl_map_i].pending_value->load(
                         std::memory_order_relaxed);
                 }
@@ -309,6 +315,15 @@ void PluginAdapterNode::process(
 // ---------------------------------------------------------------------------
 // Parameter control
 // ---------------------------------------------------------------------------
+
+void PluginAdapterNode::set_control_connected(const std::string& port_id, bool connected) {
+    for (auto& m : control_map_) {
+        if (m.plugin_port_id == port_id && !m.is_output) {
+            m.is_connected = connected;
+            return;
+        }
+    }
+}
 
 void PluginAdapterNode::set_param(const std::string& name, float value) {
     for (auto& m : control_map_) {

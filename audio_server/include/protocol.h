@@ -100,6 +100,10 @@ constexpr const char* CMD_ALL_NOTES_OFF = "all_notes_off";
 // {node_id: str, config: {key: value, ...}} → {status}
 constexpr const char* CMD_SET_NODE_CONFIG = "set_node_config";
 
+/// Retrieve plugin-specific graph/monitor data for a node.
+/// {node_id: str, port_id: str} → {status, data: str (JSON)}
+constexpr const char* CMD_GET_NODE_DATA = "get_node_data";
+
 // -------------------------------------------------------------------------
 // Graph description (JSON schema, documented as C++ comments)
 // -------------------------------------------------------------------------

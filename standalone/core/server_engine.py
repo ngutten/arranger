@@ -423,6 +423,25 @@ class ServerEngine:
             "value": value,
         })
 
+    def get_node_data(self, node_id: str, port_id: str = "history") -> list:
+        """Retrieve graph/monitor data from a plugin node.
+
+        Returns a Python list (parsed from the JSON the plugin returns), or
+        an empty list if the node is not found / not connected.
+        """
+        import json as _json
+        resp = self._send({
+            "cmd": "get_node_data",
+            "node_id": node_id,
+            "port_id": port_id,
+        })
+        if not resp or resp.get("status") != "ok":
+            return []
+        try:
+            return _json.loads(resp.get("data", "[]"))
+        except Exception:
+            return []
+
     # ------------------------------------------------------------------
     # Graph / soundfont
     # ------------------------------------------------------------------

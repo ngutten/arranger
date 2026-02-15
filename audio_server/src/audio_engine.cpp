@@ -1,6 +1,7 @@
 // audio_engine.cpp
 #include "audio_engine.h"
 #include "synth_node.h"
+#include "plugin_adapter.h"
 #include "nlohmann/json.hpp"
 
 #include <portaudio.h>
@@ -385,6 +386,20 @@ std::string AudioEngine::set_node_config(const std::string& node_id,
     return "node type does not support set_node_config";
 }
 
+std::string AudioEngine::get_node_data(const std::string& node_id,
+                                        const std::string& port_id) {
+    // Access from main thread; use the mutex-guarded owned graph
+    // rather than the atomic active_graph_ (which the audio thread reads).
+    std::lock_guard<std::mutex> lk(graph_mutex_);
+    Graph* g = owned_graph_.get();
+    if (!g) return "[]";
+    Node* node = g->find_node(node_id);
+    if (!node) return "[]";
+    auto* adapter = dynamic_cast<PluginAdapterNode*>(node);
+    if (!adapter || !adapter->plugin()) return "[]";
+    return adapter->plugin()->get_graph_data(port_id);
+}
+
 // ---------------------------------------------------------------------------
 // PortAudio callback (audio thread)
 // ---------------------------------------------------------------------------
@@ -557,7 +572,7 @@ void AudioEngine::process_block(float* L, float* R, int frames) {
 // Offline render
 // ---------------------------------------------------------------------------
 
-std::vector<float> AudioEngine::render_offline(float tail_seconds) {
+std::vector<float> AudioEngine::render_offline(float tail_seconds, double duration_beats) {
     // Grab current graph and build a fresh schedule-driven render.
     // This runs on the IPC thread.  The PortAudio callback also calls
     // graph->process() on the audio thread, so we must stop the stream for
@@ -567,7 +582,8 @@ std::vector<float> AudioEngine::render_offline(float tail_seconds) {
     if (!graph) return {};
 
     float bpm     = bpm_;
-    double length = dispatcher_.arrangement_length();
+    double length = (duration_beats > 0.0) ? duration_beats
+                                            : dispatcher_.arrangement_length();
     if (length <= 0.0) return {};
 
     double total_seconds = length * 60.0 / bpm + tail_seconds;
@@ -625,8 +641,8 @@ std::vector<float> AudioEngine::render_offline(float tail_seconds) {
     return output;
 }
 
-std::vector<uint8_t> AudioEngine::render_offline_wav(float tail_seconds) {
-    auto pcm = render_offline(tail_seconds);
+std::vector<uint8_t> AudioEngine::render_offline_wav(float tail_seconds, double duration_beats) {
+    auto pcm = render_offline(tail_seconds, duration_beats);
     if (pcm.empty()) return {};
     return make_wav(pcm, static_cast<int>(cfg_.sample_rate), 2);
 }

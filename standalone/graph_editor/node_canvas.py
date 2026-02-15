@@ -44,12 +44,12 @@ from .graph_model import GraphModel, GraphNode, GraphConnection, PortDef, PortTy
 # ---------------------------------------------------------------------------
 
 NODE_W          = 180     # base node width (scene units)
-NODE_HEADER_H   = 28      # title bar height
-PORT_ROW_H      = 20      # height per port row
-PORT_R          = 7       # port circle radius
-SETTINGS_PAD    = 6       # padding inside settings area
-MIN_BUTTON_W    = 18      # minimize toggle button width
-MIN_BUTTON_H    = 14
+NODE_HEADER_H   = 26      # title bar height
+PORT_ROW_H      = 16      # height per port row (compact)
+PORT_R          = 5       # port circle radius (smaller = more compact)
+SETTINGS_PAD    = 4       # padding inside settings area
+MIN_BUTTON_W    = 16      # minimize toggle button width
+MIN_BUTTON_H    = 13
 
 # Colours
 C_BG            = QColor("#0d1117")
@@ -137,6 +137,7 @@ class NodeGraphCanvas(QWidget):
         super().__init__(parent)
         self.model = model
         self._settings_factory = settings_factory
+        self._server_engine = None   # Set by the window after construction
 
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMouseTracking(True)
@@ -236,10 +237,13 @@ class NodeGraphCanvas(QWidget):
     def _node_height(self, node: GraphNode) -> float:
         if node.minimised:
             return NODE_HEADER_H
-        ports = node.ports()
-        n_ports = max(len([p for p in ports if not p.is_output]),
-                      len([p for p in ports if p.is_output]))
-        port_h = max(n_ports, 1) * PORT_ROW_H + SETTINGS_PAD * 2
+        vis = node.visible_ports()
+        n_in  = len([p for p in vis if not p.is_output])
+        n_out = len([p for p in vis if p.is_output])
+        # Settings are interleaved between the two port columns, not stacked below.
+        # Node height = header + max(ports, 1) rows + small bottom pad + settings.
+        n_ports = max(n_in, n_out, 1)
+        port_h = n_ports * PORT_ROW_H + SETTINGS_PAD * 2
         settings_h = self._settings_height(node)
         return NODE_HEADER_H + port_h + settings_h
 
@@ -253,18 +257,31 @@ class NodeGraphCanvas(QWidget):
         return QRectF(node.x, node.y, NODE_W, self._node_height(node))
 
     def _port_scene_pos(self, node: GraphNode, port: PortDef) -> QPointF:
-        """Centre of a port circle in scene coordinates."""
+        """Centre of a port circle in scene coordinates.
+
+        For minimised nodes all ports converge to the midpoint of the header
+        edge so wires land cleanly on the collapsed box.
+        """
         rect = self._node_rect(node)
-        ins  = [p for p in node.ports() if not p.is_output]
-        outs = [p for p in node.ports() if p.is_output]
+
+        if node.minimised:
+            # All wires land on the left/right midpoint of the header
+            mid_y = rect.top() + NODE_HEADER_H / 2
+            if port.is_output:
+                return QPointF(rect.right(), mid_y)
+            else:
+                return QPointF(rect.left(), mid_y)
+
+        ins  = [p for p in node.visible_ports() if not p.is_output]
+        outs = [p for p in node.visible_ports() if p.is_output]
         port_area_top = rect.top() + NODE_HEADER_H + SETTINGS_PAD
 
         if port.is_output:
-            idx = outs.index(port)
+            idx = outs.index(port) if port in outs else 0
             y = port_area_top + idx * PORT_ROW_H + PORT_ROW_H / 2
             return QPointF(rect.right(), y)
         else:
-            idx = ins.index(port)
+            idx = ins.index(port) if port in ins else 0
             y = port_area_top + idx * PORT_ROW_H + PORT_ROW_H / 2
             return QPointF(rect.left(), y)
 
@@ -287,9 +304,9 @@ class NodeGraphCanvas(QWidget):
                     return _Hit(_Hit.NODE_HEADER, node)
                 continue
 
-            for port in node.ports():
+            for port in node.visible_ports():
                 pp = self._port_scene_pos(node, port)
-                if (scene_pos - pp).manhattanLength() <= PORT_R * 1.8:
+                if (scene_pos - pp).manhattanLength() <= PORT_R * 2.2:
                     return _Hit(_Hit.PORT, node, port)
 
         for node in reversed(self.model.nodes):
@@ -385,7 +402,12 @@ class NodeGraphCanvas(QWidget):
             self.update()
 
     def _place_settings_widgets(self) -> None:
-        """Position settings widgets over their nodes (view space)."""
+        """Position settings widgets over their nodes (view space).
+
+        Settings are placed at the bottom of the port area — below all port
+        rows — so they sit between the two columns rather than having a
+        separate section.
+        """
         for node in self.model.nodes:
             w = self._settings_widgets.get(node.node_id)
             if w is None:
@@ -394,11 +416,11 @@ class NodeGraphCanvas(QWidget):
                 w.hide()
                 continue
             r = self._node_rect(node)
-            ports = node.ports()
-            n_ports = max(len([p for p in ports if not p.is_output]),
-                          len([p for p in ports if p.is_output]))
+            vis = node.visible_ports()
+            n_ports = max(len([p for p in vis if not p.is_output]),
+                          len([p for p in vis if p.is_output]), 1)
             port_bottom = (r.top() + NODE_HEADER_H + SETTINGS_PAD +
-                           max(n_ports, 1) * PORT_ROW_H)
+                           n_ports * PORT_ROW_H)
 
             # Convert scene rect to view rect
             tl = self.scene_to_view(QPointF(r.left() + SETTINGS_PAD, port_bottom))
@@ -529,6 +551,13 @@ class NodeGraphCanvas(QWidget):
         painter.setBrush(Qt.NoBrush)
         painter.drawRoundedRect(r, 6, 6)
 
+        # Clip all subsequent text/drawing to this node's rect to prevent
+        # text from a node drawn earlier leaking over nodes drawn on top.
+        painter.save()
+        clip_path = QPainterPath()
+        clip_path.addRoundedRect(r.adjusted(-1, -1, 1, 1), 6, 6)
+        painter.setClipPath(clip_path)
+
         # Title
         font = QFont("Segoe UI", 8)
         font.setBold(True)
@@ -554,21 +583,20 @@ class NodeGraphCanvas(QWidget):
         painter.setFont(QFont("Segoe UI", 7))
         painter.drawText(mb, Qt.AlignCenter, "−" if not node.minimised else "+")
 
-        if node.minimised:
-            return
+        if not node.minimised:
+            # Ports
+            self._draw_ports(painter, node)
 
-        # Ports
-        self._draw_ports(painter, node)
+        painter.restore()  # remove clip
 
     def _draw_ports(self, painter: QPainter, node: GraphNode) -> None:
         r = self._node_rect(node)
-        ins  = [p for p in node.ports() if not p.is_output]
-        outs = [p for p in node.ports() if p.is_output]
+        ins  = [p for p in node.visible_ports() if not p.is_output]
+        outs = [p for p in node.visible_ports() if p.is_output]
         port_area_top = r.top() + NODE_HEADER_H + SETTINGS_PAD
 
         font = QFont("Segoe UI", 7)
         painter.setFont(font)
-        fm = QFontMetrics(font)
 
         for i, port in enumerate(ins):
             y = port_area_top + i * PORT_ROW_H + PORT_ROW_H / 2
@@ -579,8 +607,9 @@ class NodeGraphCanvas(QWidget):
             painter.setPen(QPen(col.darker(120), 1))
             painter.drawEllipse(QPointF(cx, y), PORT_R, PORT_R)
             painter.setPen(QPen(C_TEXT_DIM))
-            painter.drawText(QRectF(cx + PORT_R + 4, y - PORT_ROW_H / 2,
-                                    NODE_W / 2 - PORT_R - 8, PORT_ROW_H),
+            label_x = cx + PORT_R + 3
+            label_w = NODE_W / 2 - PORT_R - 8
+            painter.drawText(QRectF(label_x, y - PORT_ROW_H / 2, label_w, PORT_ROW_H),
                              Qt.AlignVCenter | Qt.AlignLeft, port.name)
 
         for i, port in enumerate(outs):
@@ -591,12 +620,25 @@ class NodeGraphCanvas(QWidget):
             painter.setBrush(QBrush(col))
             painter.setPen(QPen(col.darker(120), 1))
             painter.drawEllipse(QPointF(cx, y), PORT_R, PORT_R)
-            lbl = port.name
             lbl_w = NODE_W / 2 - PORT_R - 8
             painter.setPen(QPen(C_TEXT_DIM))
-            painter.drawText(QRectF(cx - lbl_w - PORT_R - 4, y - PORT_ROW_H / 2,
+            painter.drawText(QRectF(cx - lbl_w - PORT_R - 3, y - PORT_ROW_H / 2,
                                     lbl_w, PORT_ROW_H),
-                             Qt.AlignVCenter | Qt.AlignRight, lbl)
+                             Qt.AlignVCenter | Qt.AlignRight, port.name)
+
+        # Dim indicator for hidden ports
+        all_ports = node.ports()
+        n_hidden = len(all_ports) - len(node.visible_ports())
+        if n_hidden > 0:
+            port_bottom = port_area_top + max(len(ins), len(outs), 1) * PORT_ROW_H
+            hint_y = port_bottom - 2
+            painter.setPen(QPen(QColor("#444c5e")))
+            painter.setFont(QFont("Segoe UI", 6))
+            painter.drawText(
+                QRectF(r.left() + 4, hint_y - 8, r.width() - 8, 10),
+                Qt.AlignRight | Qt.AlignVCenter,
+                f"+{n_hidden} hidden ▸"
+            )
 
     def _draw_marquee(self, painter: QPainter) -> None:
         if self._marquee_start is None or self._marquee_end is None:
@@ -606,6 +648,71 @@ class NodeGraphCanvas(QWidget):
         painter.setPen(QPen(C_MARQUEE_LINE, 1, Qt.DashLine))
         painter.setBrush(Qt.NoBrush)
         painter.drawRect(r)
+
+    # -----------------------------------------------------------------------
+    # Port visibility context menus
+    # -----------------------------------------------------------------------
+
+    def _show_port_context_menu(self, node: GraphNode, port: PortDef,
+                                 global_pos: QPoint) -> None:
+        """Right-click on a port: offer to hide it."""
+        menu = QMenu(self)
+        lbl = port.name or port.port_id
+        act = menu.addAction(f"Hide port  \"{lbl}\"")
+        act.triggered.connect(lambda: self._hide_port(node, port))
+        menu.exec(global_pos)
+
+    def _show_canvas_context_menu(self, global_pos: QPoint) -> None:
+        """Right-click on empty canvas: offer to reveal hidden ports on any node."""
+        # Collect all nodes that have hidden ports
+        nodes_with_hidden = [
+            n for n in self.model.nodes if n.hidden_ports
+        ]
+        if not nodes_with_hidden:
+            return  # nothing to reveal — don't show an empty menu
+
+        menu = QMenu(self)
+        menu.addAction("Reveal hidden ports:").setEnabled(False)
+        menu.addSeparator()
+
+        for node in nodes_with_hidden:
+            all_ports = node.ports()
+            hidden = [p for p in all_ports if p.port_id in node.hidden_ports]
+            node_name = node.display_name or node.node_type
+            node_menu = menu.addMenu(node_name)
+            for port in hidden:
+                lbl = port.name or port.port_id
+                act = node_menu.addAction(f"↩ {lbl}")
+                act.triggered.connect(
+                    lambda checked=False, n=node, p=port: self._reveal_port(n, p))
+            reveal_all = node_menu.addAction("Reveal all")
+            reveal_all.triggered.connect(
+                lambda checked=False, n=node: self._reveal_all_ports(n))
+
+        menu.exec(global_pos)
+
+    def _hide_port(self, node: GraphNode, port: PortDef) -> None:
+        """Hide a port; if it has connections, remove them first."""
+        # Remove connections on this port
+        to_remove = [
+            c for c in self.model.connections
+            if (c.from_node == node.node_id and c.from_port == port.port_id) or
+               (c.to_node   == node.node_id and c.to_port   == port.port_id)
+        ]
+        for c in to_remove:
+            self.model.remove_connection(c.id)
+        node.hidden_ports.add(port.port_id)
+        if to_remove:
+            self.graph_changed.emit()
+        self.update()
+
+    def _reveal_port(self, node: GraphNode, port: PortDef) -> None:
+        node.hidden_ports.discard(port.port_id)
+        self.update()
+
+    def _reveal_all_ports(self, node: GraphNode) -> None:
+        node.hidden_ports.clear()
+        self.update()
 
     # -----------------------------------------------------------------------
     # Mouse events
@@ -626,9 +733,16 @@ class NodeGraphCanvas(QWidget):
                 self.model.remove_connection(hit.conn.id)
                 self.graph_changed.emit()
                 self.update()
+            elif hit.kind == _Hit.PORT:
+                # Right-click on a port → offer to hide it
+                self._show_port_context_menu(hit.node, hit.port,
+                                             event.globalPosition().toPoint())
             elif hit.kind in (_Hit.NODE_BODY, _Hit.NODE_HEADER):
                 # Emit signal; window can show context menu
                 self.node_right_clicked.emit(hit.node, event.globalPosition().toPoint())
+            else:
+                # Empty canvas right-click → offer to reveal hidden ports
+                self._show_canvas_context_menu(event.globalPosition().toPoint())
             return
 
         if event.button() == Qt.LeftButton:
@@ -1195,8 +1309,132 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable):
     from .graph_model import get_plugin_descriptor
     desc = get_plugin_descriptor(t)
     if desc:
+        # Special-case: control_monitor gets a live sparkline widget
+        if t in ("builtin.control_monitor", "control_monitor"):
+            return _make_control_monitor_widget(node, parent)
         return _make_plugin_settings_widget(node, desc, parent, on_change)
     return None
+
+
+def _make_control_monitor_widget(node: GraphNode, parent) -> "QWidget":
+    """Live scrolling sparkline for a control_monitor node.
+
+    Polls the server every 100 ms via the canvas's server_engine reference
+    (stored on the parent NodeGraphCanvas if available).
+    """
+    from PySide6.QtWidgets import QWidget
+    from PySide6.QtCore import QTimer, Qt as _Qt
+    from PySide6.QtGui import QPainter, QPen, QColor, QFont
+
+    PLOT_H = 60   # pixel height of the sparkline
+
+    class SparklineWidget(QWidget):
+        def __init__(self, parent_widget):
+            super().__init__(parent_widget)
+            self._data: list = []
+            self._range = (0.0, 1.0)
+            self.setFixedHeight(PLOT_H + 20)  # +20 for labels
+            self.setStyleSheet("background: #0d1117; border: 1px solid #1c2333; border-radius: 3px;")
+
+            self._timer = QTimer(self)
+            self._timer.setInterval(100)
+            self._timer.timeout.connect(self._poll)
+            self._timer.start()
+
+        def _poll(self):
+            # Walk up to find a NodeGraphCanvas to get server_engine
+            canvas = self.parent()
+            while canvas and not hasattr(canvas, 'model'):
+                canvas = canvas.parent()
+            if canvas is None:
+                return
+            server_engine = getattr(canvas, '_server_engine', None)
+            if server_engine is None:
+                return
+            try:
+                data = server_engine.get_node_data(node.node_id, "history")
+            except Exception:
+                return
+            if data:
+                self._data = data[-256:]  # keep latest 256 points
+                mn, mx = min(self._data), max(self._data)
+                span = mx - mn
+                if span < 0.001:
+                    span = 1.0
+                    mn -= 0.5
+                self._range = (mn - span * 0.05, mx + span * 0.05)
+                self.update()
+
+        def sizeHint(self):
+            from PySide6.QtCore import QSize
+            return QSize(160, PLOT_H + 20)
+
+        def paintEvent(self, event):
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            w, h = self.width(), self.height()
+            plot_h = h - 18
+            p.fillRect(self.rect(), QColor("#0d1117"))
+
+            if not self._data:
+                p.setPen(QPen(QColor("#444c5e")))
+                p.setFont(QFont("Segoe UI", 7))
+                p.drawText(self.rect(), _Qt.AlignCenter, "no data")
+                return
+
+            lo, hi = self._range
+            span = hi - lo if hi != lo else 1.0
+
+            def y_for(v):
+                return plot_h - int((v - lo) / span * (plot_h - 4)) - 2
+
+            # Grid lines
+            p.setPen(QPen(QColor("#1c2333")))
+            for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+                yg = plot_h - int(frac * (plot_h - 4)) - 2
+                p.drawLine(0, yg, w, yg)
+
+            # Zero line (if in range)
+            if lo < 0 < hi:
+                y0 = y_for(0)
+                p.setPen(QPen(QColor("#2a3a5c"), 1, _Qt.DashLine))
+                p.drawLine(0, y0, w, y0)
+
+            # Sparkline
+            n = len(self._data)
+            pen = QPen(QColor("#4d96ff"), 1.5)
+            p.setPen(pen)
+            for i in range(1, n):
+                x0 = int((i - 1) / max(n - 1, 1) * (w - 2)) + 1
+                x1 = int(i / max(n - 1, 1) * (w - 2)) + 1
+                p.drawLine(x0, y_for(self._data[i - 1]),
+                           x1, y_for(self._data[i]))
+
+            # Latest value dot
+            latest = self._data[-1]
+            xd = w - 3
+            yd = y_for(latest)
+            p.setBrush(_Qt.white)
+            p.setPen(_Qt.NoPen)
+            p.drawEllipse(xd - 2, yd - 2, 5, 5)
+
+            # Value labels
+            p.setPen(QPen(QColor("#888")))
+            p.setFont(QFont("Segoe UI", 6))
+            p.drawText(2, plot_h + 14,
+                       f"min {min(self._data):.3f}  "
+                       f"max {max(self._data):.3f}  "
+                       f"now {latest:.3f}")
+
+        def hideEvent(self, event):
+            self._timer.stop()
+            super().hideEvent(event)
+
+        def showEvent(self, event):
+            self._timer.start()
+            super().showEvent(event)
+
+    return SparklineWidget(parent)
 
 
 def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change: Callable):

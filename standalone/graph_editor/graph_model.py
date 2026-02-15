@@ -294,6 +294,7 @@ class GraphNode:
     params       – type-specific config dict.
     minimised    – settings panel collapsed.
     is_default_synth – new tracks auto-route here.
+    hidden_ports – set of port_ids explicitly hidden by the user.
     """
     node_type:    str
     node_id:      str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -303,6 +304,17 @@ class GraphNode:
     params: dict = field(default_factory=dict)
     minimised: bool = False
     is_default_synth: bool = False
+    hidden_ports: set = field(default_factory=set)
+
+    def visible_ports(self) -> list[PortDef]:
+        """Ports that are currently shown in the canvas (not hidden by user)."""
+        return [p for p in self.ports() if p.port_id not in self.hidden_ports]
+
+    def visible_inputs(self) -> list[PortDef]:
+        return [p for p in self.visible_ports() if not p.is_output]
+
+    def visible_outputs(self) -> list[PortDef]:
+        return [p for p in self.visible_ports() if p.is_output]
 
     def ports(self) -> list[PortDef]:
         t = self.node_type
@@ -411,6 +423,7 @@ class GraphNode:
             "params":      clean_params,
             "minimised":   self.minimised,
             "is_default_synth": self.is_default_synth,
+            "hidden_ports": list(self.hidden_ports),
         }
 
     @staticmethod
@@ -423,6 +436,7 @@ class GraphNode:
             params=d.get("params", {}),
             minimised=d.get("minimised", False),
             is_default_synth=d.get("is_default_synth", False),
+            hidden_ports=set(d.get("hidden_ports", [])),
         )
 
 
@@ -607,6 +621,30 @@ def _lv2_build_ports(raw_ports: list) -> tuple:
         ))
 
     return result, stereo_map, dual_mono
+
+
+def default_hidden_ports_for_node(node_type: str) -> set:
+    """Return port_ids that should be hidden by default for a given node type.
+
+    Ports are hidden by default when their ControlHint is Categorical, Radio, or
+    Toggle (modes/selectors rarely need to be wired up), or when the plugin
+    descriptor sets show_port_default=False explicitly.
+    """
+    hidden = set()
+    desc = get_plugin_descriptor(node_type)
+    if not desc:
+        return hidden
+    for p in desc.get("ports", []):
+        if p.get("role") not in ("input", None):
+            continue
+        if p.get("type") != "control":
+            continue
+        hint = p.get("hint", "continuous")
+        if hint in ("categorical", "radio", "toggle"):
+            hidden.add(p.get("id", ""))
+        if not p.get("show_port_default", True):
+            hidden.add(p.get("id", ""))
+    return hidden
 
 
 # ---------------------------------------------------------------------------

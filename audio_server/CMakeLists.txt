@@ -105,10 +105,12 @@ add_library(audio_server_lib STATIC
     plugins/builtin/sine_plugin.cpp
     plugins/builtin/note_gate_plugin.cpp
     plugins/builtin/control_source_plugin.cpp
+    plugins/builtin/control_monitor_plugin.cpp
     plugins/builtin/mixer_plugin.cpp
     # Phase 4 plugins
     plugins/builtin/reverb_plugin.cpp
     plugins/builtin/arpeggiator_plugin.cpp
+    plugins/builtin/control_lfo_plugin.cpp
 )
 
 target_include_directories(audio_server_lib PUBLIC

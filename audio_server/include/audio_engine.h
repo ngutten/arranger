@@ -99,16 +99,24 @@ public:
     // Returns error string on failure, empty on success.
     std::string set_node_config(const std::string& node_id, const std::string& config_json);
 
+    /// Retrieve plugin graph/monitor data.  port_id is passed to Plugin::get_graph_data().
+    /// Returns the JSON string returned by the plugin, or "[]" if node not found.
+    std::string get_node_data(const std::string& node_id, const std::string& port_id);
+
     // -----------------------------------------------------------------------
     // Offline render (main thread — blocking, uses same graph+schedule)
     // -----------------------------------------------------------------------
 
     // Returns interleaved stereo float32 PCM.
     // Renders until arrangement_length + tail_seconds.
-    std::vector<float> render_offline(float tail_seconds = 1.0f);
+    // duration_beats overrides arrangement_length when > 0 (useful for graphs
+    // with no scheduled events, e.g. an LFO with no note data).
+    std::vector<float> render_offline(float tail_seconds = 1.0f,
+                                      double duration_beats = 0.0);
 
     // Convenience: returns WAV file bytes.
-    std::vector<uint8_t> render_offline_wav(float tail_seconds = 1.0f);
+    std::vector<uint8_t> render_offline_wav(float tail_seconds = 1.0f,
+                                            double duration_beats = 0.0);
 
     float sample_rate() const { return cfg_.sample_rate; }
     int   block_size()  const { return cfg_.block_size;  }

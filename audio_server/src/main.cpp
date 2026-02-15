@@ -169,9 +169,10 @@ private:
 
         // -------------------------------------------------------------------
         if (cmd == protocol::CMD_RENDER) {
-            std::string fmt = req.value("format", "wav");
+            std::string fmt      = req.value("format", "wav");
+            double duration_beats = req.value("duration_beats", 0.0);
             if (fmt == "wav") {
-                auto wav = engine_.render_offline_wav();
+                auto wav = engine_.render_offline_wav(1.0f, duration_beats);
                 if (wav.empty()) return {{"status", "error"}, {"message", "nothing to render"}};
                 std::string b64 = base64_encode(wav.data(), wav.size());
                 return {{"status", "ok"}, {"format", "wav"},
@@ -180,7 +181,7 @@ private:
                         {"channels", 2}};
             }
             if (fmt == "raw_f32") {
-                auto pcm = engine_.render_offline();
+                auto pcm = engine_.render_offline(1.0f, duration_beats);
                 if (pcm.empty()) return {{"status", "error"}, {"message", "nothing to render"}};
                 std::string b64 = base64_encode(
                     reinterpret_cast<const uint8_t*>(pcm.data()),
@@ -250,6 +251,16 @@ private:
         }
 
         // -------------------------------------------------------------------
+        if (cmd == protocol::CMD_GET_NODE_DATA) {
+            std::string node_id = req.value("node_id", "");
+            std::string port_id = req.value("port_id", "history");
+            if (node_id.empty())
+                return {{"status", "error"}, {"message", "node_id required"}};
+            std::string data = engine_.get_node_data(node_id, port_id);
+            return {{"status", "ok"}, {"data", data}};
+        }
+
+        // -------------------------------------------------------------------
         // New plugin API: list all registered plugins with full descriptors
         if (cmd == protocol::CMD_LIST_REGISTERED_PLUGINS) {
             json plugins = json::array();
@@ -300,6 +311,7 @@ private:
                         jport["min"]     = p.min_value;
                         jport["max"]     = p.max_value;
                         jport["step"]    = p.step;
+                        jport["show_port_default"] = p.show_port_default;
                         if (!p.choices.empty())
                             jport["choices"] = p.choices;
                         if (!p.graph_type.empty())

@@ -130,6 +130,17 @@ bool Graph::activate(float sample_rate, int max_block_size) {
 
     assign_buffers();
 
+    // Notify plugin adapters which of their control input ports have live
+    // upstream connections.  This lets the adapter prefer the graph value over
+    // the pending default for connected ports, while still falling back to the
+    // default for unconnected ones.
+    for (auto& c : connections_) {
+        auto ni = node_index_.find(c.to_node);
+        if (ni == node_index_.end()) continue;
+        auto* adapter = dynamic_cast<PluginAdapterNode*>(nodes_[ni->second].node.get());
+        if (adapter) adapter->set_control_connected(c.to_port, true);
+    }
+
     for (auto& entry : nodes_) {
         entry.node->activate(sample_rate, max_block_size);
         // Apply initial params from the JSON NodeDesc (must be after activate
@@ -313,14 +324,34 @@ void Graph::process(const ProcessContext& ctx) {
             pb.type = p.type;
             if (p.is_output) {
                 pb.audio = pool_.get(entry.output_buf_indices[out_i++]);
+                // For control outputs, pre-read the pool slot into .control
+                // so nodes that write .control get a clean slate (0.0f).
+                if (p.type == PortType::Control)
+                    pb.control = 0.0f;
                 outputs.push_back(pb);
             } else {
-                pb.audio = pool_.get(entry.input_buf_indices[in_i++]);
+                int buf_idx = entry.input_buf_indices[in_i++];
+                pb.audio = pool_.get(buf_idx);
+                // For control inputs, load the upstream value from pool[0].
+                // The upstream node's process() wrote its .control value back
+                // into the pool buffer below.
+                if (p.type == PortType::Control)
+                    pb.control = pool_.get(buf_idx)[0];
                 inputs.push_back(pb);
             }
         }
 
         entry.node->process(ctx, inputs, outputs);
+
+        // Write control output values back into their pool buffers so that
+        // downstream nodes can read them via pool[buf_idx][0] above.
+        out_i = 0;
+        for (auto& p : entry.ports) {
+            if (!p.is_output) continue;
+            if (p.type == PortType::Control)
+                pool_.get(entry.output_buf_indices[out_i])[0] = outputs[out_i].control;
+            out_i++;
+        }
 
         // --- Route event outputs from PluginAdapterNodes ---
         // If this node produced events on output ports, forward them to
