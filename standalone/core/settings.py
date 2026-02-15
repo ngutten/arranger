@@ -22,9 +22,10 @@ DEFAULTS = {
     'midi_input_device': '',   # empty string = none selected
     'sf2_path': '',            # empty string = no default soundfont
     'autosave_interval': 60,   # seconds; 0 to disable
-    # 'fluidsynth' = internal Python engine (default, no external dep)
-    # 'server'     = C++ audio_server process via IPC
-    'audio_backend': 'fluidsynth',
+    # 'binding'    = C++ engine in-process via pybind11 (default, fastest)
+    # 'server'     = C++ audio_server process via IPC (fallback / headless)
+    # 'fluidsynth' = internal Python engine (final fallback, no C++ required)
+    'audio_backend': 'binding',
     'server_address': '',      # empty = platform default (/tmp/audio_server.sock or named pipe)
 }
 

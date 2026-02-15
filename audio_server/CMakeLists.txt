@@ -101,6 +101,7 @@ add_library(audio_server_lib STATIC
     src/plugin_registry.cpp
     src/plugin_adapter.cpp
     src/builtin_plugins.cpp
+    src/server_handler.cpp
     # Built-in plugins (Phase 2)
     plugins/builtin/sine_plugin.cpp
     plugins/builtin/note_gate_plugin.cpp
@@ -133,6 +134,10 @@ endif()
 target_compile_options(audio_server_lib PRIVATE
     ${PORTAUDIO_CFLAGS_OTHER}
 )
+
+# Required when audio_server_lib is linked into the Python extension (.so).
+# Has no effect on the standalone binary build.
+set_target_properties(audio_server_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if(ENABLE_LV2)
     target_include_directories(audio_server_lib PUBLIC ${LILV_INCLUDE_DIRS} ${LV2_INCLUDE_DIRS})
@@ -177,6 +182,30 @@ if(ENABLE_TESTS)
 
     add_executable(test_render test/test_render.cpp)
     target_link_libraries(test_render PRIVATE audio_server_lib)
+endif()
+
+# ---------------------------------------------------------------------------
+# Python bindings (optional)
+# ---------------------------------------------------------------------------
+option(ENABLE_PYTHON_BINDINGS "Build Python extension module (arranger_engine)" OFF)
+
+if(ENABLE_PYTHON_BINDINGS)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+
+    include(FetchContent)
+    FetchContent_Declare(pybind11
+        GIT_REPOSITORY https://github.com/pybind/pybind11
+        GIT_TAG        v2.13.6
+    )
+    FetchContent_MakeAvailable(pybind11)
+
+    pybind11_add_module(arranger_engine bindings/bindings.cpp)
+    target_link_libraries(arranger_engine PRIVATE audio_server_lib)
+
+    # Output into standalone/ so `from standalone.arranger_engine import ...` works.
+    set_target_properties(arranger_engine PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY
+        "${CMAKE_SOURCE_DIR}/../standalone")
 endif()
 
 # ---------------------------------------------------------------------------

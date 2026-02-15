@@ -8,3 +8,6 @@ run.sh
 *~
 *.zip
 build/
+bin/
+*.so
+*.dll

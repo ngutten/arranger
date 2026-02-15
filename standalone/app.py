@@ -36,6 +36,12 @@ try:
 except ImportError:
     _HAS_SERVER_ENGINE = False
 
+try:
+    from .core.binding_engine import BindingEngine
+    _HAS_BINDING_ENGINE = True
+except ImportError:
+    _HAS_BINDING_ENGINE = False
+
 from .ui.topbar import TopBar
 from .ui.pattern_list import PatternList
 from .ui.arrangement import ArrangementView
@@ -142,6 +148,11 @@ class App(QMainWindow):
             QPushButton:checked {
                 background-color: #e94560;
                 color: #ffffff;
+            }
+            QPushButton:disabled {
+                background-color: #1a1a2e;
+                color: #555577;
+                border-color: #222240;
             }
             QLineEdit, QSpinBox, QComboBox {
                 background-color: #1a1a2e;
@@ -344,29 +355,33 @@ class App(QMainWindow):
 
     def _init_engine(self):
         """Initialize the audio engine according to settings.audio_backend."""
-        backend = self.settings.audio_backend  # 'fluidsynth' or 'server'
+        backend = self.settings.audio_backend  # 'binding', 'server', or 'fluidsynth'
 
-        if backend == 'server':
-            if not _HAS_SERVER_ENGINE:
-                print("[App] ServerEngine not available; falling back to fluidsynth backend")
-            else:
-                try:
-                    from .core.server_engine import DEFAULT_ADDRESS
-                    addr = self.settings.server_address or DEFAULT_ADDRESS
-                    self.engine = ServerEngine(self.state, self.settings, address=addr)
-                    return
-                except Exception as e:
-                    print(f"[App] ServerEngine init failed: {e}; falling back to fluidsynth")
+        if backend == 'binding' and _HAS_BINDING_ENGINE:
+            try:
+                self.engine = BindingEngine(self.state, self.settings)
+                return
+            except Exception as e:
+                print(f"[App] BindingEngine init failed: {e}; falling back")
 
-        # Default / fallback: internal AudioEngine
-        if not _HAS_ENGINE:
-            print("[App] AudioEngine not available (missing sounddevice/pyfluidsynth?)")
-            return
-        try:
-            self.engine = AudioEngine(self.state, self.settings)
-        except Exception as e:
-            print(f"[App] Failed to initialize AudioEngine: {e}")
-            self.engine = None
+        if backend in ('binding', 'server') and _HAS_SERVER_ENGINE:
+            # 'binding' falls through here if the .so wasn't built
+            try:
+                from .core.server_engine import DEFAULT_ADDRESS
+                addr = self.settings.server_address or DEFAULT_ADDRESS
+                self.engine = ServerEngine(self.state, self.settings, address=addr)
+                return
+            except Exception as e:
+                print(f"[App] ServerEngine init failed: {e}; falling back")
+
+        if _HAS_ENGINE:
+            try:
+                self.engine = AudioEngine(self.state, self.settings)
+                return
+            except Exception as e:
+                print(f"[App] AudioEngine init failed: {e}")
+
+        self.engine = None
 
     def _auto_load_sf2(self):
         """Load SF2 on startup: prefer settings path, fall back to first in instruments dir."""
@@ -421,10 +436,8 @@ class App(QMainWindow):
         if not _HAS_GRAPH_EDITOR:
             print("Error: no graph editor")
             return
-        # Only available when ServerEngine is active
-        if not (_HAS_SERVER_ENGINE and isinstance(self.engine,
-                __import__('standalone.core.server_engine',
-                           fromlist=['ServerEngine']).ServerEngine)):
+        # Requires an engine that supports _send (BindingEngine or ServerEngine)
+        if not (self.engine and hasattr(self.engine, '_send')):
             return
 
         if self._graph_editor_window is not None:
@@ -722,7 +735,7 @@ class App(QMainWindow):
             self._push_graph_to_engine()
 
     def _push_graph_to_engine(self) -> None:
-        """Push the current graph model to the engine if it's a ServerEngine."""
+        """Push the current graph model to the engine if it supports _send."""
         if self.engine and hasattr(self.engine, '_send') and self.state.signal_graph:
             payload = self.state.signal_graph.to_server_dict(bpm=self.state.bpm)
             self.engine._send(payload)
@@ -751,6 +764,8 @@ class App(QMainWindow):
         Called by ConfigDialog when the user changes the backend selector.
         Tears down the running engine, reinitialises with the new backend, and
         reloads the SF2 if one is set.  Safe to call while not playing.
+
+        Valid backend values: 'binding', 'server', 'fluidsynth'.
         """
         if self.state.playing:
             self.stop_play()
