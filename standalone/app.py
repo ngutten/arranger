@@ -450,7 +450,7 @@ class App(QMainWindow):
             server_engine=self.engine,
             state=self.state,
             on_graph_changed=self._on_graph_model_changed,
-            parent=None,   # free-floating window
+            parent=self,   # parent to main window so it closes with app and dialogs work
         )
         self._graph_editor_window.closed.connect(self._on_graph_editor_closed)
         self._graph_editor_window.show()
@@ -1016,7 +1016,8 @@ class App(QMainWindow):
         """Export the arrangement as MIDI, WAV, or MP3."""
         if fmt == 'midi':
             path, _ = QFileDialog.getSaveFileName(
-                self, 'Export MIDI', '', 'MIDI files (*.mid);;All files (*.*)')
+                None, 'Export MIDI', '', 'MIDI files (*.mid);;All files (*.*)',
+                options=QFileDialog.DontUseNativeDialog)
             if path:
                 midi = export_ops.export_midi(self.state)
                 with open(path, 'wb') as f:
@@ -1026,10 +1027,12 @@ class App(QMainWindow):
         # Get file path BEFORE starting background thread
         if fmt == 'mp3':
             path, _ = QFileDialog.getSaveFileName(
-                self, 'Export MP3', '', 'MP3 files (*.mp3);;All files (*.*)')
+                None, 'Export MP3', '', 'MP3 files (*.mp3);;All files (*.*)',
+                options=QFileDialog.DontUseNativeDialog)
         else:
             path, _ = QFileDialog.getSaveFileName(
-                self, 'Export WAV', '', 'WAV files (*.wav);;All files (*.*)')
+                None, 'Export WAV', '', 'WAV files (*.wav);;All files (*.*)',
+                options=QFileDialog.DontUseNativeDialog)
 
         if not path:
             return
@@ -1080,13 +1083,15 @@ class App(QMainWindow):
 
     def save_project(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, 'Save Project', '', 'JSON files (*.json);;All files (*.*)')
+            None, 'Save Project', '', 'JSON files (*.json);;All files (*.*)',
+            options=QFileDialog.DontUseNativeDialog)
         if path:
             project_io.save_project(self.state, path)
 
     def load_project(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, 'Load Project', '', 'JSON files (*.json);;All files (*.*)')
+            None, 'Load Project', '', 'JSON files (*.json);;All files (*.*)',
+            options=QFileDialog.DontUseNativeDialog)
         if path:
             try:
                 def sf2_loader(sf2_path):

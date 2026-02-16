@@ -407,8 +407,14 @@ class NodeGraphCanvas(QWidget):
         Settings are placed at the bottom of the port area — below all port
         rows — so they sit between the two columns rather than having a
         separate section.
+        
+        Widgets are clipped to only show in non-overlapped regions, so that
+        painted node bodies from nodes drawn on top properly obscure widgets
+        from nodes drawn below.
         """
-        for node in self.model.nodes:
+        from PySide6.QtGui import QRegion
+        
+        for idx, node in enumerate(self.model.nodes):
             w = self._settings_widgets.get(node.node_id)
             if w is None:
                 continue
@@ -428,7 +434,32 @@ class NodeGraphCanvas(QWidget):
             w_height = w.sizeHint().height()
 
             w.setGeometry(int(tl.x()), int(tl.y()), w_width, w_height)
-            w.show()
+            
+            # Compute clipping region: subtract rectangles of all nodes drawn after this one
+            # (nodes drawn later appear on top and should obscure this widget)
+            clip_region = QRegion(0, 0, w_width, w_height)
+            
+            for later_node in self.model.nodes[idx + 1:]:
+                later_r = self._node_rect(later_node)
+                # Convert later node's rect to view space
+                later_tl = self.scene_to_view(QPointF(later_r.left(), later_r.top()))
+                later_br = self.scene_to_view(QPointF(later_r.right(), later_r.bottom()))
+                later_view_rect = QRectF(later_tl, later_br).toRect()
+                
+                # Convert to widget's local coordinates (relative to this widget's top-left)
+                widget_tl = QPointF(int(tl.x()), int(tl.y()))
+                local_rect = later_view_rect.translated(-int(widget_tl.x()), -int(widget_tl.y()))
+                
+                # Subtract this overlapping region
+                clip_region = clip_region.subtracted(QRegion(local_rect))
+            
+            # If completely obscured, hide the widget; otherwise set mask and show
+            if clip_region.isEmpty():
+                w.hide()
+            else:
+                w.setMask(clip_region)
+                w.show()
+                w.raise_()
 
             # For LV2 nodes: refresh which control ports are driven by wires
             refresh = getattr(w, "refresh_wired_ports", None)
@@ -778,6 +809,11 @@ class NodeGraphCanvas(QWidget):
 
             if hit.kind in (_Hit.NODE_BODY, _Hit.NODE_HEADER):
                 node = hit.node
+                # Bring clicked node to front by moving it to end of list
+                # (last node is drawn last = on top)
+                if node in self.model.nodes:
+                    self.model.nodes.remove(node)
+                    self.model.nodes.append(node)
                 if event.modifiers() & Qt.ShiftModifier:
                     if node.node_id in self.selected_nodes:
                         self.selected_nodes.discard(node.node_id)

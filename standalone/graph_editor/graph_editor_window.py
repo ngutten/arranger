@@ -67,9 +67,9 @@ class GraphEditorWindow(QWidget):
     def __init__(self, model: GraphModel, server_engine,
                  state, on_graph_changed: Callable = None,
                  parent=None):
-        super().__init__(parent,
-                         Qt.Window | Qt.WindowCloseButtonHint |
-                         Qt.WindowMinimizeButtonHint)
+        # Use Qt.Window to make it a top-level window that can be moved independently,
+        # but keep parent relationship so it closes with main window and respects modality
+        super().__init__(parent, Qt.Window)
         self.setWindowTitle("Signal Graph Editor")
         self.resize(1100, 700)
 
@@ -588,7 +588,8 @@ class GraphEditorWindow(QWidget):
 
     def _save_graph(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Signal Graph", "", "Graph JSON (*.graph.json *.json)")
+            None, "Save Signal Graph", "", "Graph JSON (*.graph.json *.json)",
+            options=QFileDialog.DontUseNativeDialog)
         if not path:
             return
         try:
@@ -601,7 +602,8 @@ class GraphEditorWindow(QWidget):
 
     def _load_graph(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Load Signal Graph", "", "Graph JSON (*.graph.json *.json)")
+            None, "Load Signal Graph", "", "Graph JSON (*.graph.json *.json)",
+            options=QFileDialog.DontUseNativeDialog)
         if not path:
             return
         try:

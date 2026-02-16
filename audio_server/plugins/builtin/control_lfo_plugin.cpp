@@ -13,8 +13,8 @@
 //
 // Parameters:
 //   frequency  — Hz  [0.01, 100]  default 1.0
-//   amplitude  — [0, 1]           default 1.0
-//   offset     — DC bias [0, 1]   default 0.5
+//   amplitude  — [0, 2]           default 1.0
+//   offset     — DC bias [-2, 2]   default 0.5
 //   shape      — 0..3 (categorical)
 //   sync       — if 1, phase derived from beat_position (BPM-synced)
 //                if 0, free-running (uses sample_rate accumulator)
@@ -42,9 +42,9 @@ public:
         d.version      = 1;
 
         d.ports = {
-            { "control_out", "Control Out", "LFO output [0, 1]",
+            { "control_out", "Control Out", "LFO output [-5, 5]",
               PluginPortType::Control, PortRole::Output,
-              ControlHint::Meter, 0.0f, 0.0f, 1.0f },
+              ControlHint::Meter, 0.0f, -5.0f, 5.0f },
 
             { "frequency", "Frequency", "LFO rate in Hz (free-running mode)",
               PluginPortType::Control, PortRole::Input,
@@ -52,11 +52,11 @@ public:
 
             { "amplitude", "Amplitude", "Peak deviation from offset",
               PluginPortType::Control, PortRole::Input,
-              ControlHint::Continuous, 0.5f, 0.0f, 1.0f },
+              ControlHint::Continuous, 0.5f, 0.0f, 2.0f },
 
             { "offset", "Offset", "DC bias added to waveform",
               PluginPortType::Control, PortRole::Input,
-              ControlHint::Continuous, 0.5f, 0.0f, 1.0f },
+              ControlHint::Continuous, 0.5f, -2.0f, 2.0f },
 
             { "shape", "Shape", "Waveform shape",
               PluginPortType::Control, PortRole::Input,
