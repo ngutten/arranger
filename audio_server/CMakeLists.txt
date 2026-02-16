@@ -278,6 +278,17 @@ plugin_library(reverb          SOURCES plugins/builtin/reverb_plugin.cpp)
 plugin_library(arpeggiator     SOURCES plugins/builtin/arpeggiator_plugin.cpp)
 plugin_library(control_lfo     SOURCES plugins/builtin/control_lfo_plugin.cpp)
 
+# --- Control utility plugins (no extra deps) ---
+plugin_library(control_multiply SOURCES plugins/builtin/control_multiply_plugin.cpp)
+plugin_library(control_add      SOURCES plugins/builtin/control_add_plugin.cpp)
+plugin_library(control_to_note  SOURCES plugins/builtin/control_to_note_plugin.cpp)
+
+# --- Audio effect plugins ---
+plugin_library(amp              SOURCES plugins/builtin/amp_plugin.cpp)
+plugin_library(filter           SOURCES plugins/builtin/filter_plugin.cpp)
+plugin_library(pitch_shift      SOURCES plugins/builtin/pitch_shift_plugin.cpp)
+
+
 # MODULE libraries are excluded from ALL by default in CMake.
 # Tie them to audio_server so `make` / `make audio_server` builds them too.
 add_dependencies(audio_server
@@ -286,6 +297,12 @@ add_dependencies(audio_server
     arranger_plugin_reverb
     arranger_plugin_arpeggiator
     arranger_plugin_control_lfo
+    arranger_plugin_control_multiply
+    arranger_plugin_control_add
+    arranger_plugin_control_to_note
+    arranger_plugin_amp
+    arranger_plugin_filter
+    arranger_plugin_pitch_shift
 )
 
 if(ENABLE_SF2)
