@@ -1,4 +1,4 @@
-cd audio_server && mkdir build && cd build
+cd audio_server && mkdir -p build && cd build
 cmake -DENABLE_PYTHON_BINDINGS=ON ..
 make arranger_engine    # builds the .so into standalone/
 make audio_server       # still works independently
