@@ -37,6 +37,7 @@ from PySide6.QtGui import (
 )
 
 from .graph_model import GraphModel, GraphNode, GraphConnection, PortDef, PortType
+from .param_widgets import SmartFloatWidget
 
 
 # ---------------------------------------------------------------------------
@@ -1209,10 +1210,27 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable):
             sym_capture = sym  # capture for lambdas
 
             if is_toggle:
-                # Boolean on/off → checkbox
+                # Boolean on/off → checkbox with pastel purple border
                 cb = QCheckBox()
                 cb.setChecked(float(stored) > 0.5)
-                cb.setStyleSheet("color: #ccc;")
+                cb.setStyleSheet("""
+                    QCheckBox {
+                        color: #ccc;
+                    }
+                    QCheckBox::indicator {
+                        width: 14px;
+                        height: 14px;
+                        border: 1px solid #b794f4;
+                        border-radius: 3px;
+                        background: #0d1117;
+                    }
+                    QCheckBox::indicator:checked {
+                        background: #b794f4;
+                    }
+                    QCheckBox::indicator:hover {
+                        border-color: #d4b5ff;
+                    }
+                """)
                 cb.toggled.connect(
                     lambda checked, k=sym_capture: on_change(
                         node.node_id, k, 1.0 if checked else 0.0))
@@ -1259,42 +1277,31 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable):
                 _ctrl_widgets[sym] = ispin
 
             else:
-                # Continuous float → QDoubleSpinBox
-                span = p_max - p_min if p_max != p_min else 1.0
-                if span <= 0.1:
-                    step, dec = 0.001, 4
-                elif span <= 2.0:
-                    step, dec = 0.01, 3
-                elif span <= 20.0:
-                    step, dec = 0.1, 2
-                elif span <= 200.0:
-                    step, dec = 1.0, 1
-                else:
-                    step, dec = 10.0, 0
-
-                spin = _DSB()
-                spin.setRange(p_min, p_max)
-                spin.setSingleStep(step)
-                spin.setDecimals(dec)
-                spin.setValue(float(stored))
-                spin.setStyleSheet(STYLE_ACTIVE)
-                spin.setMaximumWidth(90)
-                spin.valueChanged.connect(
+                # Continuous float → SmartFloatWidget with adaptive slider
+                widget = SmartFloatWidget(float(stored), p_min, p_max, parent=w)
+                widget.valueChanged.connect(
                     lambda v, k=sym_capture: on_change(node.node_id, k, v))
                 row_lbl = QLabel(lbl_txt + ":")
                 row_lbl.setStyleSheet("color: #aaa; font-size: 8px;")
-                lay.addRow(row_lbl, spin)
-                _ctrl_widgets[sym] = spin
+                lay.addRow(row_lbl, widget)
+                _ctrl_widgets[sym] = widget
 
         def refresh_wired_ports(wired: set):
             """Called by canvas to grey out ports driven by a wire."""
             for sym, widget in _ctrl_widgets.items():
                 driven = sym in wired
-                widget.setEnabled(not driven)
-                if hasattr(widget, 'setStyleSheet') and not isinstance(widget, QCheckBox):
-                    widget.setStyleSheet(STYLE_DISABLED if driven else STYLE_ACTIVE)
+                
+                # Handle SmartFloatWidget specially - it has setDriven method
+                if isinstance(widget, SmartFloatWidget):
+                    widget.setDriven(driven)
+                else:
+                    widget.setEnabled(not driven)
+                    if hasattr(widget, 'setStyleSheet') and not isinstance(widget, QCheckBox):
+                        widget.setStyleSheet(STYLE_DISABLED if driven else STYLE_ACTIVE)
 
+        # Store widget references for potential polling/animation
         w.refresh_wired_ports = refresh_wired_ports
+        w._ctrl_widgets = _ctrl_widgets  # Store for external access
         return w
 
     if t in ("mixer", "output"):
@@ -1567,6 +1574,24 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
         elif cp_type == "bool":
             cb = QCheckBox()
             cb.setChecked(str(stored).lower() in ("1", "true", "yes"))
+            cb.setStyleSheet("""
+                QCheckBox {
+                    color: #ccc;
+                }
+                QCheckBox::indicator {
+                    width: 14px;
+                    height: 14px;
+                    border: 1px solid #b794f4;
+                    border-radius: 3px;
+                    background: #0d1117;
+                }
+                QCheckBox::indicator:checked {
+                    background: #b794f4;
+                }
+                QCheckBox::indicator:hover {
+                    border-color: #d4b5ff;
+                }
+            """)
             cb.toggled.connect(
                 lambda checked, cid=cp_id: on_change(node.node_id, cid, 1 if checked else 0))
             lay.addRow(QLabel(cp_display + ":"), cb)
@@ -1605,7 +1630,24 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
         if hint == "toggle":
             cb = QCheckBox()
             cb.setChecked(float(stored) > 0.5)
-            cb.setStyleSheet("color: #ccc;")
+            cb.setStyleSheet("""
+                QCheckBox {
+                    color: #ccc;
+                }
+                QCheckBox::indicator {
+                    width: 14px;
+                    height: 14px;
+                    border: 1px solid #b794f4;
+                    border-radius: 3px;
+                    background: #0d1117;
+                }
+                QCheckBox::indicator:checked {
+                    background: #b794f4;
+                }
+                QCheckBox::indicator:hover {
+                    border-color: #d4b5ff;
+                }
+            """)
             cb.toggled.connect(
                 lambda checked, k=pid_capture: on_change(
                     node.node_id, k, 1.0 if checked else 0.0))
@@ -1651,41 +1693,30 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
             lay.addRow(QLabel(display + ":"), val_lbl)
 
         else:
-            # Continuous (default)
-            span = p_max - p_min if p_max != p_min else 1.0
-            if span <= 0.1:
-                step, dec = 0.001, 4
-            elif span <= 2.0:
-                step, dec = 0.01, 3
-            elif span <= 20.0:
-                step, dec = 0.1, 2
-            elif span <= 200.0:
-                step, dec = 1.0, 1
-            else:
-                step, dec = 10.0, 0
-
-            spin = QDoubleSpinBox()
-            spin.setRange(p_min, p_max)
-            spin.setSingleStep(step)
-            spin.setDecimals(dec)
-            spin.setValue(float(stored))
-            spin.setStyleSheet(STYLE_ACTIVE)
-            spin.setMaximumWidth(90)
-            spin.valueChanged.connect(
+            # Continuous (default) → SmartFloatWidget with adaptive slider
+            widget = SmartFloatWidget(float(stored), p_min, p_max, parent=w)
+            widget.valueChanged.connect(
                 lambda v, k=pid_capture: on_change(node.node_id, k, v))
             lbl = QLabel(display + ":")
             lbl.setStyleSheet("color: #aaa; font-size: 8px;")
-            lay.addRow(lbl, spin)
-            _ctrl_widgets[pid] = spin
+            lay.addRow(lbl, widget)
+            _ctrl_widgets[pid] = widget
 
     def refresh_wired_ports(wired: set):
         for sym, widget in _ctrl_widgets.items():
             driven = sym in wired
-            widget.setEnabled(not driven)
-            if hasattr(widget, 'setStyleSheet') and not isinstance(widget, QCheckBox):
-                widget.setStyleSheet(STYLE_DISABLED if driven else STYLE_ACTIVE)
+            
+            # Handle SmartFloatWidget specially - it has setDriven method
+            if isinstance(widget, SmartFloatWidget):
+                widget.setDriven(driven)
+            else:
+                widget.setEnabled(not driven)
+                if hasattr(widget, 'setStyleSheet') and not isinstance(widget, QCheckBox):
+                    widget.setStyleSheet(STYLE_DISABLED if driven else STYLE_ACTIVE)
 
+    # Store widget references for external access
     w.refresh_wired_ports = refresh_wired_ports
+    w._ctrl_widgets = _ctrl_widgets
     return w
 
 
