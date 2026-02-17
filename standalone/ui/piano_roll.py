@@ -402,6 +402,10 @@ class PianoRoll(QFrame):
             self.rec_btn.setChecked(False)
             return
 
+        # Pause the live-preview router so we can open the same port for recording
+        if hasattr(self.app, '_midi_router') and self.app._midi_router is not None:
+            self.app._midi_router.stop()
+
         try:
             import rtmidi
             midi_in = rtmidi.MidiIn()
@@ -481,6 +485,10 @@ class PianoRoll(QFrame):
         self.rec_btn.setText('Rec')
         self.rec_btn.setChecked(False)
         self.rec_btn.setToolTip('Record from MIDI input (arm — starts on first note)')
+
+        # Resume the live-preview router now that the port is free
+        if hasattr(self.app, '_restart_midi_router'):
+            self.app._restart_midi_router()
 
         if not self._rec_events:
             return

@@ -7,8 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # ---------------------------------------------------------------------------
 # Build options
 # ---------------------------------------------------------------------------
-option(ENABLE_LV2    "Build with LV2 plugin hosting (requires lilv)"  OFF)
-option(ENABLE_SF2    "Build with SF2/FluidSynth support"              ON)
+option(ENABLE_LV2      "Build with LV2 plugin hosting (requires lilv)"  OFF)
+option(ENABLE_SF2      "Build with SF2/FluidSynth support"              ON)
+option(ENABLE_SNDFILE  "Build Sampler plugin with libsndfile audio I/O" ON)
 option(ENABLE_TESTS  "Build test programs"                            ON)
 
 # ---------------------------------------------------------------------------
@@ -87,6 +88,17 @@ endif()
 if(ENABLE_SF2)
     pkg_check_modules(FLUIDSYNTH REQUIRED fluidsynth)
     add_compile_definitions(AS_ENABLE_SF2)
+endif()
+
+if(ENABLE_SNDFILE)
+    pkg_check_modules(SNDFILE sndfile)
+    if(SNDFILE_FOUND)
+        add_compile_definitions(AS_ENABLE_SNDFILE)
+        message(STATUS "libsndfile: ${SNDFILE_VERSION} — Sampler will decode audio files")
+    else()
+        message(STATUS "libsndfile: not found — Sampler will compile but produce silence")
+        set(ENABLE_SNDFILE OFF)
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -288,6 +300,19 @@ plugin_library(amp              SOURCES plugins/builtin/amp_plugin.cpp)
 plugin_library(filter           SOURCES plugins/builtin/filter_plugin.cpp)
 plugin_library(pitch_shift      SOURCES plugins/builtin/pitch_shift_plugin.cpp)
 
+# --- Sampler (libsndfile for audio I/O) ---
+if(ENABLE_SNDFILE)
+    plugin_library(sampler
+        SOURCES plugins/builtin/sampler_plugin.cpp
+        LINK_LIBRARIES ${SNDFILE_LIBRARIES}
+    )
+    target_include_directories(arranger_plugin_sampler PRIVATE ${SNDFILE_INCLUDE_DIRS})
+    target_compile_definitions(arranger_plugin_sampler PRIVATE AS_ENABLE_SNDFILE)
+else()
+    # Build without sndfile — still registers and compiles, just loads no audio
+    plugin_library(sampler SOURCES plugins/builtin/sampler_plugin.cpp)
+endif()
+
 
 # MODULE libraries are excluded from ALL by default in CMake.
 # Tie them to audio_server so `make` / `make audio_server` builds them too.
@@ -303,6 +328,7 @@ add_dependencies(audio_server
     arranger_plugin_amp
     arranger_plugin_filter
     arranger_plugin_pitch_shift
+    arranger_plugin_sampler
 )
 
 if(ENABLE_SF2)

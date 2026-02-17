@@ -60,6 +60,7 @@ C_NODE_BORDER   = QColor("#2a3a5c")
 C_NODE_SEL      = QColor("#3a7bd5")
 C_NODE_HEADER   = {
     "track_source":   QColor("#1a3a5c"),
+    "midi_source":    QColor("#1a4a5c"),   # teal — external MIDI input
     "control_source": QColor("#2a3a1c"),
     "fluidsynth":     QColor("#3a1a4a"),
     "sine":           QColor("#3a2a1a"),
@@ -1010,6 +1011,58 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable):
 
     t = node.node_type
 
+    if t == "midi_source":
+        w = QWidget(parent)
+        w.setStyleSheet("background: transparent; color: #ccc;")
+        lay = QFormLayout(w)
+        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setSpacing(3)
+
+        # MIDI device selector (read available ports via rtmidi)
+        from PySide6.QtWidgets import QComboBox
+        device_combo = QComboBox()
+        device_combo.setStyleSheet(
+            "background: #0d1117; color: #ccc; border: 1px solid #2a3a5c;")
+        current_device = node.params.get("midi_device", "")
+
+        try:
+            import rtmidi
+            _mi = rtmidi.MidiIn()
+            ports = _mi.get_ports()
+            del _mi
+        except Exception:
+            ports = []
+
+        device_combo.addItem("(none)")
+        for p in ports:
+            device_combo.addItem(p)
+        if current_device and current_device in ports:
+            device_combo.setCurrentText(current_device)
+
+        def _on_device(text):
+            on_change(node.node_id, "midi_device", text if text != "(none)" else "")
+        device_combo.currentTextChanged.connect(_on_device)
+        lay.addRow(QLabel("Device:"), device_combo)
+
+        # MIDI channel filter (0 = all channels)
+        ch_spin = QSpinBox()
+        ch_spin.setRange(0, 16)
+        ch_spin.setSpecialValueText("All")
+        ch_spin.setValue(node.params.get("midi_channel", 0))
+        ch_spin.setStyleSheet(
+            "background: #0d1117; color: #ccc; border: 1px solid #2a3a5c;")
+        ch_spin.setToolTip("0 = all channels; 1-16 = specific channel")
+        ch_spin.valueChanged.connect(
+            lambda v: on_change(node.node_id, "midi_channel", v))
+        lay.addRow(QLabel("Channel:"), ch_spin)
+
+        info = QLabel("Active: No")
+        info.setStyleSheet("color: #888;")
+        info.setObjectName("midi_source_status")
+        lay.addRow(info)
+
+        return w
+
     if t == "note_gate":
         from PySide6.QtWidgets import QComboBox
         from .graph_model import midi_note_name, midi_pitch_from_name, NOTE_GATE_MODES
@@ -1078,7 +1131,8 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable):
         def _browse():
             from PySide6.QtWidgets import QFileDialog
             path, _ = QFileDialog.getOpenFileName(
-                w, "Select SF2", "", "SoundFont (*.sf2)")
+                w, "Select SF2", "", "SoundFont (*.sf2)",
+                options=QFileDialog.Option.DontUseNativeDialog)
             if path:
                 sf2_edit.setText(path)
                 on_change(node.node_id, "sf2_path", path)
@@ -1120,7 +1174,8 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable):
             )
             path, _ = QFileDialog.getOpenFileName(
                 w, "Select Sample", samples_dir,
-                "Audio (*.wav *.ogg *.flac *.aif *.aiff)")
+                "Audio (*.wav *.ogg *.flac *.aif *.aiff)",
+                options=QFileDialog.Option.DontUseNativeDialog)
             if path:
                 smp_edit.setText(path)
                 on_change(node.node_id, "sample_path", path)
@@ -1128,24 +1183,8 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable):
         smp_lay.addWidget(browse_btn)
         lay.addRow(QLabel("File:"), smp_row)
 
-        # ADSR
-        adsr = [("attack", 0.01, 0.0, 4.0),
-                ("decay",  0.1,  0.0, 4.0),
-                ("sustain",0.8,  0.0, 1.0),
-                ("release",0.2,  0.0, 4.0)]
-        for pname, default, lo, hi in adsr:
-            spin = QDoubleSpinBox()
-            spin.setRange(lo, hi)
-            spin.setSingleStep(0.01)
-            spin.setDecimals(3)
-            spin.setValue(node.params.get(pname, default))
-            spin.setStyleSheet(
-                "background: #0d1117; color: #ccc; border: 1px solid #2a3a5c;")
-            spin.setMaximumWidth(80)
-            pname_capture = pname  # capture for lambda
-            spin.valueChanged.connect(
-                lambda v, k=pname_capture: on_change(node.node_id, k, v))
-            lay.addRow(QLabel(pname.capitalize() + ":"), spin)
+        # ADSR and root_note are now control ports — visible as knobs on the node.
+        # No duplicate spinboxes needed here.
         return w
 
     if t == "lv2":
@@ -1539,7 +1578,9 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
             file_filter = cp.get("file_filter", "All Files (*)")
             def _browse(checked=False, e=edit, cid=cp_id, ff=file_filter):
                 from PySide6.QtWidgets import QFileDialog
-                path, _ = QFileDialog.getOpenFileName(w, f"Select {cp_display}", "", ff)
+                path, _ = QFileDialog.getOpenFileName(
+                    w, f"Select {cp_display}", "", ff,
+                    options=QFileDialog.Option.DontUseNativeDialog)
                 if path:
                     e.setText(path)
                     on_change(node.node_id, cid, path)

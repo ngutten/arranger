@@ -1,0 +1,337 @@
+{
+  "v": 3,
+  "bpm": 120,
+  "snap": 0.5,
+  "tsNum": 4,
+  "tsDen": 4,
+  "patterns": [
+    {
+      "id": 1,
+      "name": "Pattern 1",
+      "length": 4,
+      "notes": [
+        {
+          "pitch": 84,
+          "start": 0.0,
+          "duration": 0.25,
+          "velocity": 100
+        },
+        {
+          "pitch": 84,
+          "start": 0.25,
+          "duration": 0.25,
+          "velocity": 100
+        },
+        {
+          "pitch": 84,
+          "start": 0.5,
+          "duration": 0.25,
+          "velocity": 100
+        },
+        {
+          "pitch": 84,
+          "start": 0.75,
+          "duration": 0.25,
+          "velocity": 100
+        },
+        {
+          "pitch": 84,
+          "start": 1.25,
+          "duration": 0.25,
+          "velocity": 100
+        },
+        {
+          "pitch": 84,
+          "start": 1.75,
+          "duration": 0.25,
+          "velocity": 100
+        },
+        {
+          "pitch": 84,
+          "start": 2.0,
+          "duration": 0.25,
+          "velocity": 100
+        },
+        {
+          "pitch": 78,
+          "start": 0.0,
+          "duration": 0.25,
+          "velocity": 100
+        },
+        {
+          "pitch": 78,
+          "start": 0.5,
+          "duration": 0.25,
+          "velocity": 100
+        },
+        {
+          "pitch": 78,
+          "start": 1.0,
+          "duration": 0.25,
+          "velocity": 100
+        },
+        {
+          "pitch": 78,
+          "start": 1.75,
+          "duration": 0.25,
+          "velocity": 100
+        },
+        {
+          "pitch": 79,
+          "start": 2.0,
+          "duration": 0.25,
+          "velocity": 100
+        },
+        {
+          "pitch": 78,
+          "start": 2.5,
+          "duration": 0.25,
+          "velocity": 100
+        }
+      ],
+      "color": "#e94560",
+      "key": "C",
+      "scale": "major",
+      "previewMode": "sine",
+      "overlayMode": "playing"
+    }
+  ],
+  "tracks": [
+    {
+      "id": 2,
+      "name": "Track 1",
+      "channel": 0,
+      "bank": 0,
+      "program": 0,
+      "volume": 127
+    }
+  ],
+  "placements": [
+    {
+      "id": 5,
+      "trackId": 2,
+      "patternId": 1,
+      "time": 0,
+      "transpose": 0,
+      "repeats": 1,
+      "targetKey": "C",
+      "targetScale": "major"
+    }
+  ],
+  "beatKit": [],
+  "beatPatterns": [
+    {
+      "id": 4,
+      "name": "Beat 1",
+      "length": 4,
+      "subdivision": 4,
+      "color": "#e94560",
+      "grid": {}
+    }
+  ],
+  "beatTracks": [
+    {
+      "id": 3,
+      "name": "Beat 1"
+    }
+  ],
+  "beatPlacements": [],
+  "sf2Path": "/home/nichg/Dropbox/llmexpts/arranger/arranger/instruments/GeneralUser-GS.sf2",
+  "nextId": 6,
+  "signalGraph": {
+    "nodes": [
+      {
+        "node_type": "track_source",
+        "node_id": "track_2",
+        "display_name": "Track 1",
+        "x": 40,
+        "y": 40,
+        "params": {},
+        "minimised": false,
+        "is_default_synth": false,
+        "hidden_ports": []
+      },
+      {
+        "node_type": "fluidsynth",
+        "node_id": "synth_default",
+        "display_name": "FluidSynth",
+        "x": 253.60294117647055,
+        "y": 181.81985294117646,
+        "params": {
+          "sf2_path": "/home/nichg/Dropbox/llmexpts/arranger/arranger/instruments/GeneralUser-GS.sf2"
+        },
+        "minimised": false,
+        "is_default_synth": true,
+        "hidden_ports": []
+      },
+      {
+        "node_type": "builtin.filter",
+        "node_id": "03ccd5aa-24af-4569-ac11-9381a67a5a57",
+        "display_name": "Filter",
+        "x": 466.2316176470589,
+        "y": 375.01838235294116,
+        "params": {
+          "mode": 0.0,
+          "frequency": 306.21749233640617,
+          "q": 0.7070000171661377
+        },
+        "minimised": false,
+        "is_default_synth": false,
+        "hidden_ports": [
+          "mode"
+        ]
+      },
+      {
+        "node_type": "builtin.reverb",
+        "node_id": "5300d1d1-b840-4dd7-85b6-7f3e6d6fca48",
+        "display_name": "Reverb",
+        "x": 945.2389705882354,
+        "y": 336.6819852941176,
+        "params": {
+          "room_size": 0.699999988079071,
+          "damping": 0.5,
+          "wet": 0.30000001192092896,
+          "dry": 1.0,
+          "width": 1.0
+        },
+        "minimised": false,
+        "is_default_synth": false,
+        "hidden_ports": []
+      },
+      {
+        "node_type": "builtin.amp",
+        "node_id": "a2e7a2e3-9203-4adf-9cf0-01f7e7bb04ae",
+        "display_name": "Amp",
+        "x": 507.3345588235294,
+        "y": 31.966911764705905,
+        "params": {
+          "gain": 1.852,
+          "drive": 3.2264999999999997,
+          "pan": 0.0
+        },
+        "minimised": false,
+        "is_default_synth": false,
+        "hidden_ports": []
+      },
+      {
+        "node_type": "builtin.amp",
+        "node_id": "8f00486e-2bae-4ef4-b290-7f5fa47461ff",
+        "display_name": "Amp",
+        "x": 708.8970588235294,
+        "y": 379.3658088235294,
+        "params": {
+          "gain": 1.964,
+          "drive": 6.39,
+          "pan": 0.0
+        },
+        "minimised": false,
+        "is_default_synth": false,
+        "hidden_ports": []
+      },
+      {
+        "node_type": "output",
+        "node_id": "output_main",
+        "display_name": "Output",
+        "x": 1149.3566176470588,
+        "y": 84.59558823529413,
+        "params": {
+          "channel_count": 2,
+          "gain_0": 1.0
+        },
+        "minimised": false,
+        "is_default_synth": false,
+        "hidden_ports": []
+      },
+      {
+        "node_type": "track_source",
+        "node_id": "track_3",
+        "display_name": "Beat 1",
+        "x": 5.22058823529413,
+        "y": 107.62867647058823,
+        "params": {},
+        "minimised": false,
+        "is_default_synth": false,
+        "hidden_ports": []
+      },
+      {
+        "node_type": "midi_source",
+        "node_id": "00346ba8-8e0d-4f8e-8533-38d544af0c12",
+        "display_name": "External MIDI In",
+        "x": 13.701319711018598,
+        "y": 459.9161600819096,
+        "params": {
+          "midi_device": "Portable Grand:Portable Grand MIDI 1 28:0",
+          "midi_channel": 0
+        },
+        "minimised": false,
+        "is_default_synth": false,
+        "hidden_ports": []
+      }
+    ],
+    "connections": [
+      {
+        "id": "cf9a19b7-6dc0-4270-b945-1be4fd4df68a",
+        "from_node": "track_2",
+        "from_port": "events_out",
+        "to_node": "synth_default",
+        "to_port": "events_in"
+      },
+      {
+        "id": "d931be4e-919d-4179-9cf1-dedf11bf85a7",
+        "from_node": "track_3",
+        "from_port": "events_out",
+        "to_node": "synth_default",
+        "to_port": "events_in"
+      },
+      {
+        "id": "599ab614-7871-47ee-8200-2f90671fccfd",
+        "from_node": "synth_default",
+        "from_port": "audio",
+        "to_node": "a2e7a2e3-9203-4adf-9cf0-01f7e7bb04ae",
+        "to_port": "audio_in"
+      },
+      {
+        "id": "2237bab2-6b48-4519-98d3-3225b61d5229",
+        "from_node": "a2e7a2e3-9203-4adf-9cf0-01f7e7bb04ae",
+        "from_port": "audio_out",
+        "to_node": "output_main",
+        "to_port": "audio_in_0"
+      },
+      {
+        "id": "a485ac6c-2554-4a3d-b6f6-cf10e4cdac58",
+        "from_node": "a2e7a2e3-9203-4adf-9cf0-01f7e7bb04ae",
+        "from_port": "audio_out",
+        "to_node": "03ccd5aa-24af-4569-ac11-9381a67a5a57",
+        "to_port": "audio_in"
+      },
+      {
+        "id": "86ef76aa-d28f-4b66-8c5d-9c5ecab134f3",
+        "from_node": "5300d1d1-b840-4dd7-85b6-7f3e6d6fca48",
+        "from_port": "audio_out",
+        "to_node": "output_main",
+        "to_port": "audio_in_1"
+      },
+      {
+        "id": "e61cad4e-460c-45d4-8f92-6bcc52f96764",
+        "from_node": "03ccd5aa-24af-4569-ac11-9381a67a5a57",
+        "from_port": "audio_out",
+        "to_node": "8f00486e-2bae-4ef4-b290-7f5fa47461ff",
+        "to_port": "audio_in"
+      },
+      {
+        "id": "1e9956e5-5314-4b7b-88d7-02fbb02a96aa",
+        "from_node": "8f00486e-2bae-4ef4-b290-7f5fa47461ff",
+        "from_port": "audio_out",
+        "to_node": "5300d1d1-b840-4dd7-85b6-7f3e6d6fca48",
+        "to_port": "audio_in"
+      },
+      {
+        "id": "9800d53a-9cb5-43a2-b17d-27928bdd0603",
+        "from_node": "00346ba8-8e0d-4f8e-8533-38d544af0c12",
+        "from_port": "events_out",
+        "to_node": "synth_default",
+        "to_port": "events_in"
+      }
+    ]
+  }
+}

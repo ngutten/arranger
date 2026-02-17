@@ -91,6 +91,10 @@ TRACK_SOURCE_PORTS = [
     PortDef("Events", "events_out", PortType.MIDI, True),
 ]
 
+MIDI_SOURCE_PORTS = [
+    PortDef("Events", "events_out", PortType.MIDI, True),
+]
+
 CONTROL_SOURCE_PORTS = [
     PortDef("Control", "control_out", PortType.CONTROL, True),
 ]
@@ -319,10 +323,17 @@ class GraphNode:
     def ports(self) -> list[PortDef]:
         t = self.node_type
         if t == "track_source":    return TRACK_SOURCE_PORTS
+        if t == "midi_source":     return MIDI_SOURCE_PORTS
         if t == "control_source":  return CONTROL_SOURCE_PORTS
         if t == "fluidsynth":      return FLUIDSYNTH_PORTS
         if t == "sine":            return SINE_PORTS
-        if t == "sampler":         return SAMPLER_PORTS
+        # "sampler" falls through to plugin descriptor so ADSR control ports show.
+        # Fall back to minimal ports if descriptor not yet loaded from server.
+        if t == "sampler":
+            desc = get_plugin_descriptor(t)
+            if desc:
+                return _plugin_ports_from_descriptor(desc, self.params)
+            return SAMPLER_PORTS   # fallback: events_in + audio only
         if t == "split_stereo":    return SPLIT_STEREO_PORTS
         if t == "merge_stereo":    return MERGE_STEREO_PORTS
         if t == "note_gate":       return NOTE_GATE_PORTS
@@ -352,6 +363,8 @@ class GraphNode:
     def _server_type(self) -> str:
         if self.node_type in ("output", "mixer"):
             return "mixer"
+        if self.node_type == "midi_source":
+            return "track_source"   # server sees a plain track_source; Python drives it
         # If this is a known plugin, send the plugin ID so make_node()
         # resolves via the registry.  Legacy short names also work.
         pid = plugin_id_for_type(self.node_type)
@@ -730,6 +743,15 @@ class GraphModel:
     def connections_for_node(self, node_id: str) -> list[GraphConnection]:
         return [c for c in self.connections
                 if c.from_node == node_id or c.to_node == node_id]
+
+    # -- MIDI source node helpers --
+
+    def find_midi_source(self) -> Optional["GraphNode"]:
+        """Return the midi_source node if one exists in the graph."""
+        for n in self.nodes:
+            if n.node_type == "midi_source":
+                return n
+        return None
 
     # -- Default synth --
 

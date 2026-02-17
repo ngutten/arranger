@@ -42,6 +42,12 @@ try:
 except ImportError:
     _HAS_BINDING_ENGINE = False
 
+try:
+    from .core.midi_source_router import MidiSourceRouter
+    _HAS_MIDI_ROUTER = True
+except ImportError:
+    _HAS_MIDI_ROUTER = False
+
 from .ui.topbar import TopBar
 from .ui.pattern_list import PatternList
 from .ui.arrangement import ArrangementView
@@ -84,6 +90,9 @@ class App(QMainWindow):
 
         # Realtime audio engine
         self.engine = None  # initialized in _init_engine()
+
+        # MIDI live-preview router (bridges rtmidi → server)
+        self._midi_router = None
 
         # Graph editor window (non-modal; lazily created)
         self._graph_editor_window = None
@@ -349,6 +358,9 @@ class App(QMainWindow):
 
         # Build default graph model (done after SF2 load so sf2_path is known)
         self._ensure_graph_model()
+
+        # Start MIDI live-preview router (if a device is configured)
+        self._restart_midi_router()
 
         # Initial render
         self._refresh_all()
@@ -742,6 +754,52 @@ class App(QMainWindow):
             # Refresh graph editor canvas if open
             if self._graph_editor_window is not None:
                 self._graph_editor_window._canvas.update()
+        # Restart MIDI router after graph changes (new node_id may be present)
+        self._restart_midi_router()
+
+    # ---- MIDI live-preview routing ----
+
+    def _restart_midi_router(self) -> None:
+        """Start (or restart) the MIDI live-preview router.
+
+        If a midi_source node is present in the graph, route events to that
+        node's server ID.  Otherwise fall back to the selected track.
+        """
+        if not _HAS_MIDI_ROUTER:
+            return
+        if not (self.engine and hasattr(self.engine, '_send')):
+            return
+
+        device = getattr(self.settings, 'midi_input_device', '') or ''
+
+        # Stop existing router
+        if self._midi_router is not None:
+            self._midi_router.stop()
+            self._midi_router = None
+
+        if not device:
+            return
+
+        # Determine target node
+        node_id = None
+        channel_filter = 0
+        if self.state.signal_graph is not None:
+            ms_node = self.state.signal_graph.find_midi_source()
+            if ms_node is not None:
+                node_id       = ms_node.node_id
+                channel_filter = ms_node.params.get('midi_channel', 0)
+
+        def _get_sel_track():
+            return self.state.sel_trk
+
+        self._midi_router = MidiSourceRouter(
+            engine=self.engine,
+            device_name=device,
+            node_id=node_id,
+            channel_filter=channel_filter,
+            get_track_id=_get_sel_track,
+        )
+        self._midi_router.start()
 
     def add_beat_instrument(self):
         """Add an instrument to the beat kit."""
@@ -799,6 +857,8 @@ class App(QMainWindow):
         """Called by ConfigDialog after settings are saved; update dependent UI."""
         if hasattr(self, 'piano_roll'):
             self.piano_roll._update_rec_btn_enabled()
+        # Restart MIDI router with the (possibly changed) device
+        self._restart_midi_router()
 
     def load_sf2(self):
         """Open dialog to select and load a soundfont."""
@@ -1114,6 +1174,9 @@ class App(QMainWindow):
     def closeEvent(self, event):
         """Clean up audio engine on window close."""
         self._stop_playhead_timer()
+        if self._midi_router is not None:
+            self._midi_router.stop()
+            self._midi_router = None
         if self.engine:
             self.engine.shutdown()
         self.player.stop()

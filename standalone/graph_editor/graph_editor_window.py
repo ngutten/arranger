@@ -191,6 +191,9 @@ class GraphEditorWindow(QWidget):
             lambda: self._add_node("control_source"))
         src_menu.addAction("Note Gate").triggered.connect(
             lambda: self._add_node("note_gate"))
+        src_menu.addSeparator()
+        src_menu.addAction("External MIDI Input").triggered.connect(
+            lambda: self._add_node("midi_source"))
 
         # Synthesizers
         synth_menu = menu.addMenu("Synthesizers")
@@ -198,8 +201,8 @@ class GraphEditorWindow(QWidget):
             lambda: self._add_node("fluidsynth"))
         synth_menu.addAction("Sine (debug)").triggered.connect(
             lambda: self._add_node("sine"))
-        smp_action = synth_menu.addAction("Sampler  [future]")
-        smp_action.triggered.connect(lambda: self._add_node("sampler"))
+        synth_menu.addAction("Sampler").triggered.connect(
+            lambda: self._add_node("sampler"))
 
         # Plugins (LV2) — disabled for now; kept for future re-enablement
         # self._plugins_menu = menu.addMenu("Plugins  (LV2)")
@@ -238,7 +241,8 @@ class GraphEditorWindow(QWidget):
 
         # Types already represented in the hardcoded menus
         _hardcoded = {"builtin.sine", "builtin.mixer", "builtin.note_gate",
-                      "builtin.control_source", "builtin.fluidsynth"}
+                      "builtin.control_source", "builtin.fluidsynth",
+                      "builtin.sampler"}
 
         # Group remaining plugins by category
         by_cat: dict[str, list[dict]] = {}
@@ -365,6 +369,14 @@ class GraphEditorWindow(QWidget):
                     "There is already an Output node in the graph.")
                 return
 
+        # Only one midi_source allowed (it owns the external MIDI port)
+        if node_type == "midi_source":
+            if any(n.node_type == "midi_source" for n in self.model.nodes):
+                QMessageBox.information(self, "Graph Editor",
+                    "There is already an External MIDI Input node in the graph.\n"
+                    "Only one is supported at a time.")
+                return
+
         # Choose a sensible default position: centre of current view + small offset
         cx = self._canvas.view_to_scene(
             QPointF(self._canvas.width() / 2, self._canvas.height() / 2)
@@ -384,6 +396,7 @@ class GraphEditorWindow(QWidget):
             "split_stereo":   "Split Stereo",
             "merge_stereo":   "Merge Stereo",
             "note_gate":      "Note Gate",
+            "midi_source":    "External MIDI In",
         }
 
         params = {}
@@ -397,6 +410,13 @@ class GraphEditorWindow(QWidget):
             params["pitch_lo"] = 0
             params["pitch_hi"] = 127
             params["gate_mode"] = 0
+        if node_type == "midi_source":
+            # Pre-fill with the current MIDI device from settings (if any)
+            device = ""
+            if self.server_engine and hasattr(self.server_engine, 'settings'):
+                device = getattr(self.server_engine.settings, 'midi_input_device', '') or ''
+            params["midi_device"]  = device
+            params["midi_channel"] = 0
 
         node = GraphNode(
             node_type=node_type,
@@ -578,9 +598,14 @@ class GraphEditorWindow(QWidget):
             self._status_lbl.setText(f"⚠ {msg}")
             self._status_lbl.setStyleSheet("color: #e94560; font-size: 10px;")
 
-        # Also notify the app so it knows the model changed (for save)
+        # Notify the app so it knows the model changed (for save) and so
+        # it can restart the MIDI router if a midi_source node was added/removed.
         if self._on_graph_changed:
             self._on_graph_changed(self.model)
+        # Restart MIDI router: target may have changed
+        parent = self.parent()
+        if parent and hasattr(parent, '_restart_midi_router'):
+            parent._restart_midi_router()
 
     # -----------------------------------------------------------------------
     # Save / load graph
