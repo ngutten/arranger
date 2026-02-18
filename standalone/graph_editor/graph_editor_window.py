@@ -84,14 +84,7 @@ class GraphEditorWindow(QWidget):
         self._push_timer.setInterval(120)   # ms
         self._push_timer.timeout.connect(self._do_live_push)
 
-        self._lv2_plugins: list[dict] = []   # fetched once on open
-
         self._build_ui()
-        # LV2 plugin support is disabled for now (Calf and other plugins have
-        # internal bugs triggered by their own declared defaults).  The code
-        # is left in place for future re-enablement.
-        # self._lv2_plugins_ready.connect(self._populate_lv2_menu)
-        # self._fetch_lv2_plugins()
 
         # Apply dark palette matching the main window
         self.setStyleSheet("""
@@ -189,8 +182,8 @@ class GraphEditorWindow(QWidget):
         ts_action.setToolTip("Track sources are managed automatically by the sequencer")
         src_menu.addAction("Control Source").triggered.connect(
             lambda: self._add_node("control_source"))
-        src_menu.addAction("Note Gate").triggered.connect(
-            lambda: self._add_node("note_gate"))
+#        src_menu.addAction("Note Gate").triggered.connect(
+#            lambda: self._add_node("note_gate"))
         src_menu.addSeparator()
         src_menu.addAction("External MIDI Input").triggered.connect(
             lambda: self._add_node("midi_source"))
@@ -204,11 +197,6 @@ class GraphEditorWindow(QWidget):
         synth_menu.addAction("Sampler").triggered.connect(
             lambda: self._add_node("sampler"))
 
-        # Plugins (LV2) — disabled for now; kept for future re-enablement
-        # self._plugins_menu = menu.addMenu("Plugins  (LV2)")
-        # self._lv2_loading_action = self._plugins_menu.addAction("Loading…")
-        # self._lv2_loading_action.setEnabled(False)
-
         # Utilities
         util_menu = menu.addMenu("Utilities")
         util_menu.addAction("Mixer").triggered.connect(
@@ -219,7 +207,7 @@ class GraphEditorWindow(QWidget):
             lambda: self._add_node("merge_stereo"))
 
         # Output (only one)
-        output_action = menu.addAction("Output (final mix)")
+        output_action = menu.addAction("Audio Out")
         output_action.triggered.connect(lambda: self._add_node("output"))
 
         # --- Registered plugins (new plugin API) ---
@@ -234,13 +222,13 @@ class GraphEditorWindow(QWidget):
         """Add registered plugins to the Add Node menu, grouped by category.
 
         Skips plugins whose short name is already in the hardcoded menus
-        (sine, mixer, note_gate, control_source, fluidsynth) to avoid
+        (sine, mixer, control_source, fluidsynth) to avoid
         duplicates during the transition period.
         """
         from .graph_model import _plugin_descriptors
 
         # Types already represented in the hardcoded menus
-        _hardcoded = {"builtin.sine", "builtin.mixer", "builtin.note_gate",
+        _hardcoded = {"builtin.sine", "builtin.mixer", 
                       "builtin.control_source", "builtin.fluidsynth",
                       "builtin.sampler"}
 
@@ -272,90 +260,6 @@ class GraphEditorWindow(QWidget):
                 act.triggered.connect(
                     lambda checked=False, p=pid, n=name, d=desc:
                     self._add_plugin_node(p, n, d))
-
-    # -----------------------------------------------------------------------
-    # LV2 plugin fetch
-    # -----------------------------------------------------------------------
-
-    def _fetch_lv2_plugins(self) -> None:
-        """Query the server for available LV2 plugins and populate the menu."""
-        if not self.server_engine:
-            self._lv2_loading_action.setText("Server not available")
-            return
-
-        def _fetch():
-            try:
-                resp = self.server_engine._send({"cmd": "list_plugins"})
-                return resp
-            except Exception:
-                return None
-
-        # Run in a background thread so the UI doesn't stall.
-        # Use a queued signal (auto-connection crosses threads safely in Qt)
-        # rather than QTimer.singleShot, which is not safe to call from a
-        # non-Qt thread and silently drops the callback.
-        import threading
-        def _worker():
-            resp = _fetch()
-            self._lv2_plugins_ready.emit(resp)
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _populate_lv2_menu(self, resp) -> None:
-        self._plugins_menu.clear()
-        if not resp or resp.get("status") != "ok":
-            act = self._plugins_menu.addAction("No LV2 plugins found")
-            act.setEnabled(False)
-            return
-
-        plugins = resp.get("plugins", [])
-        self._lv2_plugins = plugins
-
-        if not plugins:
-            act = self._plugins_menu.addAction("No LV2 plugins installed")
-            act.setEnabled(False)
-            return
-
-        # Group by category (supplied by server via lilv_plugin_get_class).
-        # Each category gets a submenu; within each submenu plugins are sorted
-        # alphabetically.  "Plugin" (the catch-all root class) goes last as
-        # "Other".
-        from collections import defaultdict
-        by_category: dict = defaultdict(list)
-        for p in plugins:
-            cat = p.get("category", "Plugin") or "Plugin"
-            by_category[cat].append(p)
-
-        def _add_category(menu, cat_plugins):
-            for p in sorted(cat_plugins, key=lambda x: x.get("name", "").lower()):
-                name  = p.get("name", p.get("uri", "?"))
-                uri   = p.get("uri", "")
-                ports = p.get("ports", [])
-                act   = menu.addAction(name)
-                act.triggered.connect(
-                    lambda checked=False, u=uri, n=name, ps=ports:
-                    self._add_lv2_node(u, n, ps))
-
-        # Sort categories; push the generic "Plugin" bucket to the bottom as "Other"
-        cats = sorted(c for c in by_category if c != "Plugin")
-        if "Plugin" in by_category:
-            cats.append("Plugin")
-
-        for cat in cats:
-            display = "Other" if cat == "Plugin" else cat
-            if len(by_category[cat]) == 1:
-                # Single-entry category — add directly rather than nesting one deep
-                p     = by_category[cat][0]
-                name  = p.get("name", p.get("uri", "?"))
-                uri   = p.get("uri", "")
-                ports = p.get("ports", [])
-                act   = self._plugins_menu.addAction(f"{name}  [{display}]")
-                act.triggered.connect(
-                    lambda checked=False, u=uri, n=name, ps=ports:
-                    self._add_lv2_node(u, n, ps))
-            else:
-                sub = self._plugins_menu.addMenu(display)
-                _add_category(sub, by_category[cat])
 
     # -----------------------------------------------------------------------
     # Node add helpers
@@ -430,7 +334,8 @@ class GraphEditorWindow(QWidget):
         self._canvas.selected_nodes = {nid}
         self._canvas.update()
         self._on_graph_changed_canvas()
-
+    
+    """
     def _add_lv2_node(self, uri: str, name: str, ports: list) -> None:
         import uuid
         nid = str(uuid.uuid4())
@@ -451,7 +356,8 @@ class GraphEditorWindow(QWidget):
         self._canvas.selected_nodes = {nid}
         self._canvas.update()
         self._on_graph_changed_canvas()
-
+    """
+    
     def _add_plugin_node(self, plugin_id: str, name: str, desc: dict) -> None:
         """Add a node backed by a registered plugin (new plugin API)."""
         import uuid
