@@ -122,6 +122,8 @@ struct ConfigParam {
     ConfigType    type;
     std::string   default_value;   ///< Always string-encoded.
     std::string   file_filter;     ///< For FilePath: e.g. "SF2 Files (*.sf2);;All (*)"
+    bool          save_mode = false; ///< For FilePath: true = getSaveFileName (output),
+                                     ///<               false = getOpenFileName (input, default)
     std::vector<std::string> choices;  ///< For Categorical
 };
 
@@ -152,8 +154,13 @@ struct PluginProcessContext {
     int    block_size;
     float  sample_rate;
     float  bpm;
-    double beat_position;     ///< Beat at start of this block.
+    double beat_position;       ///< Beat at start of this block.
     double beats_per_sample;
+
+    // Transport state.
+    bool   is_playing         = false; ///< True while the transport is running.
+    bool   transport_started  = false; ///< True on the first block of a new play.
+    bool   transport_stopped  = false; ///< True on the first block after stop/end.
 };
 
 /// A single MIDI-style event with a sample offset within the block.
@@ -285,6 +292,14 @@ public:
     virtual void program_change(int channel, int bank, int program) { (void)channel; (void)bank; (void)program; }
     virtual void control_change(int channel, int cc, int value) { (void)channel; (void)cc; (void)value; }
     virtual void channel_volume(int channel, int volume) { (void)channel; (void)volume; }
+
+    // --- Transport events (main thread) ---
+
+    /// Called when the transport stops (end of playback, user stops, or loop
+    /// boundary if the engine chooses to signal it).  Safe to do file I/O here.
+    /// The engine calls this after the last process() block that had
+    /// transport_stopped == true has been delivered.
+    virtual void on_transport_stop() {}
 
     // --- Monitor readback (main thread) ---
 

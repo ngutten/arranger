@@ -36,7 +36,7 @@ public:
         PluginDescriptor d;
         d.id           = "builtin.control_to_note";
         d.display_name = "Control → Note";
-        d.category     = "Utility";
+        d.category     = "Converters";
         d.doc          = "Fires MIDI note_on/off when a Control stream crosses a "
                          "threshold. Two modes: threshold (note held while signal "
                          "is above threshold) and fixed-duration (note_off fires "

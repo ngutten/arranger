@@ -18,7 +18,7 @@ public:
         PluginDescriptor d;
         d.id           = "builtin.note_gate";
         d.display_name = "Note Gate";
-        d.category     = "Utility";
+        d.category     = "Converters";
         d.doc          = "Converts MIDI note events into a control signal. "
                          "Modes: Gate, Velocity, Pitch, NoteCount.";
         d.author       = "builtin";

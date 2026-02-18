@@ -229,13 +229,21 @@ std::string AudioEngine::set_schedule(const std::string& schedule_json) {
 }
 
 void AudioEngine::play() {
+    drain_transport_callbacks();  // flush any pending stop from previous run
     dispatcher_.check_pending();  // make sure latest schedule is active
-    playing_.store(true, std::memory_order_relaxed);
     send_cmd(Cmd::Play);
 }
 
 void AudioEngine::stop() {
     send_cmd(Cmd::Stop);
+    // Give the audio thread one block to process the Stop command and set
+    // transport_stop_pending_.  Typical block is ~10 ms; 50 ms is safe.
+#ifndef AS_PLATFORM_WINDOWS
+    usleep(50000);
+#else
+    Sleep(50);
+#endif
+    drain_transport_callbacks();
 }
 
 void AudioEngine::seek(double beat) {
@@ -280,6 +288,19 @@ void AudioEngine::send_param_cmd(const std::string& node_id,
     e.param   = param;
     e.value   = value;
     cmd_queue_.push_back(std::move(e));
+}
+
+void AudioEngine::poll() {
+    drain_transport_callbacks();
+}
+
+void AudioEngine::drain_transport_callbacks() {
+    if (!transport_stop_pending_.exchange(false, std::memory_order_acq_rel))
+        return;
+    // Prefer owned_graph_ (main-thread view) over active_graph_ to avoid the
+    // atomic load and stay on the same thread as graph_mutex_.
+    std::lock_guard<std::mutex> lk(graph_mutex_);
+    if (owned_graph_) owned_graph_->notify_transport_stop();
 }
 
 // ---------------------------------------------------------------------------
@@ -495,7 +516,17 @@ void AudioEngine::process_block(float* L, float* R, int frames) {
 
     Graph* graph = active_graph_.load(std::memory_order_acquire);
 
-    if (!playing_.load(std::memory_order_relaxed) || !graph) {
+    bool now_playing = playing_.load(std::memory_order_relaxed);
+
+    // Detect transport edges.  prev_playing_ is audio-thread-only state.
+    bool just_started = now_playing  && !prev_playing_;
+    bool just_stopped = !now_playing &&  prev_playing_;
+    prev_playing_     = now_playing;
+
+    if (just_stopped)
+        transport_stop_pending_.store(true, std::memory_order_release);
+
+    if (!now_playing || !graph) {
         // Still process graph (for preview notes) but without advancing beat
         if (graph) {
             double beat = current_beat_.load(std::memory_order_relaxed);
@@ -531,7 +562,8 @@ void AudioEngine::process_block(float* L, float* R, int frames) {
     dispatcher_.dispatch(beat_pos, end_beat, graph);
 
     // Process graph
-    ProcessContext ctx { frames, cfg_.sample_rate, bpm, beat_pos, bps };
+    ProcessContext ctx { frames, cfg_.sample_rate, bpm, beat_pos, bps,
+                         /*is_playing=*/true, just_started, /*transport_stopped=*/false };
     graph->process(ctx);
 
     const float* gL = graph->output_L();
@@ -556,6 +588,7 @@ void AudioEngine::process_block(float* L, float* R, int frames) {
         }
     } else if (arr_len > 0 && end_beat >= arr_len) {
         playing_.store(false, std::memory_order_relaxed);
+        transport_stop_pending_.store(true, std::memory_order_release);
         if (graph) for (auto& nid : graph->eval_order()) {
             auto* n = graph->find_node(nid);
             if (n) n->all_notes_off(-1);
@@ -612,7 +645,13 @@ std::vector<float> AudioEngine::render_offline(float tail_seconds, double durati
 
         dispatcher_.dispatch(beat_pos, end_beat, graph);
 
-        ProcessContext ctx { n, cfg_.sample_rate, bpm, beat_pos, bps };
+        bool is_first = (frames_done == 0);
+        bool is_last  = (frames_done + n >= total_frames);
+
+        ProcessContext ctx { n, cfg_.sample_rate, bpm, beat_pos, bps,
+                             /*is_playing=*/true,
+                             /*transport_started=*/is_first,
+                             /*transport_stopped=*/is_last };
         graph->process(ctx);
 
         const float* gL = graph->output_L();
@@ -629,6 +668,10 @@ std::vector<float> AudioEngine::render_offline(float tail_seconds, double durati
         beat_pos = end_beat;
         frames_done += n;
     }
+
+    // Notify plugins that the render is done — safe here as we're on the
+    // main thread and the PA stream is stopped for the render duration.
+    graph->notify_transport_stop();
 
     // Resume the real-time stream, restoring beat position to pre-render state
     // so live playback isn't disrupted by the offline render scrub.

@@ -69,6 +69,10 @@ public:
     void disable_loop();
     void set_bpm(float bpm) { bpm_ = bpm; }
 
+    // Poll for pending transport callbacks (on_transport_stop etc.).
+    // Call from any main-thread entry point; no-op if nothing is pending.
+    void poll();
+
     double current_beat() const { return current_beat_.load(std::memory_order_relaxed); }
     bool   is_playing()   const { return playing_.load(std::memory_order_relaxed); }
 
@@ -170,6 +174,18 @@ private:
     std::mutex               cmd_mutex_;
 
     float bpm_ = 120.0f;  // set from graph JSON or set_bpm(); read by callback + render
+
+    // Transport edge detection — audio thread only, no atomics needed.
+    bool  prev_playing_  = false;
+
+    // Set by the audio thread when it transitions playing→stopped; cleared by
+    // drain_transport_callbacks() on the main thread after calling
+    // on_transport_stop() on all plugin adapters.
+    std::atomic<bool> transport_stop_pending_ { false };
+
+    // Call on_transport_stop() on all plugins in the current graph.
+    // Must be called from the main thread only.
+    void drain_transport_callbacks();
 
     // Heap-allocated scratch buffers for the PortAudio callback.
     // Allocated in open() to avoid the 32 KB stack overflow that two

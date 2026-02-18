@@ -47,6 +47,11 @@ struct ProcessContext {
     float bpm;
     double beat_position;  // beat at start of this block
     double beats_per_sample;
+
+    // Transport state — set by AudioEngine::process_block().
+    bool  is_playing        = false;
+    bool  transport_started = false;  // true on first block of a play
+    bool  transport_stopped = false;  // true on first block after stop
 };
 
 class Node {
@@ -147,6 +152,10 @@ public:
 
     // Main thread: parameter updates (atomic).
     void set_param(const std::string& node_id, const std::string& param, float value);
+
+    // Main thread: call on_transport_stop() on every PluginAdapterNode in
+    // the graph.  Safe to do file I/O, memory allocation, etc.
+    void notify_transport_stop();
 
     // Look up a node by id (main thread or audio thread, read-only).
     Node* find_node(const std::string& id) const;

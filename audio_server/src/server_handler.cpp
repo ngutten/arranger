@@ -125,6 +125,7 @@ json ServerHandler::dispatch(const std::string& cmd, const json& req) {
         return {{"status", "ok"}};
     }
     if (cmd == protocol::CMD_GET_POSITION) {
+        engine_.poll();   // drain on_transport_stop() for natural arrangement-end
         return {{"status", "ok"},
                 {"beat",    engine_.current_beat()},
                 {"playing", engine_.is_playing()}};
@@ -304,6 +305,8 @@ json ServerHandler::dispatch(const std::string& cmd, const json& req) {
                 jcp["default"] = cp.default_value;
                 if (!cp.file_filter.empty())
                     jcp["file_filter"] = cp.file_filter;
+                if (cp.save_mode)
+                    jcp["save_mode"] = true;
                 if (!cp.choices.empty())
                     jcp["choices"] = cp.choices;
                 config_params.push_back(jcp);

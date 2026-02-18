@@ -17,6 +17,26 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFontMetrics, QDoubleValidator
 
+def format_value(value, display_dec=10):
+    if value == 0:
+        return "0"
+    
+    # 1. Determine the magnitude to find the "100x smaller" threshold
+    magnitude = math.floor(math.log10(abs(value)))
+    
+    # 2. Calculate required decimals (2 places below the leading digit)
+    # We cap this at 'display_dec' so it doesn't exceed your spinbox limit
+    keep_decimals = min(display_dec, max(0, 2 - magnitude))
+    
+    # 3. Format the string
+    formatted = f"{value:.{keep_decimals}f}"
+    
+    # 4. Only strip zeros if there is a decimal point present
+    if "." in formatted:
+        # Strip trailing zeros, then strip a trailing decimal point if it's naked
+        formatted = formatted.rstrip('0').rstrip('.')
+        
+    return formatted
 
 class SmartFloatWidget(QWidget):
     """Float parameter widget with adaptive UI based on range.
@@ -48,7 +68,7 @@ class SmartFloatWidget(QWidget):
         self._use_slider = False
         
         # Wide positive range → logarithmic slider
-        if min_val > 0 and max_val > 100 and (max_val / min_val) > 100:
+        if min_val > 0 and max_val > 50 and (max_val / min_val) > 100:
             self._use_log_slider = True
             self._use_slider = True
         # Small bounded range → linear slider
@@ -99,10 +119,10 @@ class SmartFloatWidget(QWidget):
         # Override textFromValue to limit display decimals while keeping full precision
         original_textFromValue = self._spinbox.textFromValue
         display_dec = self._display_decimals
-        
+            
         def custom_textFromValue(value):
             # Format with limited decimals for display, stripping trailing zeros
-            formatted = f"{value:.{display_dec}f}".rstrip('0').rstrip('.')
+            formatted = format_value(value) #f"{value:.{display_dec}f}".rstrip('0').rstrip('.')
             return formatted
         
         self._spinbox.textFromValue = custom_textFromValue

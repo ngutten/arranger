@@ -34,7 +34,7 @@ public:
         PluginDescriptor d;
         d.id           = "builtin.control_lfo";
         d.display_name = "Control LFO";
-        d.category     = "Utility";
+        d.category     = "Generators";
         d.doc          = "Generates a periodic waveform on a Control output port. "
                          "Useful for modulation and as a diagnostic to verify "
                          "that the control signal path is functional.";

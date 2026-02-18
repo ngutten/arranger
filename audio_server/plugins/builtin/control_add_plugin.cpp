@@ -17,7 +17,7 @@ public:
         PluginDescriptor d;
         d.id           = "builtin.control_add";
         d.display_name = "Control Add";
-        d.category     = "Utility";
+        d.category     = "Control";
         d.doc          = "Adds two Control streams: output = A + B. "
                          "Unconnected ports use the node's default value. "
                          "No range clamping — suitable for frequency, gain, and "

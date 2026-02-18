@@ -394,6 +394,14 @@ void Graph::set_param(const std::string& nid, const std::string& param, float va
     if (n) n->set_param(param, val);
 }
 
+void Graph::notify_transport_stop() {
+    for (auto& entry : nodes_) {
+        auto* adapter = dynamic_cast<PluginAdapterNode*>(entry.node.get());
+        if (adapter && adapter->plugin())
+            adapter->plugin()->on_transport_stop();
+    }
+}
+
 Node* Graph::find_node(const std::string& id) const {
     auto it = node_index_.find(id);
     if (it == node_index_.end()) return nullptr;

@@ -184,11 +184,14 @@ void PluginAdapterNode::process(
 {
     // Translate ProcessContext
     PluginProcessContext pctx;
-    pctx.block_size       = ctx.block_size;
-    pctx.sample_rate      = ctx.sample_rate;
-    pctx.bpm              = ctx.bpm;
-    pctx.beat_position    = ctx.beat_position;
-    pctx.beats_per_sample = ctx.beats_per_sample;
+    pctx.block_size        = ctx.block_size;
+    pctx.sample_rate       = ctx.sample_rate;
+    pctx.bpm               = ctx.bpm;
+    pctx.beat_position     = ctx.beat_position;
+    pctx.beats_per_sample  = ctx.beats_per_sample;
+    pctx.is_playing        = ctx.is_playing;
+    pctx.transport_started = ctx.transport_started;
+    pctx.transport_stopped = ctx.transport_stopped;
 
     // --- Wire buffers ---
     // We must walk the descriptor in the same order as declare_ports()

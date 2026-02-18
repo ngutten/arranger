@@ -31,7 +31,7 @@ public:
         PluginDescriptor d;
         d.id           = "builtin.control_monitor";
         d.display_name = "Control Monitor";
-        d.category     = "Utility";
+        d.category     = "Monitors";
         d.doc          = "Monitors a Control stream and displays a live scrolling plot in the UI.";
         d.author       = "builtin";
         d.version      = 1;

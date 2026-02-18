@@ -176,7 +176,7 @@ target_link_libraries(audio_server PRIVATE audio_server_lib)
 #target_link_options(audio_server PRIVATE
 #    -fsanitize=address,undefined)
 
-add_compile_definitions(AS_DEBUG)
+#add_compile_definitions(AS_DEBUG)
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -282,23 +282,31 @@ set_target_properties(audio_server PROPERTIES ENABLE_EXPORTS ON)
 # Ensure the output directory exists at configure time.
 file(MAKE_DIRECTORY "${CMAKE_SOURCE_DIR}/../plugins")
 
-# These five are always built as dynamic libraries (not in audio_server_lib).
 # sine / control_source / mixer remain statically linked.
 plugin_library(note_gate       SOURCES plugins/builtin/note_gate_plugin.cpp)
 plugin_library(control_monitor SOURCES plugins/builtin/control_monitor_plugin.cpp)
-plugin_library(reverb          SOURCES plugins/builtin/reverb_plugin.cpp)
 plugin_library(arpeggiator     SOURCES plugins/builtin/arpeggiator_plugin.cpp)
-plugin_library(control_lfo     SOURCES plugins/builtin/control_lfo_plugin.cpp)
+plugin_library(risset_rhythm SOURCES plugins/builtin/risset_rhythm_plugin.cpp)
+plugin_library(shepard_tone SOURCES plugins/builtin/shepard_tone_plugin.cpp)
 
 # --- Control utility plugins (no extra deps) ---
 plugin_library(control_multiply SOURCES plugins/builtin/control_multiply_plugin.cpp)
 plugin_library(control_add      SOURCES plugins/builtin/control_add_plugin.cpp)
 plugin_library(control_to_note  SOURCES plugins/builtin/control_to_note_plugin.cpp)
+plugin_library(control_lfo     SOURCES plugins/builtin/control_lfo_plugin.cpp)
+plugin_library(control_resonator  SOURCES plugins/builtin/control_resonator_plugin.cpp)
+plugin_library(control_delay_line  SOURCES plugins/builtin/control_delay_line_plugin.cpp)
 
 # --- Audio effect plugins ---
 plugin_library(amp              SOURCES plugins/builtin/amp_plugin.cpp)
 plugin_library(filter           SOURCES plugins/builtin/filter_plugin.cpp)
 plugin_library(pitch_shift      SOURCES plugins/builtin/pitch_shift_plugin.cpp)
+plugin_library(reverb          SOURCES plugins/builtin/reverb_plugin.cpp)
+plugin_library(audio_delay_line  SOURCES plugins/builtin/audio_delay_line_plugin.cpp)
+plugin_library(tape_stop  SOURCES plugins/builtin/tape_stop_plugin.cpp)
+plugin_library(flanger  SOURCES plugins/builtin/flanger_plugin.cpp)
+
+plugin_library(midi_capture SOURCES plugins/builtin/midi_capture_plugin.cpp)
 
 # --- Sampler (libsndfile for audio I/O) ---
 if(ENABLE_SNDFILE)
@@ -323,12 +331,20 @@ add_dependencies(audio_server
     arranger_plugin_arpeggiator
     arranger_plugin_control_lfo
     arranger_plugin_control_multiply
+    arranger_plugin_control_resonator
     arranger_plugin_control_add
     arranger_plugin_control_to_note
+    arranger_plugin_control_delay_line
+    arranger_plugin_audio_delay_line
+    arranger_plugin_tape_stop
+    arranger_plugin_flanger
     arranger_plugin_amp
     arranger_plugin_filter
     arranger_plugin_pitch_shift
     arranger_plugin_sampler
+    arranger_plugin_risset_rhythm
+    arranger_plugin_shepard_tone    
+    arranger_plugin_midi_capture
 )
 
 if(ENABLE_SF2)

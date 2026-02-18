@@ -1576,14 +1576,20 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
             browse_btn.setStyleSheet("background: #1a2236; color: #ccc;")
 
             file_filter = cp.get("file_filter", "All Files (*)")
-            def _browse(checked=False, e=edit, cid=cp_id, ff=file_filter):
+            save_mode = cp.get("save_mode", False)
+            def _browse(checked=False, e=edit, cid=cp_id, ff=file_filter, sm=save_mode):
                 from PySide6.QtWidgets import QFileDialog
-                path, _ = QFileDialog.getOpenFileName(
-                    w, f"Select {cp_display}", "", ff,
-                    options=QFileDialog.Option.DontUseNativeDialog)
-                if path:
-                    e.setText(path)
-                    on_change(node.node_id, cid, path)
+                if sm:
+                    p, _ = QFileDialog.getSaveFileName(
+                        w, f"Select {cp_display}", "", ff,
+                        options=QFileDialog.Option.DontUseNativeDialog)
+                else:
+                    p, _ = QFileDialog.getOpenFileName(
+                        w, f"Select {cp_display}", "", ff,
+                        options=QFileDialog.Option.DontUseNativeDialog)
+                if p:
+                    e.setText(p)
+                    on_change(node.node_id, cid, p)
             browse_btn.clicked.connect(_browse)
             row_lay.addWidget(browse_btn)
             lay.addRow(QLabel(cp_display + ":"), row)
