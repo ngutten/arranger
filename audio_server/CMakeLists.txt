@@ -306,6 +306,8 @@ plugin_library(audio_delay_line  SOURCES plugins/builtin/audio_delay_line_plugin
 plugin_library(tape_stop  SOURCES plugins/builtin/tape_stop_plugin.cpp)
 plugin_library(flanger  SOURCES plugins/builtin/flanger_plugin.cpp)
 
+plugin_library(pattern_stamper  SOURCES plugins/builtin/pattern_stamper_plugin.cpp)
+
 plugin_library(midi_capture SOURCES plugins/builtin/midi_capture_plugin.cpp)
 
 # --- Sampler (libsndfile for audio I/O) ---
@@ -345,6 +347,7 @@ add_dependencies(audio_server
     arranger_plugin_risset_rhythm
     arranger_plugin_shepard_tone    
     arranger_plugin_midi_capture
+    arranger_plugin_pattern_stamper
 )
 
 if(ENABLE_SF2)

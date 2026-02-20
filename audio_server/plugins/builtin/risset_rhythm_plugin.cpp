@@ -267,3 +267,7 @@ private:
 
 REGISTER_PLUGIN(RissetRhythmPlugin);
 REGISTER_PLUGIN_DYNAMIC(RissetRhythmPlugin);
+
+std::unique_ptr<Plugin> make_risset_plugin() {
+    return std::make_unique<RissetRhythmPlugin>();
+}
