@@ -59,18 +59,20 @@ C_NODE_BG       = QColor("#1a2236")
 C_NODE_BORDER   = QColor("#2a3a5c")
 C_NODE_SEL      = QColor("#3a7bd5")
 C_NODE_HEADER   = {
-    "track_source":   QColor("#1a3a5c"),
-    "midi_source":    QColor("#1a4a5c"),   # teal — external MIDI input
-    "control_source": QColor("#2a3a1c"),
-    "fluidsynth":     QColor("#3a1a4a"),
-    "sine":           QColor("#3a2a1a"),
-    "sampler":        QColor("#1a3a3a"),
-    "lv2":            QColor("#2a1a3a"),
-    "mixer":          QColor("#1a2a3a"),
-    "output":         QColor("#0d2a1a"),
-    "split_stereo":   QColor("#1a2a2a"),
-    "merge_stereo":   QColor("#1a2a2a"),
-    "note_gate":      QColor("#2a1a3a"),
+    "track_source":        QColor("#1a3a5c"),
+    "midi_source":         QColor("#1a4a5c"),   # teal — external MIDI input
+    "control_source":      QColor("#2a3a1c"),
+    "fluidsynth":          QColor("#3a1a4a"),
+    "sine":                QColor("#3a2a1a"),
+    "sampler":             QColor("#1a3a3a"),
+    "lv2":                 QColor("#2a1a3a"),
+    "mixer":               QColor("#1a2a3a"),
+    "output":              QColor("#0d2a1a"),
+    "split_stereo":        QColor("#1a2a2a"),
+    "merge_stereo":        QColor("#1a2a2a"),
+    "note_gate":           QColor("#2a1a3a"),
+    "pattern_source":      QColor("#3a2a0a"),   # warm dark amber
+    "beat_pattern_source": QColor("#3a1a0a"),   # darker amber
 }
 C_NODE_HEADER_DEFAULT = QColor("#1a2a3a")
 
@@ -79,6 +81,7 @@ C_PORT = {
     PortType.AUDIO:      QColor("#6bcb77"),
     PortType.AUDIO_MONO: QColor("#a8e6a3"),   # lighter green — single channel
     PortType.CONTROL:    QColor("#4d96ff"),
+    PortType.PATTERN:    QColor("#fa8072"),   # salmon — pattern data
 }
 C_PORT_HOVER    = QColor("#ffffff")
 C_WIRE          = QColor("#4d96ff")
@@ -140,6 +143,7 @@ class NodeGraphCanvas(QWidget):
         self.model = model
         self._settings_factory = settings_factory
         self._server_engine = None   # Set by the window after construction
+        self._state = None            # Set by the window after construction (AppState)
 
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMouseTracking(True)
@@ -1387,6 +1391,17 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable):
         return w
 
     # track_source, control_source, unknown: no settings
+    # Pattern source nodes: pattern picker dropdown
+    if t in ("pattern_source", "beat_pattern_source"):
+        # Walk up to find the canvas, then get its _state reference.
+        canvas = parent
+        while canvas is not None and not isinstance(canvas, NodeGraphCanvas):
+            canvas = canvas.parent()
+        state = getattr(canvas, '_state', None)
+        if state is not None:
+            return _make_pattern_source_widget(node, state, parent, on_change)
+        return None
+
     # Plugin-backed nodes: auto-generate from descriptor
     from .graph_model import get_plugin_descriptor
     desc = get_plugin_descriptor(t)
@@ -1396,6 +1411,53 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable):
             return _make_control_monitor_widget(node, parent)
         return _make_plugin_settings_widget(node, desc, parent, on_change)
     return None
+
+
+def _make_pattern_source_widget(node: GraphNode, state, parent, on_change: Callable):
+    """Inline settings panel for pattern_source and beat_pattern_source nodes.
+
+    Shows a dropdown for selecting a pattern from the current AppState.
+    Calls update_pattern_source_node() and fires on_change to push the graph.
+    """
+    from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QComboBox
+    from .graph_model import update_pattern_source_node
+
+    is_beat = node.node_type == "beat_pattern_source"
+    items   = state.beat_patterns if is_beat else state.patterns
+
+    w = QWidget(parent)
+    w.setStyleSheet("background: transparent; color: #ccc;")
+    lay = QVBoxLayout(w)
+    lay.setContentsMargins(4, 2, 4, 4)
+    lay.setSpacing(2)
+
+    lbl = QLabel("Beat Pattern:" if is_beat else "Pattern:")
+    lbl.setStyleSheet("color: #aaa; font-size: 9px;")
+    lay.addWidget(lbl)
+
+    combo = QComboBox()
+    combo.setStyleSheet(
+        "background: #0d1117; color: #ccc; border: 1px solid #2a3a5c; font-size: 9px;")
+
+    selected_id = node.params.get("_pattern_id")
+    sel_idx = 0
+    for i, pat in enumerate(items):
+        combo.addItem(pat.name, pat.id)
+        if pat.id == selected_id:
+            sel_idx = i
+    if combo.count() > 0:
+        combo.setCurrentIndex(sel_idx)
+
+    def _on_select(idx):
+        pat_id = combo.itemData(idx)
+        if pat_id is None:
+            return
+        if update_pattern_source_node(node, pat_id, state):
+            on_change(node.node_id, "_pattern_id", pat_id)
+
+    combo.currentIndexChanged.connect(_on_select)
+    lay.addWidget(combo)
+    return w
 
 
 def _make_control_monitor_widget(node: GraphNode, parent) -> "QWidget":

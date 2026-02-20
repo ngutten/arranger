@@ -255,6 +255,7 @@ json ServerHandler::dispatch(const std::string& cmd, const json& req) {
                     case PluginPortType::AudioStereo: jport["type"] = "audio_stereo"; break;
                     case PluginPortType::Event:       jport["type"] = "event"; break;
                     case PluginPortType::Control:     jport["type"] = "control"; break;
+                    case PluginPortType::Pattern:     jport["type"] = "pattern"; break;
                 }
                 switch (p.role) {
                     case PortRole::Input:    jport["role"] = "input"; break;

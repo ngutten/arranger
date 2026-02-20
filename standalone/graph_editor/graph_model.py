@@ -69,6 +69,7 @@ class PortType(Enum):
     AUDIO      = "audio"        # stereo pair (UI abstraction)
     AUDIO_MONO = "audio_mono"   # single channel (split/merge, LV2)
     CONTROL    = "control"
+    PATTERN    = "pattern"      # PatternData snapshot (melodic or beat pattern)
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +136,98 @@ NOTE_GATE_PORTS = [
 ]
 
 NOTE_GATE_MODES = ["Gate", "Velocity", "Pitch", "Note Count"]
+
+PATTERN_SOURCE_PORTS = [
+    PortDef("Pattern", "pattern_out", PortType.PATTERN, True),
+]
+
+BEAT_PATTERN_SOURCE_PORTS = [
+    PortDef("Pattern", "pattern_out", PortType.PATTERN, True),
+]
+
+
+def serialize_pattern(pattern) -> dict:
+    """Serialize a melodic Pattern to the inline dict expected by C++ graph.cpp.
+
+    Notes carry channel 0 and program=-1 (no program override), matching
+    the convention for melodic tracks that route through a single synth.
+    """
+    notes = []
+    for n in pattern.notes:
+        notes.append({
+            "beat":     n.start,
+            "duration": n.duration,
+            "channel":  0,
+            "pitch":    n.pitch,
+            "velocity": n.velocity,
+            "program":  -1,
+            "bank":     -1,
+        })
+    return {
+        "notes":           notes,
+        "length_beats":    float(pattern.length),
+        "subdivision":     0,
+        "is_beat_pattern": False,
+    }
+
+
+def serialize_beat_pattern(beat_pattern, state) -> dict:
+    """Serialize a BeatPattern + AppState beat_kit to the inline dict.
+
+    Each active grid cell becomes a note carrying the instrument's channel,
+    pitch, program, and bank so downstream synths can route correctly.
+    """
+    notes = []
+    for inst in state.beat_kit:
+        grid = beat_pattern.grid.get(inst.id)
+        if not grid:
+            continue
+        n_steps = len(grid)
+        step_dur = beat_pattern.length / n_steps
+        for step_idx, vel in enumerate(grid):
+            if vel <= 0:
+                continue
+            notes.append({
+                "beat":     step_idx * step_dur,
+                "duration": step_dur * 0.8,
+                "channel":  inst.channel,
+                "pitch":    inst.pitch,
+                "velocity": vel,
+                "program":  inst.program,
+                "bank":     inst.bank,
+            })
+    notes.sort(key=lambda n: n["beat"])
+    return {
+        "notes":           notes,
+        "length_beats":    float(beat_pattern.length),
+        "subdivision":     beat_pattern.subdivision,
+        "is_beat_pattern": True,
+    }
+
+
+def update_pattern_source_node(node, pattern_id: int, state) -> bool:
+    """Populate node.params['_pattern_id'] and ['_pattern_data'] from state.
+
+    Called by the UI when the user selects a pattern from the dropdown.
+    Returns True if the pattern was found and the node updated.
+    """
+    if node.node_type == "pattern_source":
+        pat = state.find_pattern(pattern_id)
+        if pat is None:
+            return False
+        node.params["_pattern_id"]   = pattern_id
+        node.params["_pattern_data"] = serialize_pattern(pat)
+        node.display_name = f"Pattern: {pat.name}"
+        return True
+    elif node.node_type == "beat_pattern_source":
+        pat = state.find_beat_pattern(pattern_id)
+        if pat is None:
+            return False
+        node.params["_pattern_id"]   = pattern_id
+        node.params["_pattern_data"] = serialize_beat_pattern(pat, state)
+        node.display_name = f"Beat: {pat.name}"
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +306,8 @@ def _plugin_ports_from_descriptor(desc: dict, params: dict) -> list["PortDef"]:
             ports_out.append(PortDef(display, pid, PortType.MIDI, is_out))
         elif ptype_str == "control":
             ports_out.append(PortDef(display, pid, PortType.CONTROL, is_out))
+        elif ptype_str == "pattern":
+            ports_out.append(PortDef(display, pid, PortType.PATTERN, is_out))
     return ports_out
 
 
@@ -327,6 +422,8 @@ class GraphNode:
         if t == "control_source":  return CONTROL_SOURCE_PORTS
         if t == "fluidsynth":      return FLUIDSYNTH_PORTS
         if t == "sine":            return SINE_PORTS
+        if t == "pattern_source":      return PATTERN_SOURCE_PORTS
+        if t == "beat_pattern_source": return BEAT_PATTERN_SOURCE_PORTS
         # "sampler" falls through to plugin descriptor so ADSR control ports show.
         # Fall back to minimal ports if descriptor not yet loaded from server.
         if t == "sampler":
@@ -385,6 +482,18 @@ class GraphNode:
         if self.node_type == "lv2" and self.params.get("_dual_mono"):
             return None
 
+        # Pattern source nodes — emit type + inline pattern data for C++ graph.cpp.
+        if self.node_type in ("pattern_source", "beat_pattern_source"):
+            pattern_data = self.params.get("_pattern_data") or {
+                "notes": [], "length_beats": 1.0, "subdivision": 0,
+                "is_beat_pattern": self.node_type == "beat_pattern_source",
+            }
+            return {
+                "id":      self.node_id,
+                "type":    self.node_type,
+                "pattern": pattern_data,
+            }
+
         d: dict = {"id": self._server_id(), "type": self._server_type()}
 
         if self.node_type == "fluidsynth":
@@ -427,9 +536,12 @@ class GraphNode:
         return d
 
     def to_dict(self) -> dict:
-        # Exclude computed caches — rebuilt from _ports on load
+        # Exclude computed caches — rebuilt from _ports on load.
+        # Also exclude _pattern_data — it's regenerated from _pattern_id + live state
+        # on load via update_pattern_source_node(), so storing it would just be stale.
         clean_params = {k: v for k, v in self.params.items()
-                        if k not in ("_stereo_map", "_dual_mono", "_plugin_desc")}
+                        if k not in ("_stereo_map", "_dual_mono", "_plugin_desc",
+                                     "_pattern_data")}
         return {
             "node_type":   self.node_type,
             "node_id":     self.node_id,
@@ -807,6 +919,18 @@ class GraphModel:
         for bt in state.beat_tracks:
             self.add_track_source(bt.id, bt.name, sf2_path)
 
+    def sync_pattern_sources(self, state) -> None:
+        """Regenerate _pattern_data for all pattern source nodes from live state.
+
+        Called before every graph push so edits to patterns are reflected
+        immediately without requiring the user to reconnect nodes.
+        """
+        for node in self.nodes:
+            if node.node_type in ("pattern_source", "beat_pattern_source"):
+                pat_id = node.params.get("_pattern_id")
+                if pat_id is not None:
+                    update_pattern_source_node(node, pat_id, state)
+
     # -- Serialisation --
 
     def to_server_dict(self, bpm: float = 120.0) -> dict:
@@ -853,6 +977,18 @@ class GraphModel:
                 continue
 
             src_type = self._port_type_for(c.from_node, c.from_port)
+
+            # --- PATTERN connections — pass through verbatim ---
+            # wire_pattern_ports() in C++ graph.cpp handles the actual injection;
+            # the connection just needs to reach the server unchanged.
+            if src_type == PortType.PATTERN:
+                connections.append({
+                    "from_node": c.from_node,
+                    "from_port": c.from_port,
+                    "to_node":   c.to_node,
+                    "to_port":   c.to_port,
+                })
+                continue
 
             # --- Elide split_stereo ---
             # Connection INTO a split_stereo: record the mapping so that

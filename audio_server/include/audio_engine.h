@@ -183,6 +183,10 @@ private:
     // on_transport_stop() on all plugin adapters.
     std::atomic<bool> transport_stop_pending_ { false };
 
+    // Set by set_graph() or play() to trigger setup event restoration on the
+    // audio thread at the next block.
+    std::atomic<bool> setup_restore_pending_ { false };
+
     // Call on_transport_stop() on all plugins in the current graph.
     // Must be called from the main thread only.
     void drain_transport_callbacks();

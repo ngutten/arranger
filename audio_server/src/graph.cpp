@@ -24,6 +24,37 @@ float* BufferPool::get(int index) {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers — parse PatternData from JSON
+// ---------------------------------------------------------------------------
+
+static PatternData parse_pattern_data(const json& jp) {
+    PatternData pd;
+    pd.length_beats    = jp.value("length_beats", 0.0);
+    pd.subdivision     = jp.value("subdivision", 0);
+    pd.is_beat_pattern = jp.value("is_beat_pattern", false);
+
+    for (auto& jn : jp.value("notes", json::array())) {
+        PatternNote n;
+        n.beat     = jn.value("beat",     0.0);
+        n.duration = jn.value("duration", 0.25);
+        n.channel  = static_cast<uint8_t>(jn.value("channel",  0));
+        n.pitch    = static_cast<uint8_t>(jn.value("pitch",    60));
+        n.velocity = static_cast<uint8_t>(jn.value("velocity", 100));
+        n.program  = jn.value("program", -1);
+        n.bank     = jn.value("bank",    -1);
+        pd.notes.push_back(n);
+    }
+
+    // Sort by beat for plugins that walk the list.
+    std::sort(pd.notes.begin(), pd.notes.end(),
+              [](const PatternNote& a, const PatternNote& b){
+                  return a.beat < b.beat;
+              });
+
+    return pd;
+}
+
+// ---------------------------------------------------------------------------
 // Graph::from_json
 // ---------------------------------------------------------------------------
 
@@ -37,11 +68,36 @@ std::unique_ptr<Graph> Graph::from_json(const std::string& j_str, std::string& e
 
     auto g = std::make_unique<Graph>();
 
-    // --- Nodes ---
     for (auto& jn : j.value("nodes", json::array())) {
+        const std::string type = jn.value("type", "sine");
+        const std::string nid  = jn.value("id",   "");
+
+        // -------------------------------------------------------------------
+        // pattern_source / beat_pattern_source — no plugin, just holds data
+        // -------------------------------------------------------------------
+        if (type == "pattern_source" || type == "beat_pattern_source") {
+            if (!jn.contains("pattern")) {
+                err = "Node '" + nid + "' of type '" + type + "' missing 'pattern' field";
+                return nullptr;
+            }
+            PatternData pd = parse_pattern_data(jn["pattern"]);
+            auto node = std::make_unique<PatternSourceNode>(nid, std::move(pd));
+
+            NodeEntry entry;
+            entry.node  = std::move(node);
+            entry.ports = entry.node->declare_ports();
+
+            g->node_index_[nid] = static_cast<int>(g->nodes_.size());
+            g->nodes_.push_back(std::move(entry));
+            continue;
+        }
+
+        // -------------------------------------------------------------------
+        // All other node types (existing path, unchanged)
+        // -------------------------------------------------------------------
         NodeDesc desc;
-        desc.id          = jn.value("id", "");
-        desc.type        = jn.value("type", "sine");
+        desc.id          = nid;
+        desc.type        = type;
         desc.sf2_path    = jn.value("sf2_path", "");
         desc.lv2_uri     = jn.value("lv2_uri", "");
         desc.sample_path = jn.value("sample_path", "");
@@ -49,8 +105,7 @@ std::unique_ptr<Graph> Graph::from_json(const std::string& j_str, std::string& e
         desc.pitch_lo    = jn.value("pitch_lo", 0);
         desc.pitch_hi    = jn.value("pitch_hi", 127);
         desc.gate_mode   = jn.value("gate_mode", 0);
-        // Collect string params for configure() calls on plugin-backed nodes.
-        // Numeric params go into desc.params (applied via set_param after activate).
+
         std::unordered_map<std::string, std::string> string_params;
         if (jn.contains("params")) {
             for (auto& [k, v] : jn["params"].items()) {
@@ -60,9 +115,6 @@ std::unique_ptr<Graph> Graph::from_json(const std::string& j_str, std::string& e
                     string_params[k] = v.get<std::string>();
             }
         }
-        // Also forward the dedicated NodeDesc string fields as configure() keys
-        // so plugin-backed nodes (e.g. builtin.fluidsynth) receive them even
-        // though make_node() only uses them for the legacy hardcoded node types.
         if (!desc.sf2_path.empty())    string_params.emplace("sf2_path",    desc.sf2_path);
         if (!desc.lv2_uri.empty())     string_params.emplace("lv2_uri",     desc.lv2_uri);
         if (!desc.sample_path.empty()) string_params.emplace("sample_path", desc.sample_path);
@@ -74,8 +126,6 @@ std::unique_ptr<Graph> Graph::from_json(const std::string& j_str, std::string& e
             return nullptr;
         }
 
-        // For plugin-backed nodes, deliver string config params via configure().
-        // This is how sf2_path reaches FluidSynthPlugin before activate() is called.
         if (auto* adapter = dynamic_cast<PluginAdapterNode*>(node.get())) {
             for (auto& [k, v] : string_params)
                 adapter->plugin()->configure(k, v);
@@ -84,13 +134,12 @@ std::unique_ptr<Graph> Graph::from_json(const std::string& j_str, std::string& e
         NodeEntry entry;
         entry.node        = std::move(node);
         entry.ports       = entry.node->declare_ports();
-        entry.init_params = desc.params;   // applied via set_param() after activate()
+        entry.init_params = desc.params;
 
         g->node_index_[desc.id] = static_cast<int>(g->nodes_.size());
         g->nodes_.push_back(std::move(entry));
     }
 
-    // --- Connections ---
     for (auto& jc : j.value("connections", json::array())) {
         g->connections_.push_back({
             jc.value("from_node", ""),
@@ -108,8 +157,6 @@ std::unique_ptr<Graph> Graph::from_json(const std::string& j_str, std::string& e
 // ---------------------------------------------------------------------------
 
 Graph::~Graph() {
-    // Ensure LV2 instances are properly shut down even if deactivate() was
-    // never called explicitly (e.g. when retiring_graph_ unique_ptr is reset).
     deactivate();
 }
 
@@ -122,18 +169,13 @@ bool Graph::activate(float sample_rate, int max_block_size) {
 
     std::string err;
     if (!topo_sort(err)) {
-        // topo_sort failure is non-fatal: fall back to declaration order
-        // (connections may still work for simple linear chains)
         eval_order_.clear();
         for (auto& e : nodes_) eval_order_.push_back(e.node->id);
     }
 
     assign_buffers();
 
-    // Notify plugin adapters which of their control input ports have live
-    // upstream connections.  This lets the adapter prefer the graph value over
-    // the pending default for connected ports, while still falling back to the
-    // default for unconnected ones.
+    // Notify plugin adapters which control ports have live upstream connections.
     for (auto& c : connections_) {
         auto ni = node_index_.find(c.to_node);
         if (ni == node_index_.end()) continue;
@@ -141,17 +183,16 @@ bool Graph::activate(float sample_rate, int max_block_size) {
         if (adapter) adapter->set_control_connected(c.to_port, true);
     }
 
+    // Wire pattern source outputs into downstream plugin pattern input ports.
+    wire_pattern_ports();
+
     for (auto& entry : nodes_) {
         entry.node->activate(sample_rate, max_block_size);
-        // Apply initial params from the JSON NodeDesc (must be after activate
-        // so that LV2 port buffers are allocated and connected)
         for (auto& [k, v] : entry.init_params)
             entry.node->set_param(k, v);
     }
 
     // Wire downstream processor nodes into each TrackSourceNode.
-    // Any node connected from a track_source (regardless of type) receives
-    // note events. This covers synth nodes AND NoteGateNodes.
     for (auto& entry : nodes_) {
         auto* src = dynamic_cast<TrackSourceNode*>(entry.node.get());
         if (!src) continue;
@@ -162,7 +203,6 @@ bool Graph::activate(float sample_rate, int max_block_size) {
             auto ni = node_index_.find(c.to_node);
             if (ni == node_index_.end()) continue;
             Node* dest = nodes_[ni->second].node.get();
-            // Avoid duplicates (multiple ports from same source → same dest)
             bool already = false;
             for (auto* d : downstream) if (d == dest) { already = true; break; }
             if (!already) downstream.push_back(dest);
@@ -180,11 +220,36 @@ void Graph::deactivate() {
 }
 
 // ---------------------------------------------------------------------------
+// Graph::wire_pattern_ports
+// ---------------------------------------------------------------------------
+// Walk all connections.  Whenever a PatternSourceNode's output is connected
+// to a PluginAdapterNode, inject the pattern data pointer via set_pattern().
+// The port name on the pattern source side is conventional ("pattern_out");
+// the port name on the plugin side is whatever the plugin declared.
+
+void Graph::wire_pattern_ports() {
+    for (auto& c : connections_) {
+        auto src_it = node_index_.find(c.from_node);
+        if (src_it == node_index_.end()) continue;
+        Node* src_node = nodes_[src_it->second].node.get();
+
+        const PatternData* pd = src_node->get_pattern_data();
+        if (!pd) continue;
+
+        auto dst_it = node_index_.find(c.to_node);
+        if (dst_it == node_index_.end()) continue;
+        auto* adapter = dynamic_cast<PluginAdapterNode*>(nodes_[dst_it->second].node.get());
+        if (!adapter) continue;
+
+        adapter->set_pattern(c.to_port, pd);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Graph::topo_sort  (Kahn's algorithm)
 // ---------------------------------------------------------------------------
 
 bool Graph::topo_sort(std::string& err) {
-    // Build adjacency: for each connection, from_node must come before to_node
     std::unordered_map<std::string, std::vector<std::string>> adj;
     std::unordered_map<std::string, int> in_degree;
 
@@ -225,12 +290,10 @@ bool Graph::topo_sort(std::string& err) {
 // ---------------------------------------------------------------------------
 
 void Graph::assign_buffers() {
-    // Count total buffers needed: one per output port across all nodes,
-    // plus a "null" buffer at index 0 for unconnected inputs.
-    int buf_count = 1; // 0 = silent/zero buffer
+    int buf_count = 1;
 
     for (auto& entry : nodes_) {
-        int in_count  = 0, out_count = 0;
+        int in_count = 0, out_count = 0;
         for (auto& p : entry.ports) {
             if (p.is_output) out_count++;
             else             in_count++;
@@ -238,21 +301,17 @@ void Graph::assign_buffers() {
         entry.output_buf_indices.assign(out_count, 0);
         entry.input_buf_indices.assign(in_count, 0);
 
-        for (auto& idx : entry.output_buf_indices) {
+        for (auto& idx : entry.output_buf_indices)
             idx = buf_count++;
-        }
     }
 
     pool_.allocate(buf_count, block_size_);
 
-    // Wire input buffers from connections
-    // Build port-name → buffer index map for outputs
-    std::unordered_map<std::string, int> port_buf; // "node_id/port_name" → buf_idx
+    std::unordered_map<std::string, int> port_buf;
 
     for (auto& entry : nodes_) {
         int out_i = 0;
-        for (int pi = 0; pi < (int)entry.ports.size(); ++pi) {
-            auto& p = entry.ports[pi];
+        for (auto& p : entry.ports) {
             if (p.is_output) {
                 std::string key = entry.node->id + "/" + p.name;
                 port_buf[key] = entry.output_buf_indices[out_i++];
@@ -260,14 +319,12 @@ void Graph::assign_buffers() {
         }
     }
 
-    // Assign input buffers from connections
     for (auto& c : connections_) {
         std::string src_key = c.from_node + "/" + c.from_port;
         auto it = port_buf.find(src_key);
         if (it == port_buf.end()) continue;
         int src_buf = it->second;
 
-        // Find to_node entry
         auto ni = node_index_.find(c.to_node);
         if (ni == node_index_.end()) continue;
         auto& to_entry = nodes_[ni->second];
@@ -283,13 +340,11 @@ void Graph::assign_buffers() {
         }
     }
 
-    // Cache mixer output pointers
     auto mixer_it = node_index_.find("mixer");
     if (mixer_it != node_index_.end()) {
         auto& me = nodes_[mixer_it->second];
         int out_i = 0;
-        for (int pi = 0; pi < (int)me.ports.size(); ++pi) {
-            auto& p = me.ports[pi];
+        for (auto& p : me.ports) {
             if (!p.is_output) continue;
             if (p.name == "audio_out_L")
                 output_L_ = pool_.get(me.output_buf_indices[out_i]);
@@ -307,7 +362,6 @@ void Graph::assign_buffers() {
 void Graph::process(const ProcessContext& ctx) {
     if (!activated_) return;
 
-    // Zero the null buffer (index 0)
     std::memset(pool_.get(0), 0, ctx.block_size * sizeof(float));
 
     for (auto& node_id : eval_order_) {
@@ -315,7 +369,6 @@ void Graph::process(const ProcessContext& ctx) {
         if (ni == node_index_.end()) continue;
         auto& entry = nodes_[ni->second];
 
-        // Build PortBuffer vectors for this node
         std::vector<PortBuffer> inputs, outputs;
 
         int in_i = 0, out_i = 0;
@@ -324,17 +377,11 @@ void Graph::process(const ProcessContext& ctx) {
             pb.type = p.type;
             if (p.is_output) {
                 pb.audio = pool_.get(entry.output_buf_indices[out_i++]);
-                // For control outputs, pre-read the pool slot into .control
-                // so nodes that write .control get a clean slate (0.0f).
-                if (p.type == PortType::Control)
-                    pb.control = 0.0f;
+                if (p.type == PortType::Control) pb.control = 0.0f;
                 outputs.push_back(pb);
             } else {
                 int buf_idx = entry.input_buf_indices[in_i++];
                 pb.audio = pool_.get(buf_idx);
-                // For control inputs, load the upstream value from pool[0].
-                // The upstream node's process() wrote its .control value back
-                // into the pool buffer below.
                 if (p.type == PortType::Control)
                     pb.control = pool_.get(buf_idx)[0];
                 inputs.push_back(pb);
@@ -343,8 +390,6 @@ void Graph::process(const ProcessContext& ctx) {
 
         entry.node->process(ctx, inputs, outputs);
 
-        // Write control output values back into their pool buffers so that
-        // downstream nodes can read them via pool[buf_idx][0] above.
         out_i = 0;
         for (auto& p : entry.ports) {
             if (!p.is_output) continue;
@@ -353,20 +398,15 @@ void Graph::process(const ProcessContext& ctx) {
             out_i++;
         }
 
-        // --- Route event outputs from PluginAdapterNodes ---
-        // If this node produced events on output ports, forward them to
-        // connected downstream nodes via note_on/off/etc.
         auto* adapter = dynamic_cast<PluginAdapterNode*>(entry.node.get());
         if (adapter) {
             for (auto& [port_id, events] : adapter->event_outputs()) {
                 if (events.empty()) continue;
-                // Find all connections from this node's event output port
                 for (auto& c : connections_) {
                     if (c.from_node != node_id || c.from_port != port_id) continue;
                     auto dest_it = node_index_.find(c.to_node);
                     if (dest_it == node_index_.end()) continue;
                     Node* dest = nodes_[dest_it->second].node.get();
-                    // Deliver events via the MIDI convenience interface
                     for (auto& ev : events) {
                         uint8_t type = ev.status & 0xF0;
                         int ch = ev.channel;
@@ -397,9 +437,8 @@ void Graph::set_param(const std::string& nid, const std::string& param, float va
 void Graph::notify_transport_stop() {
     for (auto& entry : nodes_) {
         auto* adapter = dynamic_cast<PluginAdapterNode*>(entry.node.get());
-        if (adapter && adapter->plugin()) {
+        if (adapter && adapter->plugin())
             adapter->plugin()->on_transport_stop();
-        }
     }
 }
 

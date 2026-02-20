@@ -3,6 +3,7 @@
 #include "nlohmann/json.hpp"
 #include <algorithm>
 #include <stdexcept>
+#include <map>
 
 using json = nlohmann::json;
 
@@ -70,6 +71,35 @@ std::unique_ptr<Schedule> Schedule::from_json(const std::string& j_str, std::str
         });
 
     return sched;
+}
+
+// ---------------------------------------------------------------------------
+// Schedule::get_setup_events_before
+// ---------------------------------------------------------------------------
+
+std::vector<SchedEvent> Schedule::get_setup_events_before(double beat) const {
+    std::vector<SchedEvent> setup;
+    
+    // Track the most recent setup event for each (node_id, channel, type) tuple
+    std::map<std::tuple<std::string, uint8_t, EventType>, SchedEvent> latest;
+    
+    for (const auto& e : events_) {
+        // Include events up to and including the specified beat
+        if (e.beat > beat) break;
+        
+        if (e.type == EventType::Program || 
+            e.type == EventType::Volume || 
+            e.type == EventType::Bend) {
+            auto key = std::make_tuple(e.node_id, e.channel, e.type);
+            latest[key] = e;
+        }
+    }
+    
+    for (const auto& [key, evt] : latest) {
+        setup.push_back(evt);
+    }
+    
+    return setup;
 }
 
 // ---------------------------------------------------------------------------
@@ -151,4 +181,50 @@ void Dispatcher::reindex(double beat) {
         if (evts[i].beat >= beat) { idx_ = i; return; }
     }
     idx_ = evts.size();
+}
+
+void Dispatcher::apply_setup_events(const std::vector<SchedEvent>& events, Graph* graph, double current_beat) {
+    if (!graph) return;
+    
+    for (const auto& e : events) {
+        Node* node = graph->find_node(e.node_id);
+        if (!node) continue;
+        
+        switch (e.type) {
+            case EventType::Program:
+                node->program_change(e.channel, e.velocity /*bank*/, e.pitch /*prog*/);
+                break;
+            case EventType::Volume:
+                node->channel_volume(e.channel, e.pitch);
+                break;
+            case EventType::Bend:
+                node->pitch_bend(e.channel, e.pitch | (e.velocity << 7));
+                break;
+            default:
+                break;
+        }
+    }
+    
+    // After applying setup events, advance the dispatcher index past all setup
+    // events at the current beat position so dispatch() doesn't re-fire them.
+    // This is critical when starting playback from beat 0 where setup events live.
+    if (!current_) return;
+    
+    const auto& evts = current_->events();
+    
+    // Skip past all setup-type events at the current beat
+    while (idx_ < evts.size()) {
+        const auto& e = evts[idx_];
+        if (e.beat > current_beat) break;
+        if (e.beat == current_beat && 
+            (e.type == EventType::Program || 
+             e.type == EventType::Volume || 
+             e.type == EventType::Bend)) {
+            idx_++;
+        } else if (e.beat < current_beat) {
+            idx_++;
+        } else {
+            break;
+        }
+    }
 }

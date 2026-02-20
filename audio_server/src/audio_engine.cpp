@@ -187,6 +187,9 @@ std::string AudioEngine::set_graph(const std::string& graph_json) {
         retiring_graph_ = std::move(owned_graph_);
         owned_graph_    = std::move(g);
         active_graph_.store(owned_graph_.get(), std::memory_order_release);
+        
+        // Signal the audio thread to restore setup events at the next block
+        setup_restore_pending_.store(true, std::memory_order_release);
 
         // Wait for the audio thread to complete at least one block with the
         // new graph.  The stream may not be open yet (first set_graph call),
@@ -231,6 +234,7 @@ std::string AudioEngine::set_schedule(const std::string& schedule_json) {
 void AudioEngine::play() {
     drain_transport_callbacks();  // flush any pending stop from previous run
     dispatcher_.check_pending();  // make sure latest schedule is active
+    setup_restore_pending_.store(true, std::memory_order_release);  // restore channel state
     send_cmd(Cmd::Play);
 }
 
@@ -512,9 +516,27 @@ void AudioEngine::process_block(float* L, float* R, int frames) {
     }
 
     // Check for pending schedule swap
-    dispatcher_.check_pending();
+    bool schedule_swapped = dispatcher_.check_pending();
 
     Graph* graph = active_graph_.load(std::memory_order_acquire);
+
+    // Restore channel setup state if:
+    // 1. A schedule was just swapped during playback, OR
+    // 2. setup_restore_pending_ is set (graph swap or play command)
+    bool setup_needed = setup_restore_pending_.exchange(false, std::memory_order_acq_rel);
+    if (schedule_swapped) {
+        bool now_playing = playing_.load(std::memory_order_relaxed);
+        if (now_playing) setup_needed = true;
+    }
+    
+    if (setup_needed && graph) {
+        const Schedule* sched = dispatcher_.current_schedule();
+        if (sched) {
+            double beat = current_beat_.load(std::memory_order_relaxed);
+            auto setup_events = sched->get_setup_events_before(beat);
+            dispatcher_.apply_setup_events(setup_events, graph, beat);
+        }
+    }
 
     bool now_playing = playing_.load(std::memory_order_relaxed);
 

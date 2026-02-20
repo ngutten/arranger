@@ -19,25 +19,19 @@ PluginAdapterNode::PluginAdapterNode(const std::string& node_id,
     build_port_mapping();
 }
 
-PluginAdapterNode::~PluginAdapterNode() {
-    // Plugin is destroyed via unique_ptr.
-}
+PluginAdapterNode::~PluginAdapterNode() = default;
 
 // ---------------------------------------------------------------------------
 // Port mapping
 // ---------------------------------------------------------------------------
-// Translates the plugin's PortDescriptor list into:
-//   1. A flat vector of Node::PortDecl (what the graph engine sees)
-//   2. Mapping tables so process() can wire PluginBuffers from PortBuffer arrays
 
 void PluginAdapterNode::build_port_mapping() {
     audio_map_.clear();
     control_map_.clear();
     event_map_.clear();
+    pattern_map_.clear();
 
-    // We'll accumulate PortDecls in declaration order, tracking input/output
-    // indices separately (the graph engine separates them).
-    int decl_index = 0;  // running index into the PortDecl vector
+    int decl_index = 0;
 
     for (auto& pd : desc_.ports) {
         bool is_out = (pd.role == PortRole::Output ||
@@ -70,8 +64,6 @@ void PluginAdapterNode::build_port_mapping() {
             m.is_output       = is_out;
             m.decl_index      = decl_index++;
             m.pending_value->store(pd.default_value, std::memory_order_relaxed);
-            // For input ports, treat the default_value as a pending override so
-            // that unconnected ports read their declared default rather than 0.
             m.has_pending = !is_out;
             control_map_.push_back(std::move(m));
             break;
@@ -81,9 +73,18 @@ void PluginAdapterNode::build_port_mapping() {
             m.plugin_port_id = pd.id;
             m.is_output      = is_out;
             event_map_.push_back(std::move(m));
-            // Event ports do NOT create PortDecls — they use the Node event
-            // virtual methods for input, and the engine reads event_outputs()
-            // after process() for output.
+            // No PortDecl — handled via note_on/off virtuals (in) or
+            // event_outputs() (out).
+            break;
+        }
+        case PluginPortType::Pattern: {
+            PatternPortMapping m;
+            m.plugin_port_id = pd.id;
+            m.is_output      = is_out;
+            m.data           = nullptr;
+            pattern_map_.push_back(std::move(m));
+            // No PortDecl — wired by Graph::activate() via set_pattern().
+            // Pattern ports are never in the PortBuffer flat arrays.
             break;
         }
         }
@@ -93,26 +94,26 @@ void PluginAdapterNode::build_port_mapping() {
     buffers_.audio.entries.clear();
     buffers_.control.entries.clear();
     buffers_.events.entries.clear();
+    buffers_.patterns.entries.clear();
 
     for (auto& m : audio_map_)
         buffers_.audio.entries.push_back({m.plugin_port_id, {}});
     for (auto& m : control_map_)
         buffers_.control.entries.push_back({m.plugin_port_id, {}});
-    for (auto& m : event_map_) {
+    for (auto& m : event_map_)
         buffers_.events.entries.push_back({m.plugin_port_id, {}});
-    }
+    for (auto& m : pattern_map_)
+        buffers_.patterns.entries.push_back({m.plugin_port_id, {}});
 
-    // Pre-allocate event output storage
     event_output_storage_.clear();
     for (auto& m : event_map_) {
-        if (m.is_output) {
+        if (m.is_output)
             event_output_storage_.push_back({m.plugin_port_id, {}});
-        }
     }
 }
 
 // ---------------------------------------------------------------------------
-// declare_ports — expose to graph engine
+// declare_ports
 // ---------------------------------------------------------------------------
 
 std::vector<Node::PortDecl> PluginAdapterNode::declare_ports() const {
@@ -124,33 +125,20 @@ std::vector<Node::PortDecl> PluginAdapterNode::declare_ports() const {
 
         switch (pd.type) {
         case PluginPortType::AudioMono:
-            decls.push_back({
-                pd.id, PortType::AudioMono, is_out,
-                pd.default_value, pd.min_value, pd.max_value
-            });
+            decls.push_back({pd.id, PortType::AudioMono, is_out,
+                             pd.default_value, pd.min_value, pd.max_value});
             break;
-
         case PluginPortType::AudioStereo:
-            // Expand to two mono ports: id_L and id_R
-            decls.push_back({
-                pd.id + "_L", PortType::AudioMono, is_out
-            });
-            decls.push_back({
-                pd.id + "_R", PortType::AudioMono, is_out
-            });
+            decls.push_back({pd.id + "_L", PortType::AudioMono, is_out});
+            decls.push_back({pd.id + "_R", PortType::AudioMono, is_out});
             break;
-
         case PluginPortType::Control:
-            decls.push_back({
-                pd.id, PortType::Control, is_out,
-                pd.default_value, pd.min_value, pd.max_value
-            });
+            decls.push_back({pd.id, PortType::Control, is_out,
+                             pd.default_value, pd.min_value, pd.max_value});
             break;
-
         case PluginPortType::Event:
-            // Event ports don't create graph-level PortDecls.
-            // Input events come via note_on/off virtuals.
-            // Output events are read from event_outputs() by the engine.
+        case PluginPortType::Pattern:
+            // Neither creates a PortDecl in the flat buffer arrays.
             break;
         }
     }
@@ -174,7 +162,29 @@ void PluginAdapterNode::deactivate() {
 }
 
 // ---------------------------------------------------------------------------
-// process — the hot path
+// set_pattern — called by Graph::activate() to inject pattern data
+// ---------------------------------------------------------------------------
+
+void PluginAdapterNode::set_pattern(const std::string& port_id, const PatternData* data) {
+    for (auto& m : pattern_map_) {
+        if (m.plugin_port_id == port_id && !m.is_output) {
+            m.data = data;
+            // Also update the pre-allocated buffer entry so process() sees it.
+            for (auto& entry : buffers_.patterns.entries) {
+                if (entry.first == port_id) {
+                    entry.second.pattern = data;
+                    break;
+                }
+            }
+            return;
+        }
+    }
+    AS_LOG("plugin", "PluginAdapterNode '%s': unknown pattern port '%s'",
+           id.c_str(), port_id.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// process
 // ---------------------------------------------------------------------------
 
 void PluginAdapterNode::process(
@@ -182,7 +192,6 @@ void PluginAdapterNode::process(
     const std::vector<PortBuffer>& inputs,
     std::vector<PortBuffer>&       outputs)
 {
-    // Translate ProcessContext
     PluginProcessContext pctx;
     pctx.block_size        = ctx.block_size;
     pctx.sample_rate       = ctx.sample_rate;
@@ -193,10 +202,6 @@ void PluginAdapterNode::process(
     pctx.transport_started = ctx.transport_started;
     pctx.transport_stopped = ctx.transport_stopped;
 
-    // --- Wire buffers ---
-    // We must walk the descriptor in the same order as declare_ports()
-    // because the graph engine builds inputs[] and outputs[] by splitting
-    // the PortDecl list into is_output=false and is_output=true sequences.
     int in_i = 0, out_i = 0;
     int audio_map_i = 0, ctrl_map_i = 0;
 
@@ -238,14 +243,9 @@ void PluginAdapterNode::process(
             auto& cb = buffers_.control.entries[ctrl_map_i].second;
             if (is_out) {
                 cb.value = 0.0f;
-                out_i++;  // reserve the output slot
+                out_i++;
             } else {
-                // Read from graph connection
                 cb.value = inputs[in_i++].control;
-                // Apply pending default/set_param value only when there is no
-                // live upstream connection.  If is_connected is true, the graph
-                // value wins — this is what lets an LFO (or any control source)
-                // drive a parameter that also has a UI-set default.
                 if (control_map_[ctrl_map_i].has_pending &&
                     !control_map_[ctrl_map_i].is_connected) {
                     cb.value = control_map_[ctrl_map_i].pending_value->load(
@@ -256,12 +256,13 @@ void PluginAdapterNode::process(
             break;
         }
         case PluginPortType::Event:
-            // Event ports don't have PortDecl slots
+        case PluginPortType::Pattern:
+            // No PortDecl slots; buffers pre-filled below / by set_pattern().
             break;
         }
     }
 
-    // --- Wire event buffers ---
+    // Wire event buffers
     int evt_out_i = 0;
     for (size_t i = 0; i < event_map_.size(); ++i) {
         auto& eb = buffers_.events.entries[i].second;
@@ -276,10 +277,12 @@ void PluginAdapterNode::process(
         }
     }
 
-    // --- Call plugin process ---
+    // Pattern buffers are updated in set_pattern() at activate time and
+    // remain stable; nothing to do per-block.
+
     plugin_->process(pctx, buffers_);
 
-    // --- Write back control output values ---
+    // Write back control outputs
     out_i = 0;
     ctrl_map_i = 0;
     for (auto& pd : desc_.ports) {
@@ -288,14 +291,9 @@ void PluginAdapterNode::process(
         if (!is_out) continue;
 
         switch (pd.type) {
-        case PluginPortType::AudioMono:
-            out_i++;
-            break;
-        case PluginPortType::AudioStereo:
-            out_i += 2;
-            break;
+        case PluginPortType::AudioMono:   out_i++;   break;
+        case PluginPortType::AudioStereo: out_i += 2; break;
         case PluginPortType::Control: {
-            // Find which control_map_ entry this is
             for (size_t ci = 0; ci < control_map_.size(); ++ci) {
                 if (control_map_[ci].plugin_port_id == pd.id) {
                     outputs[out_i].control =
@@ -307,11 +305,11 @@ void PluginAdapterNode::process(
             break;
         }
         case PluginPortType::Event:
+        case PluginPortType::Pattern:
             break;
         }
     }
 
-    // Clear input event accumulator for next block
     event_input_accum_.clear();
 }
 
@@ -341,23 +339,17 @@ void PluginAdapterNode::set_param(const std::string& name, float value) {
 }
 
 // ---------------------------------------------------------------------------
-// MIDI events (from TrackSourceNode fan-out)
+// MIDI events
 // ---------------------------------------------------------------------------
-// These are called on the audio thread before process().
-// We accumulate them and make them available in the EventPortBuffer.
-// We also forward them to the plugin's convenience virtuals.
 
 void PluginAdapterNode::note_on(int channel, int pitch, int velocity) {
-    // Accumulate for EventPortBuffer
     MidiEvent ev;
-    ev.frame   = 0;  // start of block (we don't have sub-block timing here)
+    ev.frame   = 0;
     ev.status  = 0x90 | (channel & 0x0F);
     ev.data1   = static_cast<uint8_t>(pitch);
     ev.data2   = static_cast<uint8_t>(velocity);
     ev.channel = static_cast<uint8_t>(channel);
     event_input_accum_.push_back(ev);
-
-    // Also call the convenience method
     plugin_->note_on(channel, pitch, velocity);
 }
 
@@ -369,7 +361,6 @@ void PluginAdapterNode::note_off(int channel, int pitch) {
     ev.data2   = 0;
     ev.channel = static_cast<uint8_t>(channel);
     event_input_accum_.push_back(ev);
-
     plugin_->note_off(channel, pitch);
 }
 
@@ -389,7 +380,6 @@ void PluginAdapterNode::pitch_bend(int channel, int value) {
     ev.data2   = static_cast<uint8_t>((value >> 7) & 0x7F);
     ev.channel = static_cast<uint8_t>(channel);
     event_input_accum_.push_back(ev);
-
     plugin_->pitch_bend(channel, value);
 }
 
@@ -398,7 +388,6 @@ void PluginAdapterNode::channel_volume(int channel, int volume) {
 }
 
 void PluginAdapterNode::push_control(double beat, float normalized_value) {
-    // Forward to the first non-output control port
     for (auto& m : control_map_) {
         if (!m.is_output) {
             m.pending_value->store(normalized_value, std::memory_order_relaxed);

@@ -1,11 +1,6 @@
 #pragma once
 // graph.h
 // Signal graph: nodes, ports, connections, and the evaluation order.
-//
-// The graph owns all nodes. It is rebuilt from a JSON GraphDesc on the main
-// thread, then swapped atomically into the audio engine (same pattern as the
-// Python engine's _pending_schedule). The audio thread never mutates the
-// graph; it only reads it during process().
 
 #include <string>
 #include <vector>
@@ -14,8 +9,8 @@
 #include <functional>
 #include <atomic>
 #include <optional>
+#include "plugin_api.h"   // PatternData, PatternNote
 
-// PortAudio buffer size upper bound (for stack-allocating scratch buffers)
 constexpr int MAX_BLOCK_SIZE = 4096;
 
 // ---------------------------------------------------------------------------
@@ -23,18 +18,15 @@ constexpr int MAX_BLOCK_SIZE = 4096;
 // ---------------------------------------------------------------------------
 
 enum class PortType {
-    AudioMono,   // float[block_size] — one channel of audio
-    Control,     // single float, updated at control rate (~every block)
-    Midi,        // structured MIDI events within a block (future)
+    AudioMono,
+    Control,
+    Midi,
 };
 
-// A buffer that flows between nodes on the audio thread.
-// For audio ports: pointer into a pre-allocated pool (no heap allocation in hot path).
-// For control ports: just a float.
 struct PortBuffer {
     PortType type = PortType::AudioMono;
-    float*   audio = nullptr;   // non-owning pointer, valid for one process() call
-    float    control = 0.0f;    // used when type == Control
+    float*   audio = nullptr;
+    float    control = 0.0f;
 };
 
 // ---------------------------------------------------------------------------
@@ -45,20 +37,18 @@ struct ProcessContext {
     int   block_size;
     float sample_rate;
     float bpm;
-    double beat_position;  // beat at start of this block
+    double beat_position;
     double beats_per_sample;
 
-    // Transport state — set by AudioEngine::process_block().
     bool  is_playing        = false;
-    bool  transport_started = false;  // true on first block of a play
-    bool  transport_stopped = false;  // true on first block after stop
+    bool  transport_started = false;
+    bool  transport_stopped = false;
 };
 
 class Node {
 public:
     std::string id;
 
-    // Ports declared by the node
     struct PortDecl {
         std::string name;
         PortType    type;
@@ -70,37 +60,60 @@ public:
 
     virtual ~Node() = default;
 
-    // Called once after construction to declare ports.
     virtual std::vector<PortDecl> declare_ports() const = 0;
-
-    // Called once when the graph is activated (sample_rate is now known).
     virtual void activate(float sample_rate, int max_block_size) {}
-
-    // Called once when the graph is deactivated.
     virtual void deactivate() {}
 
-    // Audio thread: process one block.
-    // inputs/outputs are indexed by the order returned from declare_ports().
     virtual void process(
         const ProcessContext& ctx,
         const std::vector<PortBuffer>& inputs,
         std::vector<PortBuffer>&       outputs
     ) = 0;
 
-    // Main thread: set a named parameter (thread-safe via atomic where needed).
     virtual void set_param(const std::string& name, float value) {}
 
-    // Note events — called from audio thread before process().
     virtual void note_on (int channel, int pitch, int velocity) {}
     virtual void note_off(int channel, int pitch) {}
     virtual void program_change(int channel, int bank, int program) {}
-    virtual void pitch_bend(int channel, int value) {}     // 14-bit, 8192=center
+    virtual void pitch_bend(int channel, int value) {}
     virtual void channel_volume(int channel, int volume) {}
     virtual void all_notes_off(int channel = -1) {}
-
-    // Control event — sets a queued value that will be applied at process() time.
-    // normalized_value is 0..1; the node maps it to its internal range.
     virtual void push_control(double beat, float normalized_value) {}
+
+    /// Return the pattern data stored in this node, if it is a pattern source.
+    /// Returns nullptr for all other node types.
+    virtual const PatternData* get_pattern_data() const { return nullptr; }
+};
+
+// ---------------------------------------------------------------------------
+// PatternSourceNode
+// ---------------------------------------------------------------------------
+// A source node that holds a complete PatternData snapshot.  It has no
+// audio/control ports visible to the graph engine; its data is injected into
+// downstream PluginAdapterNodes by Graph::activate() after the normal
+// buffer-assignment pass.
+//
+// The pattern data is immutable once the node is created; it lives for the
+// lifetime of the graph (which is fine — graphs are rebuilt on any change).
+
+class PatternSourceNode final : public Node {
+public:
+    explicit PatternSourceNode(const std::string& node_id, PatternData data)
+        : data_(std::move(data))
+    {
+        id = node_id;
+    }
+
+    std::vector<PortDecl> declare_ports() const override { return {}; }
+
+    void process(const ProcessContext&,
+                 const std::vector<PortBuffer>&,
+                 std::vector<PortBuffer>&) override {}
+
+    const PatternData* get_pattern_data() const override { return &data_; }
+
+private:
+    PatternData data_;
 };
 
 // ---------------------------------------------------------------------------
@@ -114,12 +127,10 @@ struct Connection {
     std::string to_port;
 };
 
-// Scratch buffer pool — pre-allocated on graph activation, handed out to ports.
-// One pool per graph instance; audio thread uses it exclusively.
 class BufferPool {
 public:
     void allocate(int num_buffers, int block_size);
-    float* get(int index);  // panics if index out of range
+    float* get(int index);
     int    count() const { return static_cast<int>(buffers_.size()); }
 private:
     std::vector<std::vector<float>> buffers_;
@@ -128,53 +139,39 @@ private:
 class Graph {
 public:
     Graph()  = default;
-    ~Graph();   // deactivates all nodes
+    ~Graph();
 
-    // Build from JSON (runs on main thread). Returns nullptr on error.
     static std::unique_ptr<Graph> from_json(
         const std::string& json,
         std::string& error_out
     );
 
-    // Activate: allocate buffers, call node->activate(), compute eval order.
     bool activate(float sample_rate, int max_block_size);
     void deactivate();
 
-    // Audio thread: process one block.
-    // MIDI events for this block should be injected via node->note_on() etc.
-    // before calling process().
     void process(const ProcessContext& ctx);
 
-    // After process(), read the mixer output here.
-    // Returns nullptr if graph has no mixer or is not activated.
     const float* output_L() const;
     const float* output_R() const;
 
-    // Main thread: parameter updates (atomic).
     void set_param(const std::string& node_id, const std::string& param, float value);
-
-    // Main thread: call on_transport_stop() on every PluginAdapterNode in
-    // the graph.  Safe to do file I/O, memory allocation, etc.
     void notify_transport_stop();
 
-    // Look up a node by id (main thread or audio thread, read-only).
     Node* find_node(const std::string& id) const;
 
-    // Evaluation order (computed by activate()).
     const std::vector<std::string>& eval_order() const { return eval_order_; }
 
 private:
     struct NodeEntry {
         std::unique_ptr<Node>        node;
         std::vector<Node::PortDecl>  ports;
-        std::vector<int>             input_buf_indices;   // index into pool
+        std::vector<int>             input_buf_indices;
         std::vector<int>             output_buf_indices;
-        // Params from the JSON NodeDesc, applied after activate()
         std::unordered_map<std::string, float> init_params;
     };
 
     std::vector<NodeEntry>                        nodes_;
-    std::unordered_map<std::string, int>          node_index_;  // id → nodes_ index
+    std::unordered_map<std::string, int>          node_index_;
     std::vector<Connection>                       connections_;
     std::vector<std::string>                      eval_order_;
 
@@ -184,9 +181,10 @@ private:
     int                                           block_size_ = 0;
     bool                                          activated_ = false;
 
-    // Build topological eval order from connections_.
     bool topo_sort(std::string& error_out);
-
-    // Wire up buffer indices from pool after topo sort.
     void assign_buffers();
+
+    /// After assign_buffers(), wire pattern source outputs into pattern
+    /// input ports on downstream PluginAdapterNodes.
+    void wire_pattern_ports();
 };

@@ -25,6 +25,17 @@ def load_project(state, path: str, sf2_loader=None):
         state.load_json(f.read())
     state._project_path = path
 
+    # Regenerate _pattern_data for any pattern source nodes in the signal graph.
+    # _pattern_data is intentionally not persisted (it could be stale after editing),
+    # so we rebuild it from _pattern_id against the freshly loaded state.
+    if state.signal_graph is not None:
+        from .graph_model import update_pattern_source_node
+        for node in state.signal_graph.nodes:
+            if node.node_type in ("pattern_source", "beat_pattern_source"):
+                pat_id = node.params.get("_pattern_id")
+                if pat_id is not None:
+                    update_pattern_source_node(node, pat_id, state)
+
     if sf2_loader and hasattr(state, '_sf2_path_hint') and state._sf2_path_hint:
         try:
             sf2_loader(state._sf2_path_hint)

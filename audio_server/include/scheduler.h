@@ -52,6 +52,10 @@ public:
 
     double total_length_beats() const { return total_length_; }
 
+    // Extract all setup-type events (program, volume, bend) up to a given beat.
+    // Used to restore channel state after a graph swap.
+    std::vector<SchedEvent> get_setup_events_before(double beat) const;
+
 private:
     std::vector<SchedEvent> events_;
     double total_length_ = 0.0;
@@ -81,6 +85,12 @@ public:
 
     // Total arrangement length from current schedule (0 if no schedule).
     double arrangement_length() const;
+
+    // Apply setup events immediately (called after graph swap during playback)
+    void apply_setup_events(const std::vector<SchedEvent>& events, Graph* graph, double current_beat);
+
+    // Access current schedule (for extracting setup events)
+    const Schedule* current_schedule() const { return current_; }
 
 private:
     std::atomic<Schedule*>   pending_  { nullptr };

@@ -156,6 +156,7 @@ class BindingEngine:
     def mark_dirty(self):
         if self.state.signal_graph is not None:
             self.state.signal_graph.sync_track_sources(self.state, self._sf2_path)
+            self.state.signal_graph.sync_pattern_sources(self.state)
         self._send(self._graph_payload())
         self._graph_loaded    = True
         self._graph_track_ids = self._current_track_ids()
@@ -163,9 +164,6 @@ class BindingEngine:
         
         # Adjust all programming beats to just after the current beat to make sure they re-fire
         events = _build_server_schedule(self.state)
-        for e in events:
-            if e["beat"] == -1:
-                e["beat"] = self._current_beat+1
         
         self._send({"cmd": "set_schedule",
                     "events": events})

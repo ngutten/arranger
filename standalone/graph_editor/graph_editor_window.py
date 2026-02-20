@@ -123,6 +123,7 @@ class GraphEditorWindow(QWidget):
         self._canvas.node_right_clicked.connect(self._on_node_right_click)
         self._canvas.param_changed.connect(self._on_param_changed_fast)
         self._canvas._server_engine = self.server_engine
+        self._canvas._state = self.state
 
         # Toolbar
         toolbar = QHBoxLayout()
@@ -187,6 +188,11 @@ class GraphEditorWindow(QWidget):
         src_menu.addSeparator()
         src_menu.addAction("External MIDI Input").triggered.connect(
             lambda: self._add_node("midi_source"))
+        src_menu.addSeparator()
+        src_menu.addAction("Pattern Source").triggered.connect(
+            lambda: self._add_node("pattern_source"))
+        src_menu.addAction("Beat Pattern Source").triggered.connect(
+            lambda: self._add_node("beat_pattern_source"))
 
         # Synthesizers
         synth_menu = menu.addMenu("Synthesizers")
@@ -290,17 +296,19 @@ class GraphEditorWindow(QWidget):
         nid = str(uuid.uuid4())
 
         display_names = {
-            "fluidsynth":     "FluidSynth",
-            "sine":           "Sine",
-            "sampler":        "Sampler",
-            "lv2":            "LV2",
-            "mixer":          "Mixer",
-            "output":         "Output",
-            "control_source": "Control Source",
-            "split_stereo":   "Split Stereo",
-            "merge_stereo":   "Merge Stereo",
-            "note_gate":      "Note Gate",
-            "midi_source":    "External MIDI In",
+            "fluidsynth":          "FluidSynth",
+            "sine":                "Sine",
+            "sampler":             "Sampler",
+            "lv2":                 "LV2",
+            "mixer":               "Mixer",
+            "output":              "Output",
+            "control_source":      "Control Source",
+            "split_stereo":        "Split Stereo",
+            "merge_stereo":        "Merge Stereo",
+            "note_gate":           "Note Gate",
+            "midi_source":         "External MIDI In",
+            "pattern_source":      "Pattern Source",
+            "beat_pattern_source": "Beat Pattern Source",
         }
 
         params = {}
@@ -321,6 +329,10 @@ class GraphEditorWindow(QWidget):
                 device = getattr(self.server_engine.settings, 'midi_input_device', '') or ''
             params["midi_device"]  = device
             params["midi_channel"] = 0
+        if node_type == "pattern_source" and self.state.patterns:
+            params["_pattern_id"] = self.state.patterns[0].id
+        if node_type == "beat_pattern_source" and self.state.beat_patterns:
+            params["_pattern_id"] = self.state.beat_patterns[0].id
 
         node = GraphNode(
             node_type=node_type,
@@ -329,6 +341,15 @@ class GraphEditorWindow(QWidget):
             x=cx.x() - 90, y=cx.y() - 50,
             params=params,
         )
+
+        # Populate _pattern_data immediately so the first graph push includes it
+        # (the settings widget also does this when the dropdown fires, but that
+        # races with the first _on_graph_changed_canvas call below).
+        if node_type in ("pattern_source", "beat_pattern_source"):
+            from .graph_model import update_pattern_source_node
+            pat_id = params.get("_pattern_id")
+            if pat_id is not None:
+                update_pattern_source_node(node, pat_id, self.state)
         self.model.add_node(node)
         self._canvas._create_settings_widget(node)
         self._canvas.selected_nodes = {nid}
@@ -525,6 +546,14 @@ class GraphEditorWindow(QWidget):
             new_model = GraphModel.from_dict(d)
             # Ensure track sources are in sync with current state
             new_model.sync_track_sources(self.state)
+            # Regenerate _pattern_data for any pattern source nodes — it's not
+            # persisted in the graph JSON, so rebuild from _pattern_id + live state.
+            from .graph_model import update_pattern_source_node
+            for node in new_model.nodes:
+                if node.node_type in ("pattern_source", "beat_pattern_source"):
+                    pat_id = node.params.get("_pattern_id")
+                    if pat_id is not None:
+                        update_pattern_source_node(node, pat_id, self.state)
             self.model.nodes       = new_model.nodes
             self.model.connections = new_model.connections
             self._canvas.set_model(self.model)

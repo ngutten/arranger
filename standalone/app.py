@@ -962,7 +962,7 @@ class App(QMainWindow):
 
         play_ops.sync_loop_to_engine(self.state, self.engine)
 
-        self.engine.mark_dirty()
+        #self.engine.mark_dirty() # This is redundant - self.engine.play() already does mark_dirty()
         self.engine.seek(0.0)
         self.engine.play()
 

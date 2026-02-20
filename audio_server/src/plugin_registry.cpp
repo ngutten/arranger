@@ -37,6 +37,15 @@ const EventPortBuffer* PluginBuffers::EventMap::get(const std::string& id) const
     return nullptr;
 }
 
+PatternPortBuffer* PluginBuffers::PatternMap::get(const std::string& id) {
+    for (auto& [k, v] : entries) if (k == id) return &v;
+    return nullptr;
+}
+const PatternPortBuffer* PluginBuffers::PatternMap::get(const std::string& id) const {
+    for (auto& [k, v] : entries) if (k == id) return &v;
+    return nullptr;
+}
+
 // ---------------------------------------------------------------------------
 // Registry singleton
 // ---------------------------------------------------------------------------

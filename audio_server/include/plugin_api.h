@@ -42,6 +42,10 @@ enum class PluginPortType {
                     ///< Plugin sees left/right pointers in PluginBuffers.
     Event,          ///< MIDI-style event stream (note on/off, CC, pitch bend, etc.)
     Control,        ///< Single float per block (control rate).
+    Pattern,        ///< A complete pattern snapshot delivered each block.
+                    ///< Contains beat-relative note events with channel/program info.
+                    ///< Populated once at graph activation from a PatternSourceNode;
+                    ///< contents are stable (no per-block reallocation on audio thread).
 };
 
 /// How the frontend should present a Control port.
@@ -76,7 +80,7 @@ struct PortDescriptor {
     PluginPortType type;
     PortRole      role;
 
-    // --- Control-specific metadata (ignored for Audio/Event ports) ---
+    // --- Control-specific metadata (ignored for Audio/Event/Pattern ports) ---
 
     ControlHint   hint          = ControlHint::Continuous;
     float         default_value = 0.0f;
@@ -85,17 +89,13 @@ struct PortDescriptor {
     float         step          = 0.0f;   ///< 0 = continuous; >0 = stepped
 
     /// For Categorical / Radio hints: display label for each integer value.
-    /// Index i corresponds to control value i.
     std::vector<std::string> choices;
 
     /// For GraphEditor hint: identifies the editor type.
-    /// Convention strings: "eq_curve", "adsr_envelope", "breakpoint", etc.
     std::string   graph_type;
 
     /// Whether this port should show as a connectable port in the graph editor
-    /// by default.  Set to false to start hidden; the user can always reveal via
-    /// right-click.  The UI also auto-hides Categorical/Radio/Toggle ports regardless
-    /// of this flag — this provides explicit opt-out for other hint types.
+    /// by default.
     bool          show_port_default = true;
 };
 
@@ -103,41 +103,35 @@ struct PortDescriptor {
 // Non-port configuration parameters
 // ==========================================================================
 
-/// Types for configuration parameters that don't flow through the signal graph.
-/// These are presented via GUI elements (file pickers, text fields, etc.).
 enum class ConfigType {
-    String,         ///< Free-form text
-    FilePath,       ///< File picker dialog
-    Integer,        ///< Integer spinner
-    Float,          ///< Float field
-    Bool,           ///< Checkbox
-    Categorical,    ///< Dropdown from choices list
+    String,
+    FilePath,
+    Integer,
+    Float,
+    Bool,
+    Categorical,
 };
 
-/// A configuration parameter (not a signal-graph port).
 struct ConfigParam {
     std::string   id;
     std::string   display_name;
     std::string   doc;
     ConfigType    type;
-    std::string   default_value;   ///< Always string-encoded.
-    std::string   file_filter;     ///< For FilePath: e.g. "SF2 Files (*.sf2);;All (*)"
-    bool          save_mode = false; ///< For FilePath: true = getSaveFileName (output),
-                                     ///<               false = getOpenFileName (input, default)
-    std::vector<std::string> choices;  ///< For Categorical
+    std::string   default_value;
+    std::string   file_filter;
+    bool          save_mode = false;
+    std::vector<std::string> choices;
 };
 
 // ==========================================================================
 // Plugin descriptor
 // ==========================================================================
 
-/// Complete self-description of a plugin.
 struct PluginDescriptor {
-    std::string   id;             ///< Unique ID, e.g. "builtin.sine"
-    std::string   display_name;   ///< Shown in menus, e.g. "Sine Synth"
-    std::string   category;       ///< "Synth", "Effect", "Filter", "Mixer",
-                                  ///< "EventGen", "EventEffect", "Output", "Utility"
-    std::string   doc;            ///< Description paragraph.
+    std::string   id;
+    std::string   display_name;
+    std::string   category;
+    std::string   doc;
     std::string   author;
     int           version = 1;
 
@@ -149,141 +143,126 @@ struct PluginDescriptor {
 // Process-time data structures
 // ==========================================================================
 
-/// Timing and transport context for one process block.
 struct PluginProcessContext {
     int    block_size;
     float  sample_rate;
     float  bpm;
-    double beat_position;       ///< Beat at start of this block.
+    double beat_position;
     double beats_per_sample;
 
-    // Transport state.
-    bool   is_playing         = false; ///< True while the transport is running.
-    bool   transport_started  = false; ///< True on the first block of a new play.
-    bool   transport_stopped  = false; ///< True on the first block after stop/end.
+    bool   is_playing         = false;
+    bool   transport_started  = false;
+    bool   transport_stopped  = false;
 };
 
-/// A single MIDI-style event with a sample offset within the block.
 struct MidiEvent {
-    int      frame;       ///< Sample offset within the block [0, block_size).
-    uint8_t  status;      ///< MIDI status byte (0x80 = note off, 0x90 = note on, etc.)
-    uint8_t  data1;       ///< First data byte (pitch, CC number, etc.)
-    uint8_t  data2;       ///< Second data byte (velocity, CC value, etc.)
-    uint8_t  channel;     ///< MIDI channel 0-15 (extracted for convenience).
+    int      frame;
+    uint8_t  status;
+    uint8_t  data1;
+    uint8_t  data2;
+    uint8_t  channel;
 };
 
-/// Audio buffer pair for a single port (mono or stereo).
+// ==========================================================================
+// Pattern data structures
+// ==========================================================================
+
+/// One note event within a pattern, with full instrument identity.
+///
+/// beat and duration are relative to the pattern's own time base (beat 0 =
+/// pattern start).  channel and program carry the original instrument
+/// assignment so plugins can route to the correct synth channel downstream.
+/// program == -1 means unspecified (use whatever the downstream synth has).
+struct PatternNote {
+    double  beat;        ///< Onset in pattern-local beats.
+    double  duration;    ///< Duration in pattern-local beats.
+    uint8_t channel;     ///< MIDI channel (instrument identity).
+    uint8_t pitch;       ///< MIDI note number.
+    uint8_t velocity;    ///< MIDI velocity 1-127.
+    int     program;     ///< MIDI program number, or -1 if unspecified.
+    int     bank;        ///< MIDI bank, or -1 if unspecified.
+};
+
+/// A complete pattern snapshot delivered via a Pattern port.
+///
+/// This is stable, heap-allocated data that lives for the lifetime of the
+/// graph.  The plugin receives a const pointer to it each process() call;
+/// it must NOT be mutated on the audio thread.
+struct PatternData {
+    std::vector<PatternNote> notes;
+    double length_beats  = 0.0;   ///< Total pattern length (for looping/phase).
+    int    subdivision   = 0;     ///< Steps per beat (beat patterns); 0 = melodic.
+    bool   is_beat_pattern = false;
+};
+
+/// Pattern port buffer — wraps a pointer to the immutable pattern data.
+/// The pointer is null until a PatternSourceNode is connected.
+struct PatternPortBuffer {
+    const PatternData* pattern = nullptr;  ///< null if no pattern connected.
+};
+
+// ==========================================================================
+// PluginBuffers
+// ==========================================================================
+
 struct AudioPortBuffer {
-    float* left   = nullptr;  ///< Always valid. For mono ports, this is the buffer.
-    float* right  = nullptr;  ///< Non-null for stereo ports; null for mono.
-    int    frames  = 0;       ///< Number of samples (== block_size).
+    float* left   = nullptr;
+    float* right  = nullptr;
+    int    frames  = 0;
 };
 
-/// Control port value.
 struct ControlPortBuffer {
-    float  value   = 0.0f;    ///< Current value for this block.
+    float  value   = 0.0f;
 };
 
-/// Event port buffer — a sequence of MIDI events for this block.
 struct EventPortBuffer {
-    /// Events received this block (for input ports), sorted by frame.
     const std::vector<MidiEvent>* events = nullptr;
-
-    /// Events to emit this block (for output ports).
-    /// Plugin appends events here during process().
-    std::vector<MidiEvent>* output_events = nullptr;
+    std::vector<MidiEvent>*       output_events = nullptr;
 };
 
 /// All port buffers for a plugin, keyed by port ID.
-///
-/// The engine pre-populates these maps before each process() call.
-/// Map lookups are NOT in the hot path — the engine resolves port IDs
-/// to internal buffer indices at activate() time and fills these structs
-/// with direct pointers each block.
-///
-/// Plugins that want to cache pointers can do so in activate() or on
-/// first process() call, but the map API is the primary interface.
 struct PluginBuffers {
-    /// Audio port buffers, keyed by PortDescriptor::id.
     struct AudioMap {
         AudioPortBuffer* get(const std::string& id);
         const AudioPortBuffer* get(const std::string& id) const;
-        // Internal storage — plugins shouldn't touch these directly.
         std::vector<std::pair<std::string, AudioPortBuffer>> entries;
     } audio;
 
-    /// Control port buffers, keyed by PortDescriptor::id.
     struct ControlMap {
         ControlPortBuffer* get(const std::string& id);
         const ControlPortBuffer* get(const std::string& id) const;
-        // Internal storage.
         std::vector<std::pair<std::string, ControlPortBuffer>> entries;
     } control;
 
-    /// Event port buffers, keyed by PortDescriptor::id.
     struct EventMap {
         EventPortBuffer* get(const std::string& id);
         const EventPortBuffer* get(const std::string& id) const;
-        // Internal storage.
         std::vector<std::pair<std::string, EventPortBuffer>> entries;
     } events;
+
+    /// Pattern port buffers, keyed by PortDescriptor::id.
+    struct PatternMap {
+        PatternPortBuffer* get(const std::string& id);
+        const PatternPortBuffer* get(const std::string& id) const;
+        std::vector<std::pair<std::string, PatternPortBuffer>> entries;
+    } patterns;
 };
 
 // ==========================================================================
 // Plugin base class
 // ==========================================================================
 
-/// Base class for all plugins. Subclass this and implement at least
-/// descriptor() and process().
 class Plugin {
 public:
     virtual ~Plugin() = default;
 
-    // --- Metadata (called once, before anything else) ---
-
-    /// Return the complete self-description of this plugin.
-    /// Called on main thread. The returned descriptor must be stable
-    /// (same result every time for a given instance).
     virtual PluginDescriptor descriptor() const = 0;
 
-    // --- Lifecycle (main thread) ---
-
-    /// Called once when the plugin is placed in an active graph.
-    /// Allocate any internal buffers here.
     virtual void activate(float sample_rate, int max_block_size) {}
-
-    /// Called when the plugin is removed from the graph.
-    /// Free internal resources. May be called without a prior activate()
-    /// (e.g. if graph construction fails).
     virtual void deactivate() {}
-
-    // --- Configuration (main thread, not realtime) ---
-
-    /// Called when the user changes a ConfigParam.
-    /// key is ConfigParam::id; value is the new string-encoded value.
     virtual void configure(const std::string& key, const std::string& value) {}
 
-    // --- Realtime processing (audio thread) ---
-
-    /// Process one block. Called on the audio thread — must not allocate,
-    /// lock, or perform I/O.
-    ///
-    /// Input buffers are pre-filled by the engine. Output buffers are
-    /// zeroed before this call; the plugin writes its output into them.
-    ///
-    /// Event input ports contain events for this block (sorted by frame).
-    /// Event output ports should be populated by the plugin.
     virtual void process(const PluginProcessContext& ctx, PluginBuffers& buffers) = 0;
-
-    // --- MIDI event convenience interface (audio thread) ---
-    //
-    // These are called by the engine to deliver events from the legacy
-    // TrackSourceNode fan-out path (scheduled events and preview notes).
-    // Default implementations build MidiEvents and append them to the
-    // first Event input port buffer. Override if you need custom handling.
-    //
-    // Plugins that declare Event input ports can also receive events
-    // directly in the EventPortBuffer — both paths coexist.
 
     virtual void note_on (int channel, int pitch, int velocity) { (void)channel; (void)pitch; (void)velocity; }
     virtual void note_off(int channel, int pitch) { (void)channel; (void)pitch; }
@@ -293,26 +272,10 @@ public:
     virtual void control_change(int channel, int cc, int value) { (void)channel; (void)cc; (void)value; }
     virtual void channel_volume(int channel, int volume) { (void)channel; (void)volume; }
 
-    // --- Transport events (main thread) ---
-
-    /// Called when the transport stops (end of playback, user stops, or loop
-    /// boundary if the engine chooses to signal it).  Safe to do file I/O here.
-    /// The engine calls this after the last process() block that had
-    /// transport_stopped == true has been delivered.
     virtual void on_transport_stop() {}
 
-    // --- Monitor readback (main thread) ---
-
-    /// Read the current value of a Monitor port. Called from the main thread.
-    /// Plugins should use std::atomic<float> internally for thread safety.
     virtual float read_monitor(const std::string& port_id) { (void)port_id; return 0.0f; }
-
-    // --- Graph editor data (main thread, non-realtime) ---
-
-    /// Return current curve/envelope data as JSON for GraphEditor ports.
     virtual std::string get_graph_data(const std::string& port_id) { (void)port_id; return "{}"; }
-
-    /// Set curve/envelope data from the frontend.
     virtual void set_graph_data(const std::string& port_id, const std::string& json) { (void)port_id; (void)json; }
 };
 
@@ -320,43 +283,21 @@ public:
 // Plugin registration
 // ==========================================================================
 
-/// Factory function type — returns a new default-constructed plugin instance.
 using PluginFactory = std::unique_ptr<Plugin>(*)();
 
-/// Registration entry — one per plugin type.
 struct PluginRegistration {
     std::string   id;
     PluginFactory factory;
 };
 
-/// Global plugin registry.
-///
-/// Plugins register themselves via the REGISTER_PLUGIN macro (below).
-/// The engine queries the registry at startup to discover available plugins.
 class PluginRegistry {
 public:
-    /// Add a registration (called at static init time).
     static void add(PluginRegistration* reg);
-
-    /// All registered plugins.
     static const std::vector<PluginRegistration*>& all();
-
-    /// Create a plugin instance by ID. Returns nullptr if not found.
     static std::unique_ptr<Plugin> create(const std::string& id);
-
-    /// Look up a descriptor by ID. Returns nullptr if not found.
-    /// The returned pointer is valid for the lifetime of the program.
     static const PluginDescriptor* find_descriptor(const std::string& id);
 };
 
-/// Register a plugin class. Place this in the plugin's .cpp file.
-///
-/// Example:
-///   class MySynth : public Plugin { ... };
-///   REGISTER_PLUGIN(MySynth)
-///
-/// The macro creates a static PluginRegistration and registers it before
-/// main() runs.
 #define REGISTER_PLUGIN(PluginClass)                                       \
     static ::PluginRegistration _plugin_reg_##PluginClass = [] {           \
         auto tmp = std::make_unique<PluginClass>();                        \
@@ -370,22 +311,6 @@ public:
     static bool _plugin_init_##PluginClass =                               \
         (::PluginRegistry::add(&_plugin_reg_##PluginClass), true)
 
-/// Place this alongside REGISTER_PLUGIN in every plugin .cpp that should also
-/// be loadable as a standalone shared library via load_plugin_library().
-///
-/// When the plugin is compiled into audio_server_lib (AS_PLUGIN_DYNAMIC not
-/// defined), this macro expands to nothing — register_plugin() must not exist
-/// in the static lib because every plugin .cpp would define the same extern "C"
-/// symbol, causing a multiple-definition link error.
-///
-/// When the plugin is compiled as a MODULE shared library (AS_PLUGIN_DYNAMIC
-/// defined by the CMake plugin_library() helper), this macro emits the
-/// extern "C" register_plugin() entry point the loader calls on dlopen, and
-/// also suppresses REGISTER_PLUGIN so static-init doesn't double-register.
-///
-/// Usage in plugin .cpp:
-///   REGISTER_PLUGIN(MySynth)          // static-link registration (always)
-///   REGISTER_PLUGIN_DYNAMIC(MySynth)  // dynamic-load entry point (guarded)
 #ifdef AS_PLUGIN_DYNAMIC
 #  undef REGISTER_PLUGIN
 #  define REGISTER_PLUGIN(PluginClass)  /* suppressed: register_plugin() handles it */
@@ -403,7 +328,5 @@ public:
         ::PluginRegistry::add(&_dyn_reg);                                  \
     }
 #else
-// Static-lib build: REGISTER_PLUGIN_DYNAMIC is a no-op.
-// register_plugin() must NOT be defined here — it would collide across TUs.
 #  define REGISTER_PLUGIN_DYNAMIC(PluginClass)  /* no-op in static build */
 #endif
