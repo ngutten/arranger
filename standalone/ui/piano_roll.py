@@ -48,11 +48,7 @@ class PianoRoll(QFrame):
         self._rec_start_time = None    # time.monotonic() when first note landed
         self._rec_armed = False        # True = waiting for first note-on
         self._rec_recording = False    # True = recording in progress
-        
-        # TODO: Implement undo/redo stack
-        # self._undo_stack = []
-        # self._redo_stack = []
-
+ 
         self._build()
 
     def _build(self):

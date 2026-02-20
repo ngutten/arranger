@@ -332,7 +332,7 @@ class App(QMainWindow):
         undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
         undo_shortcut.activated.connect(self.do_undo)
         
-        redo_shortcut = QShortcut(QKeySequence.StandardKey.Redo, self)
+        redo_shortcut = QShortcut(QKeySequence('Ctrl+Y'), self)
         redo_shortcut.activated.connect(self.do_redo)
 
     def _init_state(self):
@@ -543,6 +543,7 @@ class App(QMainWindow):
         """Redo the last undone action."""
         if not self.undo_stack.can_redo():
             return
+        
         snapshot = self.undo_stack.redo()
         if snapshot:
             restore_state(self.state, snapshot)
