@@ -128,51 +128,52 @@ class PianoRoll(QFrame):
 
         layout.addWidget(hdr)
 
-        # Main area: piano keys + canvas + velocity lane
-        body = QHBoxLayout()
-        body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(0)
-
-        # Piano keys
+        grid_container = QFrame()
+        grid_body = QHBoxLayout(grid_container)
+        grid_body.setContentsMargins(0, 0, 0, 0)
+        grid_body.setSpacing(0)
+        
         self.keys_scroll = QScrollArea()
         self.keys_scroll.setFixedWidth(44)
         self.keys_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.keys_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.keys_scroll.setWidgetResizable(False)
+        self.keys_scroll.setFrameShape(QFrame.NoFrame) # Remove border for tighter fit
         
         self.keys_widget = PianoKeysWidget(self)
         self.keys_scroll.setWidget(self.keys_widget)
-        body.addWidget(self.keys_scroll)
+        grid_body.addWidget(self.keys_scroll)
 
-        # Right side: note grid + velocity lane
-        right = QVBoxLayout()
-        right.setContentsMargins(0, 0, 0, 0)
-        right.setSpacing(0)
-
-        # Note canvas with scrollbars
+        # Note canvas scroll area
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(False)
+        self.scroll_area.setFrameShape(QFrame.NoFrame)
         
         self.grid_widget = PianoGridWidget(self)
         self.scroll_area.setWidget(self.grid_widget)
-        right.addWidget(self.scroll_area, 1)
+        grid_body.addWidget(self.scroll_area)        
 
-        # Sync scrolling
+        layout.addWidget(grid_container, 1) # Priority 1 to expand
+
+        # Add the velocity lane directly to the bottom of the main layout
+        # This keeps it outside the horizontal alignment of the keys
+        self.vel_widget = VelocityWidget(self)
+        self.vel_widget.setFixedHeight(50)
+        
+        # Add a small left margin to the velocity lane to align it with the grid,
+        # skipping the 44px width of the piano keys.
+        vel_layout_wrapper = QHBoxLayout()
+        vel_layout_wrapper.setContentsMargins(44, 0, 0, 0) 
+        vel_layout_wrapper.addWidget(self.vel_widget)
+        layout.addLayout(vel_layout_wrapper)
+
+        # Sync scrolling (Grid -> Keys)
         self.scroll_area.verticalScrollBar().valueChanged.connect(
             self.keys_scroll.verticalScrollBar().setValue
         )
-
-        # Velocity lane
-        self.vel_widget = VelocityWidget(self)
-        self.vel_widget.setFixedHeight(50)
-        right.addWidget(self.vel_widget)
-
-        body.addLayout(right)
-        layout.addLayout(body)
         
-        # Set focus policy to receive keyboard events
         self.setFocusPolicy(Qt.StrongFocus)
-
+        
     def _on_note_len(self, text):
         self.state.note_len = text
 
