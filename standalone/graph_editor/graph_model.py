@@ -402,16 +402,18 @@ class GraphNode:
 
         # For plugin-backed nodes, pass config_params through the params dict
         # so make_node() can forward them via configure()
-        # Only numeric config params go here — string values (e.g. sf2_path)
-        # travel via their dedicated top-level NodeDesc fields and would cause
-        # a type error when graph.cpp tries to read params as floats.
+        # Some string values (e.g. sf2_path)
+        # travel via their dedicated top-level NodeDesc fields
         desc = get_plugin_descriptor(self.node_type)
         if desc:
-            config_ids = {cp["id"] for cp in desc.get("config_params", [])}
-            for cid in config_ids:
-                if cid in self.params and isinstance(self.params[cid], (int, float)):
-                    d.setdefault("params", {})[cid] = self.params[cid]
-
+            config_params_by_id = {cp["id"]: cp for cp in desc.get("config_params", [])}
+            for cid, cp in config_params_by_id.items():
+                if cid in self.params:
+                    val = self.params[cid]
+                    # String config params (filepath, string, etc.) go into params too;
+                    # graph.cpp forwards them via configure() for plugin-backed nodes.
+                    d.setdefault("params", {})[cid] = val
+            
         # Internal cache keys to exclude from server payload
         _internal_keys = {"sf2_path", "lv2_uri", "sample_path",
                           "channel_count", "_ports", "_stereo_map", "_dual_mono",

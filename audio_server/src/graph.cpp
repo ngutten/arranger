@@ -397,8 +397,9 @@ void Graph::set_param(const std::string& nid, const std::string& param, float va
 void Graph::notify_transport_stop() {
     for (auto& entry : nodes_) {
         auto* adapter = dynamic_cast<PluginAdapterNode*>(entry.node.get());
-        if (adapter && adapter->plugin())
+        if (adapter && adapter->plugin()) {
             adapter->plugin()->on_transport_stop();
+        }
     }
 }
 

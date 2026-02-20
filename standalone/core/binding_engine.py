@@ -160,8 +160,15 @@ class BindingEngine:
         self._graph_loaded    = True
         self._graph_track_ids = self._current_track_ids()
         self._send({"cmd": "set_bpm", "bpm": self.state.bpm})
+        
+        # Adjust all programming beats to just after the current beat to make sure they re-fire
+        events = _build_server_schedule(self.state)
+        for e in events:
+            if e["beat"] == -1:
+                e["beat"] = self._current_beat+1
+        
         self._send({"cmd": "set_schedule",
-                    "events": _build_server_schedule(self.state)})
+                    "events": events})
 
     def play(self):
         self.mark_dirty()

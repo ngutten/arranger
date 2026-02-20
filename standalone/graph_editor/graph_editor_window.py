@@ -335,29 +335,6 @@ class GraphEditorWindow(QWidget):
         self._canvas.update()
         self._on_graph_changed_canvas()
     
-    """
-    def _add_lv2_node(self, uri: str, name: str, ports: list) -> None:
-        import uuid
-        nid = str(uuid.uuid4())
-
-        cx = self._canvas.view_to_scene(
-            QPointF(self._canvas.width() / 2, self._canvas.height() / 2)
-        )
-
-        node = GraphNode(
-            node_type="lv2",
-            node_id=nid,
-            display_name=name,
-            x=cx.x() - 90, y=cx.y() - 50,
-            params={"lv2_uri": uri, "_ports": ports},
-        )
-        self.model.add_node(node)
-        self._canvas._create_settings_widget(node)
-        self._canvas.selected_nodes = {nid}
-        self._canvas.update()
-        self._on_graph_changed_canvas()
-    """
-    
     def _add_plugin_node(self, plugin_id: str, name: str, desc: dict) -> None:
         """Add a node backed by a registered plugin (new plugin API)."""
         import uuid
@@ -491,11 +468,16 @@ class GraphEditorWindow(QWidget):
 
     def _do_live_push(self) -> None:
         """Push the current graph to the server."""
+
         if not self.server_engine:
             self._status_lbl.setText("No server")
             return
+            
+        self.server_engine.mark_dirty()
+        """
         payload = self.model.to_server_dict(bpm=self.state.bpm)
         resp = self.server_engine._send(payload)
+        
         if resp and resp.get("status") == "ok":
             self._status_lbl.setText("● live")
             self._status_lbl.setStyleSheet("color: #6bcb77; font-size: 10px;")
@@ -503,7 +485,7 @@ class GraphEditorWindow(QWidget):
             msg = resp.get("message", "error") if resp else "no response"
             self._status_lbl.setText(f"⚠ {msg}")
             self._status_lbl.setStyleSheet("color: #e94560; font-size: 10px;")
-
+        """
         # Notify the app so it knows the model changed (for save) and so
         # it can restart the MIDI router if a midi_source node was added/removed.
         if self._on_graph_changed:

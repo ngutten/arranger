@@ -505,6 +505,7 @@ class ServerEngine:
         self._graph_loaded = True
         self._graph_track_ids = self._current_track_ids()
         self._send({"cmd": "set_bpm", "bpm": self.state.bpm})
+        
         self._send({"cmd": "set_schedule", "events": _build_server_schedule(self.state)})
 
     def play(self):

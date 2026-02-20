@@ -296,11 +296,11 @@ void AudioEngine::poll() {
 
 void AudioEngine::drain_transport_callbacks() {
     if (!transport_stop_pending_.exchange(false, std::memory_order_acq_rel))
-        return;
+        return;    
     // Prefer owned_graph_ (main-thread view) over active_graph_ to avoid the
     // atomic load and stay on the same thread as graph_mutex_.
     std::lock_guard<std::mutex> lk(graph_mutex_);
-    if (owned_graph_) owned_graph_->notify_transport_stop();
+    if (owned_graph_) { owned_graph_->notify_transport_stop(); }
 }
 
 // ---------------------------------------------------------------------------

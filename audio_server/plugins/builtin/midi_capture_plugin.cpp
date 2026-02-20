@@ -152,13 +152,11 @@ public:
     void activate(float sample_rate, int /*max_block_size*/) override {
         sample_rate_   = sample_rate;
         bpm_           = 120.0f;
-        pending_write_ = false;
         events_.clear();
     }
 
     void deactivate() override {
         events_.clear();
-        pending_write_ = false;
     }
 
     void configure(const std::string& key, const std::string& value) override {
@@ -199,10 +197,6 @@ public:
                 }
             }
         }
-
-        // Flag that we need a write — the actual I/O happens in on_transport_stop().
-        if (ctx.transport_stopped)
-            pending_write_ = true;
     }
 
     // -----------------------------------------------------------------------
@@ -210,14 +204,9 @@ public:
     // -----------------------------------------------------------------------
 
     void on_transport_stop() override {
-        printf("Transport stopped.");
-        if (!pending_write_) return;
-        pending_write_ = false;
-
         if (output_path_.empty()) return;
-        if (events_.empty())      return;
+        if (events_.empty())      return;        
         
-        printf("Writing file.");
         write_midi_file(output_path_, events_, bpm_);
         // Intentionally not clearing events_ here — they remain readable
         // until the next transport_started clears them, so repeated stops
@@ -228,7 +217,6 @@ private:
     std::string           output_path_;
     float                 sample_rate_ = 44100.0f;
     float                 bpm_         = 120.0f;
-    bool                  pending_write_ = false;
     std::vector<MidiTick> events_;
 };
 

@@ -470,7 +470,6 @@ class App(QMainWindow):
     def _on_graph_model_changed(self, model) -> None:
         """Called when the graph editor makes a live change."""
         # model is the same object as self.state.signal_graph (edited in-place)
-        # Nothing extra needed; the editor has already pushed to the server.
         pass
 
     def _on_graph_editor_closed(self) -> None:
