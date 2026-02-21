@@ -108,10 +108,12 @@ endif()
 # that plugin DLLs can link against. On Linux, STATIC is fine because .so
 # files can have undefined symbols resolved from the loading executable.
 if(PLATFORM_WINDOWS)
-    add_library(audio_server_lib SHARED
+    set(_AUDIO_SERVER_LIB_TYPE SHARED)
 else()
-    add_library(audio_server_lib STATIC
+    set(_AUDIO_SERVER_LIB_TYPE STATIC)
 endif()
+
+add_library(audio_server_lib ${_AUDIO_SERVER_LIB_TYPE}
     src/graph.cpp
     src/ipc.cpp
     src/scheduler.cpp
