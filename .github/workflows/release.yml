@@ -160,20 +160,21 @@ jobs:
       - name: Install Python 3.12 and packages
         run: |
           # Install Python 3.12 from archive (3.14 has compatibility issues)
-          # Using archive repo to get older stable version
           curl -L -o /tmp/python312.pkg.tar.zst \
             "https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-python-3.12.8-1-any.pkg.tar.zst"
           pacman -U --noconfirm /tmp/python312.pkg.tar.zst
           
-          # Install Python packages
+          python --version
+          
+          # Install Python packages via pacman
           pacman -S --noconfirm \
             mingw-w64-x86_64-python-pip \
             mingw-w64-x86_64-python-numpy \
             mingw-w64-x86_64-python-scipy \
-            mingw-w64-x86_64-pyside6 \
-            mingw-w64-x86_64-python-pyinstaller
+            mingw-w64-x86_64-pyside6
           
-          python --version
+          # Install PyInstaller via pip (not available in MSYS2 repos)
+          pip install --break-system-packages pyinstaller
 
       - name: Cache pybind11 FetchContent
         uses: actions/cache@v4
