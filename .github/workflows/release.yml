@@ -32,7 +32,8 @@ jobs:
             ffmpeg \
             wget \
             librsvg2-bin \
-            libfuse2
+            libfuse2 \
+            nlohmann-json3-dev
 
       - name: Set up Python
         uses: actions/setup-python@v5
