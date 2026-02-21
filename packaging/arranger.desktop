@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Arranger
+GenericName=Music Sequencer
+Comment=Pattern-based MIDI sequencer and arranger
+Exec=arranger
+Icon=arranger
+Type=Application
+Categories=AudioVideo;Audio;Music;Sequencer;
+Keywords=MIDI;sequencer;music;piano roll;
+StartupNotify=true

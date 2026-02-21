@@ -1,0 +1,18 @@
+#!/bin/bash
+# AppImage entry point for Arranger.
+#
+# The PyInstaller onedir bundle is unpacked into the AppDir, so the
+# `arranger` executable and all bundled libraries are at $APPDIR root
+# (for PyInstaller 5.x) or $APPDIR/_internal (for PyInstaller 6.x).
+# Either way the PyInstaller-generated `arranger` launcher handles the
+# correct path resolution — we just need to exec it.
+
+APPDIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+
+# Ensure bundled ffmpeg is found before any system ffmpeg
+export PATH="$APPDIR:$PATH"
+
+# On some systems the AppImage runtime sets APPDIR for us; if not, we set it.
+export APPDIR
+
+exec "$APPDIR/arranger" "$@"
