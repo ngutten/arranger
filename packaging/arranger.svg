@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Background -->
+  <rect width="256" height="256" rx="32" fill="#1e1e2e"/>
+  <!-- Piano keys (simplified) -->
+  <rect x="32" y="140" width="28" height="76" rx="4" fill="#f8f8f2"/>
+  <rect x="68" y="140" width="28" height="76" rx="4" fill="#f8f8f2"/>
+  <rect x="104" y="140" width="28" height="76" rx="4" fill="#f8f8f2"/>
+  <rect x="140" y="140" width="28" height="76" rx="4" fill="#f8f8f2"/>
+  <rect x="176" y="140" width="28" height="76" rx="4" fill="#f8f8f2"/>
+  <rect x="212" y="140" width="28" height="76" rx="4" fill="#f8f8f2"/>
+  <!-- Black keys -->
+  <rect x="52" y="140" width="18" height="48" rx="3" fill="#282a36"/>
+  <rect x="88" y="140" width="18" height="48" rx="3" fill="#282a36"/>
+  <rect x="160" y="140" width="18" height="48" rx="3" fill="#282a36"/>
+  <rect x="196" y="140" width="18" height="48" rx="3" fill="#282a36"/>
+  <!-- Note blocks (arranger/piano roll style) -->
+  <rect x="32" y="100" width="48" height="14" rx="3" fill="#bd93f9"/>
+  <rect x="100" y="86" width="60" height="14" rx="3" fill="#50fa7b"/>
+  <rect x="140" y="72" width="36" height="14" rx="3" fill="#ffb86c"/>
+  <rect x="68" y="58" width="52" height="14" rx="3" fill="#ff79c6"/>
+  <rect x="176" y="44" width="40" height="14" rx="3" fill="#8be9fd"/>
+  <!-- Arranger timeline line -->
+  <line x1="32" y1="130" x2="224" y2="130" stroke="#6272a4" stroke-width="2"/>
+  <!-- Playhead -->
+  <line x1="96" y1="40" x2="96" y2="220" stroke="#f8f8f2" stroke-width="2" opacity="0.6"/>
+  <polygon points="90,40 102,40 96,52" fill="#f8f8f2" opacity="0.8"/>
+</svg>

@@ -1,0 +1,276 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag for the release (e.g. v1.0.0)'
+        required: false
+        default: 'dev'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Linux: build arranger_engine.so + plugins, package as AppImage
+  # ---------------------------------------------------------------------------
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkg-config \
+            python3-dev \
+            libportaudio2 libportaudio-dev \
+            libfluidsynth-dev \
+            libsndfile1-dev \
+            ffmpeg \
+            wget \
+            librsvg2-bin
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Cache pybind11 FetchContent
+        uses: actions/cache@v4
+        with:
+          path: audio_server/build/_deps
+          key: pybind11-linux-${{ hashFiles('audio_server/CMakeLists.txt') }}
+
+      - name: Build C++ engine (arranger_engine.so) and plugins
+        working-directory: audio_server
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_PYTHON_BINDINGS=ON \
+            -DENABLE_LV2=OFF \
+            -DENABLE_TESTS=OFF
+          cmake --build build -j$(nproc)
+        # Outputs:
+        #   ../standalone/arranger_engine*.so   (Python C++ extension)
+        #   ../plugins/arranger_plugin_*.so     (dynamic plugins)
+
+      - name: Verify build outputs
+        run: |
+          echo "=== arranger_engine ==="
+          ls standalone/arranger_engine*.so 2>/dev/null || { echo "ERROR: arranger_engine.so not found"; exit 1; }
+          echo "=== plugins ==="
+          ls plugins/arranger_plugin_*.so 2>/dev/null || { echo "ERROR: no plugins found"; exit 1; }
+
+      - name: Download static ffmpeg for bundling
+        run: |
+          mkdir -p packaging/ffmpeg
+          wget -q "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz" \
+            -O /tmp/ffmpeg.tar.xz
+          tar -xf /tmp/ffmpeg.tar.xz --strip-components=1 \
+            --wildcards --no-anchored 'ffmpeg' \
+            -C packaging/ffmpeg/
+          chmod +x packaging/ffmpeg/ffmpeg
+          echo "ffmpeg version: $(packaging/ffmpeg/ffmpeg -version 2>&1 | head -1)"
+
+      - name: Build PyInstaller bundle
+        run: pyinstaller packaging/arranger.spec
+
+      - name: Verify PyInstaller output
+        run: |
+          ls dist/arranger/
+          ls dist/arranger/plugins/ 2>/dev/null || echo "No plugins dir in bundle"
+
+      - name: Download appimagetool
+        run: |
+          wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" \
+            -O /tmp/appimagetool
+          chmod +x /tmp/appimagetool
+
+      - name: Assemble AppDir
+        run: |
+          rm -rf AppDir
+          mkdir -p AppDir
+
+          # Copy the entire PyInstaller onedir bundle into AppDir
+          cp -r dist/arranger/. AppDir/
+
+          # Convert SVG icon to PNG (appimagetool prefers PNG)
+          if [ -f packaging/arranger.png ]; then
+            cp packaging/arranger.png AppDir/arranger.png
+          elif [ -f packaging/arranger.svg ]; then
+            rsvg-convert -w 256 -h 256 packaging/arranger.svg -o AppDir/arranger.png
+          fi
+
+          # AppImage metadata files go in the AppDir root
+          cp packaging/arranger.desktop AppDir/
+          cp packaging/AppRun AppDir/AppRun
+          chmod +x AppDir/AppRun
+
+          # .DirIcon symlink for AppImage spec compliance
+          ln -sf arranger.png AppDir/.DirIcon 2>/dev/null || true
+
+      - name: Create AppImage
+        run: |
+          VERSION=${{ github.ref_type == 'tag' && github.ref_name || inputs.tag || 'dev' }}
+          ARCH=x86_64 /tmp/appimagetool AppDir \
+            "arranger-${VERSION}-linux-x86_64.AppImage"
+
+      - name: Upload Linux AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: arranger-*-linux-x86_64.AppImage
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Windows: build arranger_engine.pyd + plugins via MSYS2, package as zip
+  # ---------------------------------------------------------------------------
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 with MINGW64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-portaudio
+            mingw-w64-x86_64-fluidsynth
+            mingw-w64-x86_64-libsndfile
+            mingw-w64-x86_64-python
+            mingw-w64-x86_64-python-pip
+            mingw-w64-x86_64-python-numpy
+            mingw-w64-x86_64-python-scipy
+
+      - name: Cache pybind11 FetchContent
+        uses: actions/cache@v4
+        with:
+          path: audio_server/build/_deps
+          key: pybind11-windows-${{ hashFiles('audio_server/CMakeLists.txt') }}
+
+      - name: Build C++ engine (arranger_engine.pyd) and plugins
+        working-directory: audio_server
+        run: |
+          cmake -B build -G "MinGW Makefiles" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_PYTHON_BINDINGS=ON \
+            -DENABLE_LV2=OFF \
+            -DENABLE_TESTS=OFF
+          cmake --build build -j$(nproc)
+        # Outputs:
+        #   ../standalone/arranger_engine*.pyd   (Python C++ extension)
+        #   ../plugins/arranger_plugin_*.dll     (dynamic plugins)
+
+      - name: Verify build outputs
+        run: |
+          echo "=== arranger_engine ==="
+          ls standalone/arranger_engine* 2>/dev/null || { echo "ERROR: arranger_engine not found"; exit 1; }
+          echo "=== plugins ==="
+          ls plugins/arranger_plugin_* 2>/dev/null || { echo "ERROR: no plugins found"; exit 1; }
+
+      - name: Install Python packaging deps
+        run: |
+          pip install pyinstaller pyfluidsynth sounddevice python-rtmidi PySide6
+          # Note: numpy and scipy installed via pacman above.
+          # PySide6 from pip may need testing with MSYS2 Python;
+          # if it fails, try: pacman -S mingw-w64-x86_64-pyside6
+
+      - name: Copy plugin runtime DLLs
+        # Plugin .dlls (especially fluidsynth_plugin, sampler) depend on
+        # FluidSynth and libsndfile DLLs. Copy them into plugins/ so
+        # PyInstaller can find and bundle them.
+        run: |
+          MINGW_BIN="/mingw64/bin"
+          DEST="plugins"
+          for dll in libfluidsynth-3.dll libsndfile-1.dll \
+                     libglib-2.0-0.dll libgmodule-2.0-0.dll \
+                     libgobject-2.0-0.dll libintl-8.dll \
+                     libpcre2-8-0.dll libogg-0.dll libvorbis-0.dll \
+                     libFLAC.dll libopus-0.dll libmpg123-0.dll \
+                     libsndio-8.0.dll libportaudio-2.dll; do
+            if [ -f "$MINGW_BIN/$dll" ]; then
+              cp "$MINGW_BIN/$dll" "$DEST/" && echo "Copied $dll"
+            fi
+          done
+
+      - name: Download ffmpeg for Windows
+        run: |
+          mkdir -p packaging/ffmpeg
+          wget -q "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" \
+            -O /tmp/ffmpeg-win.zip
+          unzip -p /tmp/ffmpeg-win.zip "*/bin/ffmpeg.exe" > packaging/ffmpeg/ffmpeg.exe
+          echo "ffmpeg size: $(stat -c%s packaging/ffmpeg/ffmpeg.exe) bytes"
+
+      - name: Build PyInstaller bundle
+        run: python -m PyInstaller packaging/arranger.spec
+
+      - name: Assemble Windows release folder
+        run: |
+          VERSION=${{ github.ref_type == 'tag' && github.ref_name || inputs.tag || 'dev' }}
+          RELEASE_DIR="arranger-${VERSION}-windows-x86_64"
+          cp -r dist/arranger "$RELEASE_DIR"
+          # Add a simple launcher batch file at the top level
+          cp packaging/arranger.bat "$RELEASE_DIR/" 2>/dev/null || true
+
+      - name: Create zip archive
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } `
+                     elseif ('${{ inputs.tag }}') { '${{ inputs.tag }}' } `
+                     else { 'dev' }
+          $dir = "arranger-${version}-windows-x86_64"
+          Compress-Archive -Path "$dir\*" -DestinationPath "${dir}.zip"
+          Write-Host "Created ${dir}.zip"
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-zip
+          path: arranger-*-windows-x86_64.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Create GitHub Release and attach both artifacts
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-22.04
+    # Only run on tag pushes (not manual dispatch without a real tag)
+    if: github.ref_type == 'tag'
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          gh release create "$TAG" \
+            --title "Arranger $TAG" \
+            --generate-notes \
+            release-artifacts/linux-appimage/*.AppImage \
+            release-artifacts/windows-zip/*.zip
