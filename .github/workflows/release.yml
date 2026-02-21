@@ -31,7 +31,8 @@ jobs:
             libsndfile1-dev \
             ffmpeg \
             wget \
-            librsvg2-bin
+            librsvg2-bin \
+            libfuse2
 
       - name: Set up Python
         uses: actions/setup-python@v5
