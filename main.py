@@ -9,6 +9,7 @@ Usage:
     python -m standalone.main [--instruments DIR]
 """
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -20,10 +21,25 @@ _root = str(Path(__file__).resolve().parent)
 if _root not in sys.path:
     sys.path.insert(0, _root)
 
-# Set __package__ so relative imports inside standalone/ work when this
-# file is run directly rather than via `python -m standalone.main`.
-if not __package__:
-    __package__ = "standalone"
+
+def _get_default_instruments_dir() -> str:
+    """Return the default instruments directory.
+
+    - Frozen AppImage (Linux): instruments/ next to the .AppImage file.
+      The AppImage runtime exports $APPIMAGE as the path to the .AppImage.
+    - Frozen Windows bundle: instruments/ next to arranger.exe.
+    - Running from source: instruments/ in the project root.
+    """
+    if getattr(sys, 'frozen', False):
+        appimage = os.environ.get('APPIMAGE')
+        if appimage:
+            # Place instruments/ beside the .AppImage file so users can add
+            # .sf2 files without touching the (read-only) AppImage contents.
+            return str(Path(appimage).parent / 'instruments')
+        # Windows zip / non-AppImage: look next to the executable.
+        return str(Path(sys.executable).parent / 'instruments')
+    # Running from source: instruments/ in the project root.
+    return str(Path(__file__).parent / 'instruments')
 
 
 def main():
@@ -36,30 +52,27 @@ def main():
                         help='Verbose widget debug (logs every risky event dispatch)')
     args = parser.parse_args()
 
-    instruments_dir = args.instruments
-    if instruments_dir is None:
-        # Default: instruments/ directory next to the project root
-        instruments_dir = str(Path(__file__).parent / 'instruments')
+    instruments_dir = args.instruments or _get_default_instruments_dir()
 
     # Install debug hooks BEFORE QApplication so deleteLater patch is ready
     if args.debug or args.debug_verbose:
-        from .debug_widgets import install_hooks, install_event_filter
+        from standalone.debug_widgets import install_hooks, install_event_filter
         import standalone.debug_widgets as dw
         if args.debug_verbose:
             dw.VERBOSE = True
         install_hooks()
 
     app = QApplication(sys.argv)
-    
+
     # Set application style
     app.setStyle('Fusion')
 
     # Install event filter now that QApp exists
     if args.debug or args.debug_verbose:
         install_event_filter()
-    
+
     # Import here to avoid circular imports
-    from .app import App
+    from standalone.app import App
     main_window = App(instruments_dir=instruments_dir)
     main_window.show()
 
