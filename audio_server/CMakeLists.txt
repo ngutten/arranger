@@ -213,6 +213,11 @@ if(ENABLE_PYTHON_BINDINGS)
     # Export PluginRegistry symbols so dlopen'd plugin .so files can resolve them.
     set_target_properties(arranger_engine PROPERTIES ENABLE_EXPORTS ON)
 
+    # On Windows, we need --export-all-symbols to actually export from the DLL
+    if(PLATFORM_WINDOWS)
+        target_link_options(arranger_engine PRIVATE -Wl,--export-all-symbols)
+    endif()
+
     # Output into standalone/ so `from standalone.arranger_engine import ...` works.
     set_target_properties(arranger_engine PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY
@@ -278,6 +283,11 @@ endfunction()
 # Export symbols from the server binary and the Python extension module so
 # that dlopen'd plugin .so files can resolve PluginRegistry::add() etc.
 set_target_properties(audio_server PROPERTIES ENABLE_EXPORTS ON)
+
+# On Windows, we need --export-all-symbols for the executable too
+if(PLATFORM_WINDOWS)
+    target_link_options(audio_server PRIVATE -Wl,--export-all-symbols)
+endif()
 
 # Ensure the output directory exists at configure time.
 file(MAKE_DIRECTORY "${CMAKE_SOURCE_DIR}/../plugins")
