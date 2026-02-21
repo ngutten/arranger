@@ -143,11 +143,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up MSYS2 with MINGW64
+      - name: Set up MSYS2 with MINGW64 (skip Python for now)
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
-          update: true
+          update: false  # Don't update to avoid getting Python 3.14
           install: >-
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-gcc
@@ -156,10 +156,24 @@ jobs:
             mingw-w64-x86_64-portaudio
             mingw-w64-x86_64-fluidsynth
             mingw-w64-x86_64-libsndfile
-            mingw-w64-x86_64-python
-            mingw-w64-x86_64-python-pip
-            mingw-w64-x86_64-python-numpy
-            mingw-w64-x86_64-python-scipy
+      
+      - name: Install Python 3.12 and packages
+        run: |
+          # Install Python 3.12 from archive (3.14 has compatibility issues)
+          # Using archive repo to get older stable version
+          curl -L -o /tmp/python312.pkg.tar.zst \
+            "https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-python-3.12.8-1-any.pkg.tar.zst"
+          pacman -U --noconfirm /tmp/python312.pkg.tar.zst
+          
+          # Install Python packages
+          pacman -S --noconfirm \
+            mingw-w64-x86_64-python-pip \
+            mingw-w64-x86_64-python-numpy \
+            mingw-w64-x86_64-python-scipy \
+            mingw-w64-x86_64-pyside6 \
+            mingw-w64-x86_64-python-pyinstaller
+          
+          python --version
 
       - name: Cache pybind11 FetchContent
         uses: actions/cache@v4
@@ -192,21 +206,13 @@ jobs:
           # Install rtmidi library (C++ library that python-rtmidi wraps)
           pacman -S --noconfirm mingw-w64-x86_64-rtmidi
           
-          # Try older python-rtmidi (1.4.9) that doesn't use meson build system
-          # This version uses setuptools and should work with MSYS2
-          pip install --break-system-packages "python-rtmidi==1.4.9" || {
-            echo "WARNING: python-rtmidi 1.4.9 failed, trying latest..."
-            pip install --break-system-packages python-rtmidi || {
-              echo "ERROR: All python-rtmidi installation attempts failed"
-              echo "Continuing build - MIDI may not work on Windows"
-            }
+          # Install python-rtmidi (should work with Python 3.12)
+          pip install --break-system-packages python-rtmidi || {
+            echo "WARNING: python-rtmidi installation failed - MIDI may not work"
           }
           
-          # Install other Python packages
-          pip install --break-system-packages pyinstaller pyfluidsynth sounddevice PySide6
-          # Note: numpy and scipy installed via pacman above.
-          # PySide6 from pip may need testing with MSYS2 Python;
-          # if it fails, try: pacman -S mingw-w64-x86_64-pyside6
+          # Install remaining Python packages via pip
+          pip install --break-system-packages pyfluidsynth sounddevice
 
       - name: Copy plugin runtime DLLs
         # Plugin .dlls (especially fluidsynth_plugin, sampler) depend on
