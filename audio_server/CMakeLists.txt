@@ -166,6 +166,17 @@ if(PLATFORM_WINDOWS)
         RUNTIME_OUTPUT_DIRECTORY_RELEASE   "${_plugins_dir}"
         RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${_plugins_dir}"
     )
+    
+    # Also need a copy in standalone/ for the Python extension
+    # We'll use a post-build command to copy it when building arranger_engine
+    if(ENABLE_PYTHON_BINDINGS)
+        add_custom_command(TARGET audio_server_lib POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:audio_server_lib>
+                "${CMAKE_SOURCE_DIR}/../standalone/$<TARGET_FILE_NAME:audio_server_lib>"
+            COMMENT "Copying audio_server_lib.dll to standalone/ for Python extension"
+        )
+    endif()
 endif()
 
 if(ENABLE_LV2)

@@ -18,6 +18,12 @@ void register_builtin_plugins();
 #include <csignal>
 #include <atomic>
 
+#ifdef AS_PLATFORM_WINDOWS
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
 static std::atomic<bool> g_shutdown { false };
 
 static void handle_signal(int) { g_shutdown.store(true); }
