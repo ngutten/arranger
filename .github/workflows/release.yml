@@ -189,16 +189,16 @@ jobs:
 
       - name: Install Python packaging deps
         run: |
-          # Try MSYS2 python-rtmidi package first (avoids build issues)
-          pacman -S --noconfirm mingw-w64-x86_64-python-rtmidi 2>/dev/null || {
-            echo "MSYS2 python-rtmidi not available, trying alternative..."
-            # Install build tools for python-rtmidi
-            pacman -S --noconfirm mingw-w64-x86_64-ninja mingw-w64-x86_64-meson
-            # Install ninja Python package to satisfy meson-python
-            pip install --break-system-packages ninja
-            # Now try python-rtmidi
+          # Install rtmidi library (C++ library that python-rtmidi wraps)
+          pacman -S --noconfirm mingw-w64-x86_64-rtmidi
+          
+          # Try older python-rtmidi (1.4.9) that doesn't use meson build system
+          # This version uses setuptools and should work with MSYS2
+          pip install --break-system-packages "python-rtmidi==1.4.9" || {
+            echo "WARNING: python-rtmidi 1.4.9 failed, trying latest..."
             pip install --break-system-packages python-rtmidi || {
-              echo "WARNING: python-rtmidi installation failed - MIDI may not work"
+              echo "ERROR: All python-rtmidi installation attempts failed"
+              echo "Continuing build - MIDI may not work on Windows"
             }
           }
           
