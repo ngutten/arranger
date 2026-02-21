@@ -29,11 +29,11 @@ jobs:
             libportaudio2 portaudio19-dev \
             libfluidsynth-dev \
             libsndfile1-dev \
+            nlohmann-json3-dev \
             ffmpeg \
             wget \
             librsvg2-bin \
-            libfuse2 \
-            nlohmann-json3-dev
+            libfuse2
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -189,11 +189,21 @@ jobs:
 
       - name: Install Python packaging deps
         run: |
-          # Install ninja and meson via pacman (build deps for python-rtmidi)
-          pacman -S --noconfirm mingw-w64-x86_64-ninja mingw-w64-x86_64-meson
+          # Try MSYS2 python-rtmidi package first (avoids build issues)
+          pacman -S --noconfirm mingw-w64-x86_64-python-rtmidi 2>/dev/null || {
+            echo "MSYS2 python-rtmidi not available, trying alternative..."
+            # Install build tools for python-rtmidi
+            pacman -S --noconfirm mingw-w64-x86_64-ninja mingw-w64-x86_64-meson
+            # Install ninja Python package to satisfy meson-python
+            pip install --break-system-packages ninja
+            # Now try python-rtmidi
+            pip install --break-system-packages python-rtmidi || {
+              echo "WARNING: python-rtmidi installation failed - MIDI may not work"
+            }
+          }
           
-          # Now pip install - ninja from pacman avoids compilation issues
-          pip install --break-system-packages pyinstaller pyfluidsynth sounddevice python-rtmidi PySide6
+          # Install other Python packages
+          pip install --break-system-packages pyinstaller pyfluidsynth sounddevice PySide6
           # Note: numpy and scipy installed via pacman above.
           # PySide6 from pip may need testing with MSYS2 Python;
           # if it fails, try: pacman -S mingw-w64-x86_64-pyside6
