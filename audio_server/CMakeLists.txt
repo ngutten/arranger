@@ -159,6 +159,9 @@ set_target_properties(audio_server_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # On Windows, audio_server_lib is a SHARED library. Put it in the plugins
 # directory so plugin DLLs can find it at runtime.
 if(PLATFORM_WINDOWS)
+    # Export all symbols from the DLL
+    target_link_options(audio_server_lib PRIVATE -Wl,--export-all-symbols)
+    
     get_filename_component(_plugins_dir "${CMAKE_SOURCE_DIR}/../plugins" ABSOLUTE)
     set_target_properties(audio_server_lib PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY           "${_plugins_dir}"
