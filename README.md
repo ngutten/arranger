@@ -12,19 +12,29 @@ Features:
 - Live editing, including of the synthesis graph
 - Preliminary node-based synthesis for more complex rendering.
 
-How to run:
+How to run (release):
 
-- Put soundfont files in the instruments/ directory
-- If using the built-in fluidsynth bindings, just run `python main.py` from the `standalone/` sub-directory.
-- If you want to use the audio engine, currently you should build it and run `./audio_server` from `audio_server/build`. Eventually this will be automatically detected and performed by the Python interface, possibly implemented as a library with Python bindings.
+- Put soundfont files in the instruments/ directory and off you go!
 
-Requirements (beyond requirements.txt):
+### Building from source
 
-For using soundfonts you'll want to install fluidsynth (`apt-get install fluidsynth`)
-For rendering mp3 files you'll want to install ffmpeg (`apt-get install ffmpeg`)
+For the audio server backend, the prerequisites for building can be installed (e.g. with apt):
 
-System libraries for basic fluidsynth synthesizer: fluidsynth, ffmpeg, libfluidsynth3, and portaudio19-dev
+`
+            sudo apt-get install -y \
+            build-essential cmake pkg-config \
+            python3-dev \
+            libportaudio2 portaudio19-dev \
+            libfluidsynth-dev \
+            libsndfile1-dev \
+            ffmpeg \
+            wget \
+            librsvg2-bin
+`
 
-For the audio server backend, there are additional prerequisites (still in flux, will update when that's stable)
+Some of these overlap with things the Python frontend wants anyhow (portaudio, ffmpeg, fluidsynth).
+
+- Run ./build.sh in the root directory of the project to build the audio server and plugins
+- Run the project by running `pything main.py` from the project's root directory.
 
 Note: This code was heavily developed using Claude Sonnet 4.5 and Opus 4.6, see DEVELOPMENT_NOTES.md for details.
