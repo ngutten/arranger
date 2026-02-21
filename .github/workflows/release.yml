@@ -188,6 +188,10 @@ jobs:
 
       - name: Install Python packaging deps
         run: |
+          # Install ninja and meson via pacman (build deps for python-rtmidi)
+          pacman -S --noconfirm mingw-w64-x86_64-ninja mingw-w64-x86_64-meson
+          
+          # Now pip install - ninja from pacman avoids compilation issues
           pip install --break-system-packages pyinstaller pyfluidsynth sounddevice python-rtmidi PySide6
           # Note: numpy and scipy installed via pacman above.
           # PySide6 from pip may need testing with MSYS2 Python;
