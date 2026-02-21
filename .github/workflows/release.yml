@@ -73,8 +73,9 @@ jobs:
           mkdir -p packaging/ffmpeg
           wget -q "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz" \
             -O /tmp/ffmpeg.tar.xz
-          tar -xf /tmp/ffmpeg.tar.xz -C /tmp/
-          find /tmp -name ffmpeg -type f -executable -exec cp {} packaging/ffmpeg/ffmpeg \;
+          mkdir -p /tmp/ffmpeg-extract
+          tar -xf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg-extract
+          find /tmp/ffmpeg-extract -name ffmpeg -type f -executable -exec cp {} packaging/ffmpeg/ffmpeg \;
           chmod +x packaging/ffmpeg/ffmpeg
           echo "ffmpeg version: $(./packaging/ffmpeg/ffmpeg -version 2>&1 | head -1)"
 

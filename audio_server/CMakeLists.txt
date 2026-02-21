@@ -104,7 +104,14 @@ endif()
 # ---------------------------------------------------------------------------
 # Main server library (shared between server binary and tests)
 # ---------------------------------------------------------------------------
-add_library(audio_server_lib STATIC
+# On Windows, we make this SHARED so it creates an import library (.dll.a)
+# that plugin DLLs can link against. On Linux, STATIC is fine because .so
+# files can have undefined symbols resolved from the loading executable.
+if(PLATFORM_WINDOWS)
+    add_library(audio_server_lib SHARED
+else()
+    add_library(audio_server_lib STATIC
+endif()
     src/graph.cpp
     src/ipc.cpp
     src/scheduler.cpp
@@ -146,6 +153,18 @@ target_compile_options(audio_server_lib PRIVATE
 # Required when audio_server_lib is linked into the Python extension (.so).
 # Has no effect on the standalone binary build.
 set_target_properties(audio_server_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# On Windows, audio_server_lib is a SHARED library. Put it in the plugins
+# directory so plugin DLLs can find it at runtime.
+if(PLATFORM_WINDOWS)
+    get_filename_component(_plugins_dir "${CMAKE_SOURCE_DIR}/../plugins" ABSOLUTE)
+    set_target_properties(audio_server_lib PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY           "${_plugins_dir}"
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG     "${_plugins_dir}"
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE   "${_plugins_dir}"
+        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${_plugins_dir}"
+    )
+endif()
 
 if(ENABLE_LV2)
     target_include_directories(audio_server_lib PUBLIC ${LILV_INCLUDE_DIRS} ${LV2_INCLUDE_DIRS})
@@ -255,10 +274,17 @@ function(plugin_library name)
 
     # Do NOT link plugin_registry.cpp here.  PluginRegistry::add() and
     # PluginRegistry::all() are resolved from the loading process's symbol
-    # table at dlopen time.  The audio_server binary and arranger_engine.so
-    # both export these symbols (see ENABLE_EXPORTS below).
-    # Linking a second copy would create a separate singleton and break
-    # registration.
+    # table at dlopen time.
+    #
+    # On Linux: audio_server_lib is STATIC and plugins have undefined symbols
+    # that are resolved from the loading executable/Python module at dlopen.
+    #
+    # On Windows: audio_server_lib is SHARED, creating an import library that
+    # plugins link against. The symbols will be resolved from audio_server_lib.dll
+    # at runtime. The audio_server_lib.dll must be present alongside the plugins.
+    if(PLATFORM_WINDOWS)
+        target_link_libraries(${target} PRIVATE audio_server_lib)
+    endif()
 
     # Suppress REGISTER_PLUGIN static-init so only register_plugin() fires.
     target_compile_definitions(${target} PRIVATE AS_PLUGIN_DYNAMIC)
