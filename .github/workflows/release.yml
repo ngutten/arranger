@@ -207,6 +207,9 @@ jobs:
           # Install rtmidi library (C++ library that python-rtmidi wraps)
           pacman -S --noconfirm mingw-w64-x86_64-rtmidi
           
+          # Install cffi via pacman (dependency of sounddevice)
+          pacman -S --noconfirm mingw-w64-x86_64-python-cffi
+          
           # Install python-rtmidi (should work with Python 3.12)
           pip install --break-system-packages python-rtmidi || {
             echo "WARNING: python-rtmidi installation failed - MIDI may not work"
