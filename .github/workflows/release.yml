@@ -77,7 +77,7 @@ jobs:
             --wildcards --no-anchored 'ffmpeg' \
             -C packaging/ffmpeg/
           chmod +x packaging/ffmpeg/ffmpeg
-          echo "ffmpeg version: $(packaging/ffmpeg/ffmpeg -version 2>&1 | head -1)"
+          echo "ffmpeg version: $(./packaging/ffmpeg/ffmpeg -version 2>&1 | head -1)"
 
       - name: Build PyInstaller bundle
         run: pyinstaller packaging/arranger.spec

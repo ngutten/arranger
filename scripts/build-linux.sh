@@ -62,7 +62,7 @@ if [ ! -f "$ROOT/packaging/ffmpeg/ffmpeg" ]; then
         --wildcards --no-anchored 'ffmpeg' \
         -C "$ROOT/packaging/ffmpeg/"
     chmod +x "$ROOT/packaging/ffmpeg/ffmpeg"
-    echo "  ffmpeg downloaded: $(packaging/ffmpeg/ffmpeg -version 2>&1 | head -1)"
+    echo "  ffmpeg downloaded: $($ROOT/packaging/ffmpeg/ffmpeg -version 2>&1 | head -1)"
 else
     echo "  ffmpeg already present, skipping download"
 fi
