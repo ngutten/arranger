@@ -202,6 +202,23 @@ struct PatternPortBuffer {
 };
 
 // ==========================================================================
+// DLL export/import macros for Windows
+// ==========================================================================
+
+#ifdef AS_PLATFORM_WINDOWS
+    #ifdef AS_PLUGIN_DYNAMIC
+        // Plugin DLLs import these symbols from the host executable
+        #define AS_API __declspec(dllimport)
+    #else
+        // Host executable exports these symbols for plugin DLLs
+        #define AS_API __declspec(dllexport)
+    #endif
+#else
+    // Linux/macOS: no special annotations needed
+    #define AS_API
+#endif
+
+// ==========================================================================
 // PluginBuffers
 // ==========================================================================
 
@@ -223,27 +240,27 @@ struct EventPortBuffer {
 /// All port buffers for a plugin, keyed by port ID.
 struct PluginBuffers {
     struct AudioMap {
-        AudioPortBuffer* get(const std::string& id);
-        const AudioPortBuffer* get(const std::string& id) const;
+        AS_API AudioPortBuffer* get(const std::string& id);
+        AS_API const AudioPortBuffer* get(const std::string& id) const;
         std::vector<std::pair<std::string, AudioPortBuffer>> entries;
     } audio;
 
     struct ControlMap {
-        ControlPortBuffer* get(const std::string& id);
-        const ControlPortBuffer* get(const std::string& id) const;
+        AS_API ControlPortBuffer* get(const std::string& id);
+        AS_API const ControlPortBuffer* get(const std::string& id) const;
         std::vector<std::pair<std::string, ControlPortBuffer>> entries;
     } control;
 
     struct EventMap {
-        EventPortBuffer* get(const std::string& id);
-        const EventPortBuffer* get(const std::string& id) const;
+        AS_API EventPortBuffer* get(const std::string& id);
+        AS_API const EventPortBuffer* get(const std::string& id) const;
         std::vector<std::pair<std::string, EventPortBuffer>> entries;
     } events;
 
     /// Pattern port buffers, keyed by PortDescriptor::id.
     struct PatternMap {
-        PatternPortBuffer* get(const std::string& id);
-        const PatternPortBuffer* get(const std::string& id) const;
+        AS_API PatternPortBuffer* get(const std::string& id);
+        AS_API const PatternPortBuffer* get(const std::string& id) const;
         std::vector<std::pair<std::string, PatternPortBuffer>> entries;
     } patterns;
 };
@@ -292,10 +309,10 @@ struct PluginRegistration {
 
 class PluginRegistry {
 public:
-    static void add(PluginRegistration* reg);
-    static const std::vector<PluginRegistration*>& all();
-    static std::unique_ptr<Plugin> create(const std::string& id);
-    static const PluginDescriptor* find_descriptor(const std::string& id);
+    AS_API static void add(PluginRegistration* reg);
+    AS_API static const std::vector<PluginRegistration*>& all();
+    AS_API static std::unique_ptr<Plugin> create(const std::string& id);
+    AS_API static const PluginDescriptor* find_descriptor(const std::string& id);
 };
 
 #define REGISTER_PLUGIN(PluginClass)                                       \

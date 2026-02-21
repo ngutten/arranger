@@ -13,6 +13,8 @@
 #ifndef AS_PLATFORM_WINDOWS
 #include <unistd.h>
 #include <fcntl.h>
+#else
+#include <windows.h>
 #endif
 
 // WAV header writing (offline render)
