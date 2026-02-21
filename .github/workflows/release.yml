@@ -156,6 +156,7 @@ jobs:
             mingw-w64-x86_64-portaudio
             mingw-w64-x86_64-fluidsynth
             mingw-w64-x86_64-libsndfile
+            mingw-w64-x86_64-nlohmann-json
             unzip
       
       - name: Install Python 3.12 and packages
