@@ -213,12 +213,12 @@ class SF2Dialog(QDialog):
         self.result = None
 
         self.setWindowTitle('Load SoundFont')
-        self.setFixedSize(360, 180)
+        self.setFixedSize(420, 200)
         self.setModal(True)
 
         layout = QVBoxLayout(self)
 
-        layout.addWidget(QLabel('Select .sf2 file from instruments/ directory:'))
+        layout.addWidget(QLabel('Select .sf2 file:'))
 
         self.sf2_combo = QComboBox()
         if sf2_list:
@@ -228,8 +228,10 @@ class SF2Dialog(QDialog):
             self.sf2_combo.addItem('No .sf2 files found')
         layout.addWidget(self.sf2_combo)
 
-        info_label = QLabel('Place .sf2 files in the instruments/ directory')
+        instruments_dir = getattr(app, 'instruments_dir', 'instruments/')
+        info_label = QLabel(f'Place .sf2 files in:\n{instruments_dir}')
         info_label.setStyleSheet('font-size: 8pt;')
+        info_label.setWordWrap(True)
         layout.addWidget(info_label)
 
         layout.addStretch()

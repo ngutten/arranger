@@ -1121,7 +1121,9 @@ class App(QMainWindow):
     # ---- New/Save/Load ----
 
     def new_project(self):
-        path = "defaults/initial.json"
+        # Resolve relative to this file so the path is correct whether running
+        # from source or frozen inside a PyInstaller bundle.
+        path = str(Path(__file__).resolve().parent.parent / 'defaults' / 'initial.json')
         if path:
             try:
                 def sf2_loader(sf2_path):

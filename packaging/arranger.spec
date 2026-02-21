@@ -140,7 +140,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=not IS_WINDOWS,   # UPX can corrupt MinGW-built Windows PE; disable on Windows
     console=False,        # No terminal window; set to True for debugging
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -157,7 +157,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=not IS_WINDOWS,   # UPX can corrupt MinGW-built Windows PE; disable on Windows
     upx_exclude=[
         # Don't compress Qt libraries — UPX can corrupt them
         'Qt6*.dll',
