@@ -213,7 +213,7 @@ class PatternList(QFrame):
         safe_name = pat.name.replace(' ', '_').replace('/', '_')
         path, _ = QFileDialog.getSaveFileName(
             self, 'Export Pattern', f'{safe_name}.json',
-            'Pattern files (*.json);;All files (*.*)')
+            'Pattern files (*.json);;All files (*.*)', options=QFileDialog.Option.DontUseNativeDialog)
         if path:
             export_pattern(pat, path)
 
@@ -227,7 +227,7 @@ class PatternList(QFrame):
         safe_name = pat.name.replace(' ', '_').replace('/', '_')
         path, _ = QFileDialog.getSaveFileName(
             self, 'Export Beat Pattern', f'{safe_name}.json',
-            'Pattern files (*.json);;All files (*.*)')
+            'Pattern files (*.json);;All files (*.*)', options=QFileDialog.Option.DontUseNativeDialog)
         if path:
             export_beat_pattern(pat, path)
 
@@ -236,7 +236,7 @@ class PatternList(QFrame):
         from ..ops.project_io import import_pattern
         path, _ = QFileDialog.getOpenFileName(
             self, 'Import Pattern', '',
-            'Pattern files (*.json);;All files (*.*)')
+            'Pattern files (*.json);;All files (*.*)', options=QFileDialog.Option.DontUseNativeDialog)
         if path:
             try:
                 import_pattern(self.state, path)
@@ -250,7 +250,7 @@ class PatternList(QFrame):
         from ..ops.project_io import import_beat_pattern
         path, _ = QFileDialog.getOpenFileName(
             self, 'Import Beat Pattern', '',
-            'Pattern files (*.json);;All files (*.*)')
+            'Pattern files (*.json);;All files (*.*)', options=QFileDialog.Option.DontUseNativeDialog)
         if path:
             try:
                 import_beat_pattern(self.state, path)

@@ -29,7 +29,7 @@ def load_project(state, path: str, sf2_loader=None):
     # _pattern_data is intentionally not persisted (it could be stale after editing),
     # so we rebuild it from _pattern_id against the freshly loaded state.
     if state.signal_graph is not None:
-        from .graph_model import update_pattern_source_node
+        from standalone.graph_editor.graph_model import update_pattern_source_node
         for node in state.signal_graph.nodes:
             if node.node_type in ("pattern_source", "beat_pattern_source"):
                 pat_id = node.params.get("_pattern_id")
