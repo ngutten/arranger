@@ -14,7 +14,7 @@ Features:
 
 How to run (release):
 
-- Put soundfont files in the instruments/ directory and off you go!
+- Put soundfont files in the instruments/ directory and off you go! There are a lot out there, for example something like: https://musical-artifacts.com/artifacts/738/FluidR3_GM.sf2 
 
 ### Building from source
 
