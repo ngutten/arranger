@@ -979,7 +979,8 @@ class AudioEngine:
             self._commands.append((cmd, *args))
 
     def play_single_note(self, pitch: int, velocity: int = 100,
-                         channel: int = 0, duration: float = 0.5):
+                         channel: int = 0, duration: float = 0.5,
+                         track_id=None):
         """Play a single note preview. Manages its own note-off via timer."""
         self._ensure_stream()
         if self._instrument is None:

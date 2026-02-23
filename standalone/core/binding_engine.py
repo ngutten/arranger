@@ -23,8 +23,168 @@ from typing import Optional
 from pathlib import Path
 
 from ..arranger_engine import AudioServer, AudioEngineConfig, load_plugin_library
-from .server_engine import _build_graph, _build_server_schedule
 from .settings import Settings
+
+# ---------------------------------------------------------------------------
+# Graph builder
+# ---------------------------------------------------------------------------
+
+def _build_graph(state, sf2_path: Optional[str]) -> dict:
+    """Build the default track_source graph for the current session state.
+
+    All melodic tracks and beat tracks each get a track_source node.
+    All sources fan into one shared synth (fluidsynth if sf2_path, else sine),
+    which feeds the mixer.
+    """
+    nodes = []
+    connections = []
+
+    all_track_ids = (
+        [t.id for t in state.tracks] +
+        [bt.id for bt in state.beat_tracks]
+    )
+
+    for tid in all_track_ids:
+        nodes.append({"id": f"track_{tid}", "type": "track_source"})
+        connections.append({
+            "from_node": f"track_{tid}", "from_port": "events_out",
+            "to_node":   "synth",        "to_port":   "events_in",
+        })
+
+    synth_node = {"id": "synth", "type": "fluidsynth" if sf2_path else "sine"}
+    if sf2_path:
+        synth_node["sf2_path"] = sf2_path
+    nodes.append(synth_node)
+    nodes.append({"id": "mixer", "type": "mixer", "channel_count": 1})
+
+    connections += [
+        {"from_node": "synth", "from_port": "audio_out_L",
+         "to_node":   "mixer", "to_port":   "audio_in_L_0"},
+        {"from_node": "synth", "from_port": "audio_out_R",
+         "to_node":   "mixer", "to_port":   "audio_in_R_0"},
+    ]
+
+    return {"cmd": "set_graph", "bpm": state.bpm, "nodes": nodes, "connections": connections}
+
+
+# ---------------------------------------------------------------------------
+# Schedule builder  (AppState  →  server set_schedule payload)
+# ---------------------------------------------------------------------------
+#
+# We build the event list directly from AppState rather than converting the
+# SchedEvent list from build_schedule(), because SchedEvent has no track_id
+# field — the channel mapping is already collapsed by the time we get it back.
+#
+# Setup events (program, volume) are emitted with beat=-1.  The server clamps
+# these to fire before any note-ons, matching build_schedule() semantics.
+#
+# Bend auto-routing (the _BEND_POOL logic in engine.py) is not replicated here.
+# The server's fluidsynth node handles polyphony internally; bend curves are
+# emitted as "control" events on the same (node_id, channel) as the note.
+
+def _build_server_schedule(state) -> list[dict]:
+    """Convert AppState to a flat list of server event dicts."""
+    events = []
+
+    # --- Melodic tracks ---
+    for pl in state.placements:
+        t   = state.find_track(pl.track_id)
+        pat = state.find_pattern(pl.pattern_id)
+        if not t or not pat:
+            continue
+
+        node_id = f"track_{t.id}"
+        ch = t.channel & 0x0F
+
+        # Setup events: program and volume fire before any note-ons (beat=-1)
+        events.append({
+            "beat": -1, "type": "program",
+            "node_id": node_id, "channel": ch,
+            "pitch": t.program, "velocity": t.bank, "value": 0.0,
+        })
+        events.append({
+            "beat": -1, "type": "volume",
+            "node_id": node_id, "channel": ch,
+            "pitch": t.volume, "velocity": 0, "value": 0.0,
+        })
+
+        transpose = state.compute_transpose(pl)
+        reps = pl.repeats or 1
+        for rep in range(reps):
+            offset = pl.time + rep * pat.length
+            for n in pat.notes:
+                p = max(0, min(127, n.pitch + transpose))
+                v = max(1, min(127, n.velocity))
+                on_beat  = offset + n.start
+                off_beat = on_beat + n.duration
+
+                events.append({
+                    "beat": on_beat, "type": "note_on",
+                    "node_id": node_id, "channel": ch,
+                    "pitch": p, "velocity": v, "value": 0.0,
+                })
+                events.append({
+                    "beat": off_beat, "type": "note_off",
+                    "node_id": node_id, "channel": ch,
+                    "pitch": p, "velocity": 0, "value": 0.0,
+                })
+
+                if n.bend:
+                    # Collect bend SchedEvents from engine helper, then convert.
+                    bend_sched: list[SchedEvent] = []
+                    _emit_bend_events(bend_sched, ch, on_beat, n.duration, n.bend)
+                    for be in bend_sched:
+                        norm = (be.pitch - 8192) / 8191.0
+                        events.append({
+                            "beat": be.beat, "type": "control",
+                            "node_id": node_id, "channel": ch,
+                            "pitch": 0, "velocity": 0, "value": norm,
+                        })
+
+    # --- Beat tracks ---
+    for bp in state.beat_placements:
+        bt   = state.find_beat_track(bp.track_id)
+        bpat = state.find_beat_pattern(bp.pattern_id)
+        if not bt or not bpat:
+            continue
+
+        node_id = f"track_{bt.id}"
+        reps = bp.repeats or 1
+
+        for inst in state.beat_kit:
+            grid = bpat.grid.get(inst.id)
+            if not grid:
+                continue
+            ch = inst.channel & 0x0F
+
+            # GM convention: channel 9 drum kits live at bank 128 in most SF2
+            # files, matching FluidSynthInstrument.set_program's remap logic.
+            prog_bank = 128 if (ch == 9 and inst.bank == 0) else inst.bank
+            events.append({
+                "beat": -1, "type": "program",
+                "node_id": node_id, "channel": ch,
+                "pitch": inst.program, "velocity": prog_bank, "value": 0.0,
+            })
+
+            step_dur = bpat.length / len(grid)
+            for rep in range(reps):
+                offset = bp.time + rep * bpat.length
+                for step_idx, vel in enumerate(grid):
+                    if vel > 0:
+                        on_beat  = offset + step_idx * step_dur
+                        off_beat = on_beat + step_dur * 0.8
+                        events.append({
+                            "beat": on_beat, "type": "note_on",
+                            "node_id": node_id, "channel": ch,
+                            "pitch": inst.pitch, "velocity": vel, "value": 0.0,
+                        })
+                        events.append({
+                            "beat": off_beat, "type": "note_off",
+                            "node_id": node_id, "channel": ch,
+                            "pitch": inst.pitch, "velocity": 0, "value": 0.0,
+                        })
+
+    return events
 
 # ---------------------------------------------------------------------------
 # Dynamic plugin loader

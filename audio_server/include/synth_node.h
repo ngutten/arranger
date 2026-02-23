@@ -192,48 +192,6 @@ private:
 #endif // AS_ENABLE_SF2
 
 // ---------------------------------------------------------------------------
-// LV2Node — LV2 plugin host  (compiled only with AS_ENABLE_LV2)
-// ---------------------------------------------------------------------------
-
-#ifdef AS_ENABLE_LV2
-
-class LV2Node final : public Node {
-public:
-    LV2Node(const std::string& id_, const std::string& uri);
-    ~LV2Node() override;
-
-    std::vector<PortDecl> declare_ports() const override;
-    void activate(float sample_rate, int max_block_size) override;
-    void deactivate() override;
-    void process(const ProcessContext& ctx,
-                 const std::vector<PortBuffer>& inputs,
-                 std::vector<PortBuffer>& outputs) override;
-    void set_param(const std::string& name, float value) override;
-
-    // MIDI event support — forwarded from TrackSourceNode
-    void note_on(int channel, int pitch, int velocity) override;
-    void note_off(int channel, int pitch) override;
-    void all_notes_off(int channel = -1) override;
-
-private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
-};
-
-// Shared LilvWorld singleton — acquire/release around any lilv use.
-// Thread-safe; world is constructed once and remains read-only after that.
-// Returns void* to avoid pulling <lilv/lilv.h> into every translation unit;
-// callers that need the real type cast it after including lilv.h themselves.
-void* lv2_world_acquire();
-void  lv2_world_release();
-
-// List all installed LV2 plugins via lilv.
-// Returns JSON array: [{uri, name, author, ports:[{symbol,type,direction}]}]
-std::string list_lv2_plugins(const std::string& uri_prefix = "");
-
-#endif // AS_ENABLE_LV2
-
-// ---------------------------------------------------------------------------
 // NoteGateNode — converts a MIDI event stream into a control signal
 // ---------------------------------------------------------------------------
 // Sits on a TrackSourceNode's downstream list (receives note_on/note_off like

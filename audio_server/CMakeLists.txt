@@ -7,7 +7,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # ---------------------------------------------------------------------------
 # Build options
 # ---------------------------------------------------------------------------
-option(ENABLE_LV2      "Build with LV2 plugin hosting (requires lilv)"  OFF)
 option(ENABLE_SF2      "Build with SF2/FluidSynth support"              ON)
 option(ENABLE_SNDFILE  "Build Sampler plugin with libsndfile audio I/O" ON)
 option(ENABLE_TESTS  "Build test programs"                            ON)
@@ -113,12 +112,6 @@ else()
             set(_JSON_LINK_TARGET "")
         endif()
     endif()
-endif()
-
-if(ENABLE_LV2)
-    pkg_check_modules(LILV REQUIRED lilv-0)
-    pkg_check_modules(LV2 REQUIRED lv2)
-    add_compile_definitions(AS_ENABLE_LV2)
 endif()
 
 if(ENABLE_SF2)
@@ -228,12 +221,6 @@ if(PLATFORM_WINDOWS)
             COMMENT "Copying audio_server_lib.dll to standalone/ for Python extension"
         )
     endif()
-endif()
-
-if(ENABLE_LV2)
-    target_include_directories(audio_server_lib PUBLIC ${LILV_INCLUDE_DIRS} ${LV2_INCLUDE_DIRS})
-    target_link_libraries(audio_server_lib PUBLIC ${LILV_LIBRARIES})
-    target_sources(audio_server_lib PRIVATE src/lv2_host.cpp)
 endif()
 
 if(ENABLE_SF2)
