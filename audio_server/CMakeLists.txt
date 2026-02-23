@@ -188,6 +188,10 @@ target_link_libraries(audio_server_lib PUBLIC
     ${PORTAUDIO_LIBRARIES}
 )
 
+if(PORTAUDIO_LIBRARY_DIRS)
+    target_link_directories(audio_server_lib PUBLIC ${PORTAUDIO_LIBRARY_DIRS})
+endif()
+
 if(_JSON_LINK_TARGET)
     target_link_libraries(audio_server_lib PUBLIC "${_JSON_LINK_TARGET}")
 endif()
@@ -235,6 +239,9 @@ endif()
 if(ENABLE_SF2)
     target_include_directories(audio_server_lib PUBLIC ${FLUIDSYNTH_INCLUDE_DIRS})
     target_link_libraries(audio_server_lib PUBLIC ${FLUIDSYNTH_LIBRARIES})
+    if(FLUIDSYNTH_LIBRARY_DIRS)
+        target_link_directories(audio_server_lib PUBLIC ${FLUIDSYNTH_LIBRARY_DIRS})
+    endif()
     target_sources(audio_server_lib PRIVATE plugins/builtin/fluidsynth_plugin.cpp)
 endif()
 
@@ -303,7 +310,7 @@ endif()
 #   Defines AS_PLUGIN_DYNAMIC (suppresses REGISTER_PLUGIN static init).
 
 function(plugin_library name)
-    cmake_parse_arguments(PL "" "" "SOURCES;LINK_LIBRARIES" ${ARGN})
+    cmake_parse_arguments(PL "" "" "SOURCES;LINK_LIBRARIES;INCLUDE_DIRECTORIES;LIBRARY_DIRECTORIES" ${ARGN})
 
     set(target "arranger_plugin_${name}")
 
@@ -316,6 +323,9 @@ function(plugin_library name)
     if(_JSON_EXTRA_INCLUDE)
         target_include_directories(${target} PRIVATE "${_JSON_EXTRA_INCLUDE}")
     endif()
+    if(PL_INCLUDE_DIRECTORIES)
+        target_include_directories(${target} PRIVATE ${PL_INCLUDE_DIRECTORIES})
+    endif()
 
     # Do NOT link plugin_registry.cpp here.  PluginRegistry::add() and
     # PluginRegistry::all() are resolved from the loading process's symbol
@@ -323,6 +333,9 @@ function(plugin_library name)
     #
     # On Linux: audio_server_lib is STATIC and plugins have undefined symbols
     # that are resolved from the loading executable/Python module at dlopen.
+    #
+    # On Mac: Use -undefined dynamic_lookup to allow symbols to be resolved
+    # at runtime from the loading executable/Python module.
     #
     # On Windows: audio_server_lib is SHARED, creating an import library that
     # plugins link against. The symbols will be resolved from audio_server_lib.dll
@@ -337,6 +350,10 @@ function(plugin_library name)
     if(PL_LINK_LIBRARIES)
         target_link_libraries(${target} PRIVATE ${PL_LINK_LIBRARIES})
     endif()
+    
+    if(PL_LIBRARY_DIRECTORIES)
+        target_link_directories(${target} PRIVATE ${PL_LIBRARY_DIRECTORIES})
+    endif()
 
     # Use an absolute path resolved at configure time to avoid CMake silently
     # placing MODULE targets in the build tree.  Also set the per-config
@@ -349,6 +366,11 @@ function(plugin_library name)
         LIBRARY_OUTPUT_DIRECTORY_RELEASE   "${_plugins_dir}"
         LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${_plugins_dir}"
     )
+    
+    # On Mac, allow undefined symbols to be resolved at runtime
+    if(PLATFORM_MAC)
+        target_link_options(${target} PRIVATE "-undefined" "dynamic_lookup")
+    endif()
 endfunction()
 
 # Export symbols from the server binary and the Python extension module so
@@ -396,8 +418,9 @@ if(ENABLE_SNDFILE)
     plugin_library(sampler
         SOURCES plugins/builtin/sampler_plugin.cpp
         LINK_LIBRARIES ${SNDFILE_LIBRARIES}
+        INCLUDE_DIRECTORIES ${SNDFILE_INCLUDE_DIRS}
+        LIBRARY_DIRECTORIES ${SNDFILE_LIBRARY_DIRS}
     )
-    target_include_directories(arranger_plugin_sampler PRIVATE ${SNDFILE_INCLUDE_DIRS})
     target_compile_definitions(arranger_plugin_sampler PRIVATE AS_ENABLE_SNDFILE)
 else()
     # Build without sndfile — still registers and compiles, just loads no audio
@@ -435,9 +458,9 @@ if(ENABLE_SF2)
     plugin_library(fluidsynth
         SOURCES plugins/builtin/fluidsynth_plugin.cpp
         LINK_LIBRARIES ${FLUIDSYNTH_LIBRARIES}
+        INCLUDE_DIRECTORIES ${FLUIDSYNTH_INCLUDE_DIRS}
+        LIBRARY_DIRECTORIES ${FLUIDSYNTH_LIBRARY_DIRS}
     )
-    target_include_directories(arranger_plugin_fluidsynth PRIVATE
-        ${FLUIDSYNTH_INCLUDE_DIRS})
     target_compile_definitions(arranger_plugin_fluidsynth PRIVATE AS_ENABLE_SF2)
     add_dependencies(audio_server arranger_plugin_fluidsynth)
 endif()

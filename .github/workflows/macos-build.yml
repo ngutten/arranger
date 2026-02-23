@@ -1,10 +1,7 @@
 name: macOS Build
 
 on:
-  push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main, develop ]
+  workflow_dispatch:  # Manual trigger only
 
 jobs:
   build-macos:
@@ -34,11 +31,26 @@ jobs:
     
     - name: Verify pkg-config can find libraries
       run: |
+        echo "=== pkg-config paths ==="
+        pkg-config --variable pc_path pkg-config
+        echo ""
+        echo "=== PortAudio ==="
         pkg-config --modversion portaudio-2.0 || echo "portaudio not found via pkg-config"
+        pkg-config --libs portaudio-2.0 || true
+        pkg-config --cflags portaudio-2.0 || true
+        pkg-config --libs-only-L portaudio-2.0 || true
+        echo ""
+        echo "=== FluidSynth ==="
         pkg-config --modversion fluidsynth || echo "fluidsynth not found via pkg-config"
-        pkg-config --libs portaudio-2.0
-        pkg-config --libs fluidsynth
-        echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
+        pkg-config --libs fluidsynth || true
+        pkg-config --cflags fluidsynth || true
+        pkg-config --libs-only-L fluidsynth || true
+        echo ""
+        echo "=== Homebrew prefix ==="
+        brew --prefix || true
+        echo ""
+        echo "=== Library search ==="
+        find $(brew --prefix)/lib -name "*portaudio*" -o -name "*fluidsynth*" 2>/dev/null || true
     
     - name: Configure CMake
       working-directory: audio_server
@@ -50,7 +62,8 @@ jobs:
           -DENABLE_SF2=ON \
           -DENABLE_SNDFILE=ON \
           -DENABLE_TESTS=OFF \
-          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_VERBOSE_MAKEFILE=ON
     
     - name: Build
       working-directory: audio_server/build
