@@ -5,15 +5,7 @@ on:
 
 jobs:
   build-macos:
-    strategy:
-      matrix:
-        os: [macos-13, macos-14]  # Intel and ARM64
-        package_manager: [homebrew, macports]
-        exclude:
-          # MacPorts doesn't play nice with GitHub runners
-          - package_manager: macports
-    
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-14  # ARM64 (macos-13 no longer supported)
     
     steps:
     - uses: actions/checkout@v4
@@ -24,7 +16,6 @@ jobs:
         python-version: '3.11'
     
     - name: Install dependencies (Homebrew)
-      if: matrix.package_manager == 'homebrew'
       run: |
         brew update
         brew install portaudio fluidsynth libsndfile cmake pkg-config
@@ -79,5 +70,6 @@ jobs:
     
     - name: Test Python binding import
       run: |
-        cd arranger
+        ls -la  # Debug: show repo structure
+        ls -la standalone/ || echo "standalone dir not found"
         python3 -c "import sys; sys.path.insert(0, 'standalone'); import arranger_engine; print('Successfully imported arranger_engine')"
