@@ -31,12 +31,6 @@ except ImportError:
     _HAS_ENGINE = False
 
 try:
-    from .core.server_engine import ServerEngine
-    _HAS_SERVER_ENGINE = True
-except ImportError:
-    _HAS_SERVER_ENGINE = False
-
-try:
     from .core.binding_engine import BindingEngine
     _HAS_BINDING_ENGINE = True
 except ImportError:
@@ -376,16 +370,6 @@ class App(QMainWindow):
             except Exception as e:
                 print(f"[App] BindingEngine init failed: {e}; falling back")
 
-        if backend in ('binding', 'server') and _HAS_SERVER_ENGINE:
-            # 'binding' falls through here if the .so wasn't built
-            try:
-                from .core.server_engine import DEFAULT_ADDRESS
-                addr = self.settings.server_address or DEFAULT_ADDRESS
-                self.engine = ServerEngine(self.state, self.settings, address=addr)
-                return
-            except Exception as e:
-                print(f"[App] ServerEngine init failed: {e}; falling back")
-
         if _HAS_ENGINE:
             try:
                 self.engine = AudioEngine(self.state, self.settings)
@@ -448,7 +432,7 @@ class App(QMainWindow):
         if not _HAS_GRAPH_EDITOR:
             print("Error: no graph editor")
             return
-        # Requires an engine that supports _send (BindingEngine or ServerEngine)
+        # Requires an engine that supports _send (BindingEngine)
         if not (self.engine and hasattr(self.engine, '_send')):
             return
 

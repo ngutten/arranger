@@ -56,7 +56,7 @@ class GraphEditorWindow(QWidget):
     Parameters
     ----------
     model        GraphModel owned by AppState; edited in-place.
-    server_engine  ServerEngine instance (or None).
+    server_engine  BindingEngine instance (or None).
     state        AppState (for BPM, track names).
     on_graph_changed  Optional callback(GraphModel) fired after every live push.
     """
