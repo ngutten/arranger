@@ -132,6 +132,148 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
+  # macOS: build arranger_engine.so + plugins, package as portable tarball
+  # ---------------------------------------------------------------------------
+  build-macos:
+    runs-on: macos-14  # ARM64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          brew update
+          brew install portaudio fluidsynth libsndfile cmake pkg-config
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Cache pybind11 FetchContent
+        uses: actions/cache@v4
+        with:
+          path: audio_server/build/_deps
+          key: pybind11-macos-${{ hashFiles('audio_server/CMakeLists.txt') }}
+
+      - name: Build C++ engine (arranger_engine.so) and plugins
+        working-directory: audio_server
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_PYTHON_BINDINGS=ON \
+            -DENABLE_LV2=OFF \
+            -DENABLE_TESTS=OFF
+          cmake --build build -j$(sysctl -n hw.ncpu)
+        # Outputs:
+        #   ../standalone/arranger_engine*.so   (Python C++ extension)
+        #   ../plugins/arranger_plugin_*.so     (dynamic plugins)
+
+      - name: Verify build outputs
+        run: |
+          echo "=== arranger_engine ==="
+          ls standalone/arranger_engine*.so 2>/dev/null || { echo "ERROR: arranger_engine.so not found"; exit 1; }
+          echo "=== plugins ==="
+          ls plugins/arranger_plugin_*.so 2>/dev/null || { echo "ERROR: no plugins found"; exit 1; }
+          
+          # Show dependencies
+          echo "=== arranger_engine dependencies ==="
+          otool -L standalone/arranger_engine*.so
+          echo "=== sample plugin dependencies ==="
+          otool -L plugins/arranger_plugin_fluidsynth.so || true
+
+      - name: Download static ffmpeg for bundling
+        run: |
+          mkdir -p packaging/ffmpeg
+          # Get ffmpeg for macOS ARM64
+          wget -q "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip" -O /tmp/ffmpeg.zip
+          unzip -j /tmp/ffmpeg.zip -d packaging/ffmpeg/
+          chmod +x packaging/ffmpeg/ffmpeg
+          echo "ffmpeg version: $(./packaging/ffmpeg/ffmpeg -version 2>&1 | head -1)"
+
+      - name: Build PyInstaller bundle
+        run: pyinstaller packaging/arranger.spec
+
+      - name: Verify PyInstaller output
+        run: |
+          ls dist/arranger/
+          ls dist/arranger/plugins/ 2>/dev/null || echo "No plugins dir in bundle"
+
+      - name: Copy required dylibs into bundle
+        run: |
+          BUNDLE="dist/arranger"
+          
+          # Find all .so files and get their dependencies
+          DYLIBS=$(otool -L standalone/arranger_engine*.so plugins/*.so 2>/dev/null | \
+                   grep -E '(portaudio|fluidsynth|sndfile)' | \
+                   awk '{print $1}' | sort -u)
+          
+          # Copy each dependency
+          for dylib in $DYLIBS; do
+            if [ -f "$dylib" ]; then
+              cp "$dylib" "$BUNDLE/"
+              echo "Copied: $dylib"
+            fi
+          done
+          
+          # Also copy any Homebrew libs from common paths
+          BREW_PREFIX=$(brew --prefix)
+          for lib in libportaudio.2.dylib libfluidsynth.3.dylib libsndfile.1.dylib; do
+            if [ -f "$BREW_PREFIX/lib/$lib" ]; then
+              cp "$BREW_PREFIX/lib/$lib" "$BUNDLE/"
+              echo "Copied from Homebrew: $lib"
+            fi
+          done
+
+      - name: Create portable tarball
+        run: |
+          VERSION=${{ github.ref_type == 'tag' && github.ref_name || inputs.tag || 'dev' }}
+          RELEASE_DIR="arranger-${VERSION}-macos-arm64"
+          
+          # Copy the PyInstaller bundle
+          cp -r dist/arranger "$RELEASE_DIR"
+          
+          # Add a launcher script
+          cat > "$RELEASE_DIR/arranger" << 'EOF'
+#!/bin/bash
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export DYLD_LIBRARY_PATH="$DIR:$DYLD_LIBRARY_PATH"
+exec "$DIR/arranger" "$@"
+EOF
+          chmod +x "$RELEASE_DIR/arranger"
+          
+          # Create README
+          cat > "$RELEASE_DIR/README.txt" << 'EOF'
+Arranger for macOS (ARM64)
+
+INSTALLATION:
+1. Extract this archive
+2. Run ./arranger from terminal, or
+3. Move to /Applications for system-wide access
+
+DEPENDENCIES:
+All required libraries are bundled. No additional installation needed.
+
+For Homebrew users, you can also install via:
+  brew tap ngutten/arranger
+  brew install arranger
+EOF
+          
+          # Create tarball
+          tar -czf "${RELEASE_DIR}.tar.gz" "$RELEASE_DIR"
+          echo "Created ${RELEASE_DIR}.tar.gz"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-tarball
+          path: arranger-*-macos-arm64.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
   # Windows: build arranger_engine.pyd + plugins via MSYS2, package as zip
   # ---------------------------------------------------------------------------
   build-windows:
@@ -276,10 +418,10 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # Create GitHub Release and attach both artifacts
+  # Create GitHub Release and attach all artifacts
   # ---------------------------------------------------------------------------
   release:
-    needs: [build-linux, build-windows]
+    needs: [build-linux, build-macos, build-windows]
     runs-on: ubuntu-22.04
     # Only run on tag pushes (not manual dispatch without a real tag)
     if: github.ref_type == 'tag'
@@ -303,4 +445,5 @@ jobs:
             --title "Arranger $TAG" \
             --generate-notes \
             release-artifacts/linux-appimage/*.AppImage \
+            release-artifacts/macos-tarball/*.tar.gz \
             release-artifacts/windows-zip/*.zip
