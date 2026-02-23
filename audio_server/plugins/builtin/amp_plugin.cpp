@@ -27,7 +27,7 @@ public:
         PluginDescriptor d;
         d.id           = "builtin.amp";
         d.display_name = "Amp";
-        d.category     = "Utility";
+        d.category     = "Effect";
         d.doc          = "Stereo amplifier with tanh soft-clipping. "
                          "The gain port accepts Control input for VCA/tremolo use. "
                          "Drive controls the softness of the clipping knee.";

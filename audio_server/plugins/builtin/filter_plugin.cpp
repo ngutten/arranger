@@ -103,7 +103,7 @@ public:
         PluginDescriptor d;
         d.id           = "builtin.filter";
         d.display_name = "Filter";
-        d.category     = "Filter";
+        d.category     = "Effect";
         d.doc          = "Stereo biquad filter (Audio EQ Cookbook). "
                          "Modes: Low-pass, High-pass, Band-pass, Notch. "
                          "The frequency port accepts a Control input for filter sweeps.";

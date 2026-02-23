@@ -98,7 +98,7 @@ public:
         PluginDescriptor d;
         d.id           = "builtin.risset_rhythm";
         d.display_name = "Risset Rhythm";
-        d.category     = "EventEffect";
+        d.category     = "Event";
         d.doc =
             "Generates a Risset rhythm illusion while preserving pattern structure. "
             "Each layer acts as a virtual play-head moving through the pattern "

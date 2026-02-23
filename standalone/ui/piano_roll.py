@@ -167,6 +167,9 @@ class PianoRoll(QFrame):
         self.scroll_area.verticalScrollBar().valueChanged.connect(
             self.keys_scroll.verticalScrollBar().setValue
         )
+        self.keys_scroll.verticalScrollBar().valueChanged.connect(
+            self.scroll_area.verticalScrollBar().setValue
+        )
         
         self.setFocusPolicy(Qt.StrongFocus)
         

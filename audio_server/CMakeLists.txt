@@ -413,6 +413,8 @@ plugin_library(pattern_stamper  SOURCES plugins/builtin/pattern_stamper_plugin.c
 
 plugin_library(midi_capture SOURCES plugins/builtin/midi_capture_plugin.cpp)
 
+plugin_library(microtonal_mapper SOURCES plugins/builtin/microtonal_mapper_plugin.cpp)
+
 # --- Sampler (libsndfile for audio I/O) ---
 if(ENABLE_SNDFILE)
     plugin_library(sampler
@@ -451,6 +453,7 @@ add_dependencies(audio_server
     arranger_plugin_risset_rhythm
     arranger_plugin_shepard_tone    
     arranger_plugin_midi_capture
+    arranger_plugin_microtonal_mapper
     arranger_plugin_pattern_stamper
 )
 

@@ -131,7 +131,7 @@ public:
         PluginDescriptor d;
         d.id           = "builtin.shepard_tone";
         d.display_name = "Shepard Tone";
-        d.category     = "EventEffect";
+        d.category     = "Event";
         d.doc =
             "Shepard-tone arpeggiator with configurable step density. "
             "Builds a voice list by tiling a chosen interval pattern (octaves, "

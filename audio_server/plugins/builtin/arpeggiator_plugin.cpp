@@ -86,7 +86,7 @@ public:
         PluginDescriptor d;
         d.id           = "builtin.arpeggiator";
         d.display_name = "Arpeggiator";
-        d.category     = "EventEffect";
+        d.category     = "Event";
         d.doc          =
             "Tempo-synced arpeggiator.\n"
             "Scale Mode Off: arpeggiate held notes as-is.\n"
