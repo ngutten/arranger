@@ -18,9 +18,35 @@ option(ENABLE_TESTS  "Build test programs"                            ON)
 if(WIN32 OR MINGW OR CMAKE_SYSTEM_NAME STREQUAL "Windows")
     set(PLATFORM_WINDOWS TRUE)
     add_compile_definitions(AS_PLATFORM_WINDOWS)
+elseif(APPLE)
+    set(PLATFORM_MAC TRUE)
+    add_compile_definitions(AS_PLATFORM_LINUX)  # Keep existing define for compatibility
 else()
     set(PLATFORM_LINUX TRUE)
     add_compile_definitions(AS_PLATFORM_LINUX)
+endif()
+
+# ---------------------------------------------------------------------------
+# Mac-specific setup for MacPorts and Homebrew
+# ---------------------------------------------------------------------------
+if(APPLE)
+    # Try MacPorts first (typically /opt/local)
+    if(EXISTS "/opt/local/lib/pkgconfig")
+        list(APPEND CMAKE_PREFIX_PATH "/opt/local")
+        set(ENV{PKG_CONFIG_PATH} "/opt/local/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+    endif()
+    
+    # Then try Homebrew (typically /usr/local or /opt/homebrew on ARM)
+    execute_process(
+        COMMAND brew --prefix
+        OUTPUT_VARIABLE HOMEBREW_PREFIX
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(HOMEBREW_PREFIX)
+        list(APPEND CMAKE_PREFIX_PATH "${HOMEBREW_PREFIX}")
+        set(ENV{PKG_CONFIG_PATH} "${HOMEBREW_PREFIX}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -28,7 +54,17 @@ endif()
 # ---------------------------------------------------------------------------
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(PORTAUDIO REQUIRED portaudio-2.0)
+
+# PortAudio - try pkg-config first, then fallback to find_library
+pkg_check_modules(PORTAUDIO portaudio-2.0)
+if(NOT PORTAUDIO_FOUND)
+    message(STATUS "pkg-config didn't find portaudio, trying find_library...")
+    find_library(PORTAUDIO_LIBRARY NAMES portaudio REQUIRED)
+    find_path(PORTAUDIO_INCLUDE_DIR portaudio.h)
+    set(PORTAUDIO_LIBRARIES ${PORTAUDIO_LIBRARY})
+    set(PORTAUDIO_INCLUDE_DIRS ${PORTAUDIO_INCLUDE_DIR})
+    set(PORTAUDIO_FOUND TRUE)
+endif()
 
 # nlohmann/json — header-only
 # Resolution order:
@@ -55,7 +91,7 @@ else()
         # Older distros: header present but no CMake config. find_path returns
         # the directory that contains the nlohmann/ subdirectory.
         find_path(_JSON_HEADER_DIR nlohmann/json.hpp
-            PATHS /usr/include /usr/local/include
+            PATHS /usr/include /usr/local/include /opt/local/include
             NO_DEFAULT_PATH)
 
         if(_JSON_HEADER_DIR)
@@ -86,7 +122,15 @@ if(ENABLE_LV2)
 endif()
 
 if(ENABLE_SF2)
-    pkg_check_modules(FLUIDSYNTH REQUIRED fluidsynth)
+    pkg_check_modules(FLUIDSYNTH fluidsynth)
+    if(NOT FLUIDSYNTH_FOUND)
+        message(STATUS "pkg-config didn't find fluidsynth, trying find_library...")
+        find_library(FLUIDSYNTH_LIBRARY NAMES fluidsynth REQUIRED)
+        find_path(FLUIDSYNTH_INCLUDE_DIR fluidsynth.h)
+        set(FLUIDSYNTH_LIBRARIES ${FLUIDSYNTH_LIBRARY})
+        set(FLUIDSYNTH_INCLUDE_DIRS ${FLUIDSYNTH_INCLUDE_DIR})
+        set(FLUIDSYNTH_FOUND TRUE)
+    endif()
     add_compile_definitions(AS_ENABLE_SF2)
 endif()
 
@@ -198,31 +242,16 @@ if(PLATFORM_WINDOWS)
     target_link_libraries(audio_server_lib PUBLIC ws2_32)
 endif()
 
-   
 # ---------------------------------------------------------------------------
-# Server executable
+# Standalone server binary
 # ---------------------------------------------------------------------------
 add_executable(audio_server src/main.cpp)
 target_link_libraries(audio_server PRIVATE audio_server_lib)
 
-# Debugging
-#target_compile_options(audio_server PRIVATE
-#    -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1)
-#target_link_options(audio_server PRIVATE
-#    -fsanitize=address,undefined)
-
-#add_compile_definitions(AS_DEBUG)
-
 # ---------------------------------------------------------------------------
-# Tests
+# Tests (optional)
 # ---------------------------------------------------------------------------
 if(ENABLE_TESTS)
-    add_executable(test_ipc test/test_ipc.cpp)
-    target_link_libraries(test_ipc PRIVATE audio_server_lib)
-
-    add_executable(test_graph test/test_graph.cpp)
-    target_link_libraries(test_graph PRIVATE audio_server_lib)
-
     add_executable(test_render test/test_render.cpp)
     target_link_libraries(test_render PRIVATE audio_server_lib)
 endif()

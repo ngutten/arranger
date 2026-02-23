@@ -1,0 +1,70 @@
+name: macOS Build
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  build-macos:
+    strategy:
+      matrix:
+        os: [macos-13, macos-14]  # Intel and ARM64
+        package_manager: [homebrew, macports]
+        exclude:
+          # MacPorts doesn't play nice with GitHub runners
+          - package_manager: macports
+    
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies (Homebrew)
+      if: matrix.package_manager == 'homebrew'
+      run: |
+        brew update
+        brew install portaudio fluidsynth libsndfile cmake pkg-config
+    
+    - name: Verify pkg-config can find libraries
+      run: |
+        pkg-config --modversion portaudio-2.0 || echo "portaudio not found via pkg-config"
+        pkg-config --modversion fluidsynth || echo "fluidsynth not found via pkg-config"
+        pkg-config --libs portaudio-2.0
+        pkg-config --libs fluidsynth
+        echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
+    
+    - name: Configure CMake
+      working-directory: audio_server
+      run: |
+        mkdir -p build
+        cd build
+        cmake .. \
+          -DENABLE_PYTHON_BINDINGS=ON \
+          -DENABLE_SF2=ON \
+          -DENABLE_SNDFILE=ON \
+          -DENABLE_TESTS=OFF \
+          -DCMAKE_BUILD_TYPE=Release
+    
+    - name: Build
+      working-directory: audio_server/build
+      run: make -j$(sysctl -n hw.ncpu)
+    
+    - name: Verify binaries
+      working-directory: audio_server/build
+      run: |
+        ls -lh audio_server
+        file audio_server
+        ls -lh ../plugins/
+        otool -L audio_server  # Show dynamic library dependencies
+    
+    - name: Test Python binding import
+      run: |
+        cd arranger
+        python3 -c "import sys; sys.path.insert(0, 'standalone'); import arranger_engine; print('Successfully imported arranger_engine')"
