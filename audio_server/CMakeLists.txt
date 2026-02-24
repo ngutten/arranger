@@ -152,7 +152,7 @@ endif()
 
 add_library(audio_server_lib ${_AUDIO_SERVER_LIB_TYPE}
     src/graph.cpp
-    src/ipc.cpp
+    #src/ipc.cpp
     src/scheduler.cpp
     src/synth_node.cpp
     src/audio_engine.cpp
@@ -235,12 +235,6 @@ endif()
 if(PLATFORM_WINDOWS)
     target_link_libraries(audio_server_lib PUBLIC ws2_32)
 endif()
-
-# ---------------------------------------------------------------------------
-# Standalone server binary
-# ---------------------------------------------------------------------------
-add_executable(audio_server src/main.cpp)
-target_link_libraries(audio_server PRIVATE audio_server_lib)
 
 # ---------------------------------------------------------------------------
 # Tests (optional)
@@ -360,15 +354,6 @@ function(plugin_library name)
     endif()
 endfunction()
 
-# Export symbols from the server binary and the Python extension module so
-# that dlopen'd plugin .so files can resolve PluginRegistry::add() etc.
-set_target_properties(audio_server PROPERTIES ENABLE_EXPORTS ON)
-
-# On Windows, we need --export-all-symbols for the executable too
-if(PLATFORM_WINDOWS)
-    target_link_options(audio_server PRIVATE -Wl,--export-all-symbols)
-endif()
-
 # Ensure the output directory exists at configure time.
 file(MAKE_DIRECTORY "${CMAKE_SOURCE_DIR}/../plugins")
 
@@ -419,7 +404,7 @@ endif()
 
 # MODULE libraries are excluded from ALL by default in CMake.
 # Tie them to audio_server so `make` / `make audio_server` builds them too.
-add_dependencies(audio_server
+add_dependencies(audio_server_lib
     arranger_plugin_note_gate
     arranger_plugin_control_monitor
     arranger_plugin_reverb
@@ -452,13 +437,12 @@ if(ENABLE_SF2)
         LIBRARY_DIRECTORIES ${FLUIDSYNTH_LIBRARY_DIRS}
     )
     target_compile_definitions(arranger_plugin_fluidsynth PRIVATE AS_ENABLE_SF2)
-    add_dependencies(audio_server arranger_plugin_fluidsynth)
+    add_dependencies(audio_server_lib arranger_plugin_fluidsynth)
 endif()
 
 # ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
-install(TARGETS audio_server DESTINATION bin)
 install(DIRECTORY "${CMAKE_SOURCE_DIR}/../plugins/"
         DESTINATION lib/arranger/plugins
         FILES_MATCHING PATTERN "*.so" PATTERN "*.dll" PATTERN "*.dylib")

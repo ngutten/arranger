@@ -99,7 +99,6 @@ std::unique_ptr<Graph> Graph::from_json(const std::string& j_str, std::string& e
         desc.id          = nid;
         desc.type        = type;
         desc.sf2_path    = jn.value("sf2_path", "");
-        desc.lv2_uri     = jn.value("lv2_uri", "");
         desc.sample_path = jn.value("sample_path", "");
         desc.channel_count = jn.value("channel_count", 2);
         desc.pitch_lo    = jn.value("pitch_lo", 0);
@@ -116,7 +115,6 @@ std::unique_ptr<Graph> Graph::from_json(const std::string& j_str, std::string& e
             }
         }
         if (!desc.sf2_path.empty())    string_params.emplace("sf2_path",    desc.sf2_path);
-        if (!desc.lv2_uri.empty())     string_params.emplace("lv2_uri",     desc.lv2_uri);
         if (!desc.sample_path.empty()) string_params.emplace("sample_path", desc.sample_path);
 
         std::string node_err;

@@ -475,6 +475,7 @@ std::unique_ptr<Node> make_node(const NodeDesc& desc, std::string& err) {
     }
 
     // --- Legacy built-in types ---
+    
     if (desc.type == "sine")
         return std::make_unique<SineNode>(desc.id);
     if (desc.type == "mixer")
@@ -489,13 +490,6 @@ std::unique_ptr<Node> make_node(const NodeDesc& desc, std::string& err) {
     if (desc.type == "fluidsynth") {
         if (desc.sf2_path.empty()) { err = "fluidsynth node requires sf2_path"; return nullptr; }
         try { return std::make_unique<FluidSynthNode>(desc.id, desc.sf2_path); }
-        catch (const std::exception& e) { err = e.what(); return nullptr; }
-    }
-#endif
-#ifdef AS_ENABLE_LV2
-    if (desc.type == "lv2") {
-        if (desc.lv2_uri.empty()) { err = "lv2 node requires lv2_uri"; return nullptr; }
-        try { return std::make_unique<LV2Node>(desc.id, desc.lv2_uri); }
         catch (const std::exception& e) { err = e.what(); return nullptr; }
     }
 #endif

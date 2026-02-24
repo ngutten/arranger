@@ -27,7 +27,9 @@ public:
         d.version      = 1;
 
         d.ports = {
-            { "audio_out", "Audio Out", "Stereo audio output",
+            { "events_in",  "Events",  "MIDI input (held notes)",
+              PluginPortType::Event, PortRole::Input },
+            { "audio_out", "Audio", "Stereo audio output",
               PluginPortType::AudioStereo, PortRole::Output },
         };
 
