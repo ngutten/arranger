@@ -65,7 +65,6 @@ C_NODE_HEADER   = {
     "fluidsynth":          QColor("#3a1a4a"),
     "sine":                QColor("#3a2a1a"),
     "sampler":             QColor("#1a3a3a"),
-    "lv2":                 QColor("#2a1a3a"),
     "mixer":               QColor("#1a2a3a"),
     "output":              QColor("#0d2a1a"),
     "split_stereo":        QColor("#1a2a2a"),
@@ -466,18 +465,6 @@ class NodeGraphCanvas(QWidget):
                 w.setMask(clip_region)
                 w.show()
                 w.raise_()
-
-            # For LV2 nodes: refresh which control ports are driven by wires
-            refresh = getattr(w, "refresh_wired_ports", None)
-            if refresh is not None:
-                wired = {
-                    c.to_port
-                    for c in self.model.connections
-                    if c.to_node == node.node_id
-                    and self.model._port_type_for(node.node_id, c.to_port)
-                       is not None
-                }
-                refresh(wired)
 
     # -----------------------------------------------------------------------
     # Paint
@@ -1189,162 +1176,6 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable):
 
         # ADSR and root_note are now control ports — visible as knobs on the node.
         # No duplicate spinboxes needed here.
-        return w
-
-    if t == "lv2":
-        # LV2 node: show URI (small, dimmed) plus appropriate widgets for every
-        # control input port.  Widget type is chosen from port metadata hints:
-        #   is_toggle     → QCheckBox
-        #   is_enumeration + scale_points → QComboBox
-        #   is_integer    → QSpinBox (integer steps)
-        #   otherwise     → QDoubleSpinBox (continuous)
-        # Widgets are disabled (greyed) whenever a wire drives the port.
-        from PySide6.QtWidgets import (
-            QDoubleSpinBox as _DSB, QScrollArea, QCheckBox, QComboBox,
-            QSpinBox as _ISB,
-        )
-
-        raw_ports = node.params.get("_ports", [])
-        ctrl_inputs = [p for p in raw_ports
-                       if p.get("type") == "control" and p.get("direction") == "input"]
-
-        w = QWidget(parent)
-        w.setStyleSheet("background: transparent; color: #ccc;")
-        lay = QFormLayout(w)
-        lay.setContentsMargins(4, 2, 4, 2)
-        lay.setSpacing(2)
-
-        # URI row (always shown, read-only, small)
-        uri_lbl = QLabel(node.params.get("lv2_uri", ""))
-        uri_lbl.setStyleSheet("color: #555; font-size: 8px;")
-        uri_lbl.setWordWrap(True)
-        lay.addRow(QLabel("URI:"), uri_lbl)
-
-        # Dual-mono badge — shown when the plugin is mono and will be run ×2
-        if "_dual_mono" not in node.params:
-            node.ports()
-        if node.params.get("_dual_mono"):
-            badge = QLabel("⇄ dual mono ×2")
-            badge.setStyleSheet(
-                "color: #6bcb77; font-size: 8px; background: #0d1a0d;"
-                " border: 1px solid #2a4a2a; border-radius: 3px; padding: 1px 4px;")
-            lay.addRow(badge)
-
-        # dict: symbol → widget (QCheckBox / QComboBox / QSpinBox / QDoubleSpinBox)
-        _ctrl_widgets: dict = {}
-
-        STYLE_ACTIVE   = "background: #0d1117; color: #ccc; border: 1px solid #2a3a5c;"
-        STYLE_DISABLED = "background: #111; color: #444; border: 1px solid #1a1a1a;"
-
-        for p in ctrl_inputs:
-            sym     = p.get("symbol", "")
-            lbl_txt = p.get("name", sym) or sym
-            p_min   = float(p.get("min",     0.0))
-            p_max   = float(p.get("max",     1.0))
-            p_def   = float(p.get("default", 0.0))
-            p_def   = max(p_min, min(p_max, p_def))
-            stored  = node.params.get(sym, p_def)
-
-            is_toggle = p.get("is_toggle", False)
-            is_integer = p.get("is_integer", False)
-            is_enum = p.get("is_enumeration", False)
-            scale_pts = p.get("scale_points", [])
-
-            sym_capture = sym  # capture for lambdas
-
-            if is_toggle:
-                # Boolean on/off → checkbox with pastel purple border
-                cb = QCheckBox()
-                cb.setChecked(float(stored) > 0.5)
-                cb.setStyleSheet("""
-                    QCheckBox {
-                        color: #ccc;
-                    }
-                    QCheckBox::indicator {
-                        width: 14px;
-                        height: 14px;
-                        border: 1px solid #b794f4;
-                        border-radius: 3px;
-                        background: #0d1117;
-                    }
-                    QCheckBox::indicator:checked {
-                        background: #b794f4;
-                    }
-                    QCheckBox::indicator:hover {
-                        border-color: #d4b5ff;
-                    }
-                """)
-                cb.toggled.connect(
-                    lambda checked, k=sym_capture: on_change(
-                        node.node_id, k, 1.0 if checked else 0.0))
-                row_lbl = QLabel(lbl_txt + ":")
-                row_lbl.setStyleSheet("color: #aaa; font-size: 8px;")
-                lay.addRow(row_lbl, cb)
-                _ctrl_widgets[sym] = cb
-
-            elif is_enum and scale_pts:
-                # Enumeration with named choices → combo box
-                combo = QComboBox()
-                combo.setStyleSheet(STYLE_ACTIVE)
-                combo.setMaximumWidth(140)
-                # Sort scale points by value for consistent ordering
-                pts = sorted(scale_pts, key=lambda sp: float(sp.get("value", 0)))
-                current_idx = 0
-                for idx, sp in enumerate(pts):
-                    val = float(sp.get("value", 0))
-                    label = sp.get("label", str(val))
-                    combo.addItem(label, val)
-                    if abs(val - float(stored)) < 0.001:
-                        current_idx = idx
-                combo.setCurrentIndex(current_idx)
-                combo.currentIndexChanged.connect(
-                    lambda idx, k=sym_capture, c=combo: on_change(
-                        node.node_id, k, c.itemData(idx)))
-                row_lbl = QLabel(lbl_txt + ":")
-                row_lbl.setStyleSheet("color: #aaa; font-size: 8px;")
-                lay.addRow(row_lbl, combo)
-                _ctrl_widgets[sym] = combo
-
-            elif is_integer:
-                # Integer-valued continuous → QSpinBox
-                ispin = _ISB()
-                ispin.setRange(int(p_min), int(p_max))
-                ispin.setValue(int(round(float(stored))))
-                ispin.setStyleSheet(STYLE_ACTIVE)
-                ispin.setMaximumWidth(90)
-                ispin.valueChanged.connect(
-                    lambda v, k=sym_capture: on_change(node.node_id, k, float(v)))
-                row_lbl = QLabel(lbl_txt + ":")
-                row_lbl.setStyleSheet("color: #aaa; font-size: 8px;")
-                lay.addRow(row_lbl, ispin)
-                _ctrl_widgets[sym] = ispin
-
-            else:
-                # Continuous float → SmartFloatWidget with adaptive slider
-                widget = SmartFloatWidget(float(stored), p_min, p_max, parent=w)
-                widget.valueChanged.connect(
-                    lambda v, k=sym_capture: on_change(node.node_id, k, v))
-                row_lbl = QLabel(lbl_txt + ":")
-                row_lbl.setStyleSheet("color: #aaa; font-size: 8px;")
-                lay.addRow(row_lbl, widget)
-                _ctrl_widgets[sym] = widget
-
-        def refresh_wired_ports(wired: set):
-            """Called by canvas to grey out ports driven by a wire."""
-            for sym, widget in _ctrl_widgets.items():
-                driven = sym in wired
-                
-                # Handle SmartFloatWidget specially - it has setDriven method
-                if isinstance(widget, SmartFloatWidget):
-                    widget.setDriven(driven)
-                else:
-                    widget.setEnabled(not driven)
-                    if hasattr(widget, 'setStyleSheet') and not isinstance(widget, QCheckBox):
-                        widget.setStyleSheet(STYLE_DISABLED if driven else STYLE_ACTIVE)
-
-        # Store widget references for potential polling/animation
-        w.refresh_wired_ports = refresh_wired_ports
-        w._ctrl_widgets = _ctrl_widgets  # Store for external access
         return w
 
     if t in ("mixer", "output"):

@@ -6,7 +6,7 @@ UI edits and that ServerEngine serialises into set_graph payloads.
 Port types:
   MIDI       – track_source fan-out (no buffer; drives downstream synths directly)
   AUDIO      – interleaved stereo pair (UI abstraction; expands to _L/_R on serialise)
-  AUDIO_MONO – single-channel float buffer (used by split_stereo / merge_stereo and LV2)
+  AUDIO_MONO – single-channel float buffer (used by split_stereo / merge_stereo)
   CONTROL    – single float, control rate
 
 AUDIO vs AUDIO_MONO
@@ -33,9 +33,6 @@ Node types:
     fluidsynth     – SF2-backed
     sine           – built-in debug synth
     sampler        – sample player [future]
-
-  Plugins:
-    lv2            – LV2 plugin; ports are dynamic (AUDIO_MONO / CONTROL)
 
   Utilities:
     mixer          – N AUDIO inputs → one AUDIO output; channel_count editable
@@ -436,13 +433,6 @@ class GraphNode:
         if t == "note_gate":       return NOTE_GATE_PORTS
         if t == "mixer":           return mixer_ports(self.params.get("channel_count", 2))
         if t == "output":          return output_ports(self.params.get("channel_count", 1))
-        if t == "lv2":
-            ports, stereo_map, dual_mono = _lv2_build_ports(self.params.get("_ports", []))
-            # Cache derived metadata so to_server_dict can use it.
-            # Written each call but idempotent.
-            self.params["_stereo_map"] = stereo_map
-            self.params["_dual_mono"]  = dual_mono
-            return ports
         # Plugin-backed node: look up descriptor from cache
         desc = get_plugin_descriptor(t)
         if desc:
@@ -478,9 +468,6 @@ class GraphNode:
         """
         if self.node_type in ("split_stereo", "merge_stereo"):
             return None
-        # Dual-mono LV2 nodes are expanded to two server nodes by GraphModel.to_server_dict
-        if self.node_type == "lv2" and self.params.get("_dual_mono"):
-            return None
 
         # Pattern source nodes — emit type + inline pattern data for C++ graph.cpp.
         if self.node_type in ("pattern_source", "beat_pattern_source"):
@@ -498,8 +485,6 @@ class GraphNode:
 
         if self.node_type == "fluidsynth":
             d["sf2_path"] = self.params.get("sf2_path", "")
-        if self.node_type == "lv2":
-            d["lv2_uri"] = self.params.get("lv2_uri", "")
         if self.node_type == "sampler":
             d["sample_path"] = self.params.get("sample_path", "")
         if self.node_type in ("mixer", "output"):
@@ -524,7 +509,7 @@ class GraphNode:
                     d.setdefault("params", {})[cid] = val
             
         # Internal cache keys to exclude from server payload
-        _internal_keys = {"sf2_path", "lv2_uri", "sample_path",
+        _internal_keys = {"sf2_path", "sample_path",
                           "channel_count", "_ports", "_stereo_map", "_dual_mono",
                           "_plugin_desc"}
         param_keys = {k: v for k, v in self.params.items()
@@ -599,156 +584,7 @@ def _mono_port_to_server(port_id: str) -> str:
     if port_id == "mono_R": return "audio_out_R"
     return port_id
 
-
-# ---------------------------------------------------------------------------
-# LV2 stereo port detection
-# ---------------------------------------------------------------------------
-
 import re as _re
-
-def _lv2_stereo_key(sym: str):
-    """If sym looks like one half of a stereo pair, return (base, side) where
-    side is 'L' or 'R'.  Returns None if no stereo pattern is detected.
-
-    Recognised patterns (case-insensitive), tried in order:
-      explicit separator    in_l / in_r, out_left / out_right, audio_in_1 / audio_in_2
-                            space/dash/dot variants: "In L", "in-r", "audio.1"
-      no separator          AudioL / AudioR, inputLeft / inputRight
-      bare name             "left" / "right" / "l" / "r"  (base = empty string)
-    """
-    s = sym.lower().rstrip()
-
-    # Explicit separator (space / dash / dot / underscore before suffix)
-    for pat, side_map in [
-        (r'^(.+?)[_\-\. ]([lr])$',           {'l': 'L', 'r': 'R'}),
-        (r'^(.+?)[_\-\. ](left|right)$',      {'left': 'L', 'right': 'R'}),
-        (r'^(.+?)[_\-\. ]([12])$',            {'1': 'L', '2': 'R'}),
-    ]:
-        m = _re.match(pat, s)
-        if m:
-            suffix = m.group(m.lastindex)
-            if suffix in side_map:
-                base = m.group(1).rstrip('_-. ')
-                if base:
-                    return (base, side_map[suffix])
-
-    # No separator (camelCase or concatenated): "AudioL", "inputRight"
-    for pat, side_map in [
-        (r'^(.+?)(left|right)$',  {'left': 'L', 'right': 'R'}),
-        (r'^(.+?)([lr])$',        {'l': 'L', 'r': 'R'}),
-    ]:
-        m = _re.match(pat, s)
-        if m:
-            base, suffix = m.group(1), m.group(2)
-            if base and suffix in side_map:
-                return (base, side_map[suffix])
-
-    # Bare name: the entire symbol is just "left"/"right"/"l"/"r"
-    _bare = {'left': 'L', 'right': 'R', 'l': 'L', 'r': 'R'}
-    if s in _bare:
-        return ('', _bare[s])
-
-    return None
-
-
-def _lv2_build_ports(raw_ports: list) -> tuple:
-    """Convert a raw LV2 port list (from list_plugins JSON) to PortDef objects.
-
-    Returns (ports, stereo_map, dual_mono) where:
-      ports       - list of PortDef for the UI graph
-      stereo_map  - {port_id: {"L": sym_L, "R": sym_R}} for native-stereo plugins
-      dual_mono   - True if the plugin is genuinely mono (1 audio in, 1 audio out)
-                    and should be instantiated twice (L and R) on the server.
-
-    Native-stereo plugins (L/R suffix pairs) are collapsed into single AUDIO ports.
-
-    Dual-mono plugins (exactly one unpaired audio input + one unpaired audio output,
-    no other audio ports) get their lone ports promoted to AUDIO so they wire
-    directly with the rest of the stereo graph.  On serialisation, two server-side
-    LV2 nodes are emitted, one for each channel.
-
-    Anything else with unmatched audio ports stays as AUDIO_MONO.
-    """
-    from collections import defaultdict
-
-    audio_ports = [p for p in raw_ports if p.get("type") == "audio"]
-    other_ports = [p for p in raw_ports if p.get("type") != "audio"]
-
-    # Pass 1: match native L/R stereo pairs
-    groups: dict = defaultdict(list)
-    ungrouped = []
-    for p in audio_ports:
-        sym = p.get("symbol", "")
-        key = _lv2_stereo_key(sym)
-        if key:
-            groups[(key[0], p.get("direction", ""))].append((key[1], p))
-        else:
-            ungrouped.append(p)
-
-    result: list[PortDef] = []
-    stereo_map: dict = {}
-
-    for (base, direction), members in groups.items():
-        sides = {side: p for side, p in members}
-        if "L" in sides and "R" in sides:
-            sym_L = sides["L"].get("symbol", "l")
-            sym_R = sides["R"].get("symbol", "r")
-            port_id = base if base else sym_L
-            display_name = base if base else f"{sym_L}/{sym_R}"
-            result.append(PortDef(
-                name=display_name,
-                port_id=port_id,
-                ptype=PortType.AUDIO,
-                is_output=(direction == "output"),
-            ))
-            stereo_map[port_id] = {"L": sym_L, "R": sym_R}
-        else:
-            for side, p in members:
-                result.append(PortDef(
-                    name=p.get("symbol", "?"),
-                    port_id=p.get("symbol", "?"),
-                    ptype=PortType.AUDIO_MONO,
-                    is_output=(p.get("direction") == "output"),
-                ))
-
-    # Pass 2: dual-mono detection
-    # If no native stereo pairs were found and the plugin has exactly one unpaired
-    # audio input and one unpaired audio output, treat it as dual-mono: promote
-    # those ports to AUDIO and flag for dual instantiation on the server.
-    dual_mono = False
-    if not stereo_map:
-        mono_ins  = [p for p in ungrouped if p.get("direction") == "input"]
-        mono_outs = [p for p in ungrouped if p.get("direction") == "output"]
-        if len(mono_ins) == 1 and len(mono_outs) == 1:
-            dual_mono = True
-            for p, is_out in ((mono_ins[0], False), (mono_outs[0], True)):
-                sym = p.get("symbol", "?")
-                result.append(PortDef(
-                    name=p.get("name", sym),
-                    port_id=sym,
-                    ptype=PortType.AUDIO,
-                    is_output=is_out,
-                ))
-            ungrouped = []
-
-    for p in ungrouped:
-        result.append(PortDef(
-            name=p.get("symbol", "?"),
-            port_id=p.get("symbol", "?"),
-            ptype=PortType.AUDIO_MONO,
-            is_output=(p.get("direction") == "output"),
-        ))
-
-    for p in other_ports:
-        result.append(PortDef(
-            name=p.get("symbol", "?"),
-            port_id=p.get("symbol", "?"),
-            ptype=PortType.CONTROL,
-            is_output=(p.get("direction") == "output"),
-        ))
-
-    return result, stereo_map, dual_mono
-
 
 def default_hidden_ports_for_node(node_type: str) -> set:
     """Return port_ids that should be hidden by default for a given node type.
@@ -874,7 +710,7 @@ class GraphModel:
             if n.is_default_synth:
                 return n
         for n in self.nodes:
-            if n.node_type in ("fluidsynth", "sine", "sampler", "lv2"):
+            if n.node_type in ("fluidsynth", "sine", "sampler"):
                 return n
         return None
 
@@ -947,24 +783,6 @@ class GraphModel:
         # their two server-side instances below).
         nodes = [d for n in self.nodes
                  if (d := n.to_server_dict()) is not None]
-
-        # Emit a pair of LV2 nodes (id__L, id__R) for every dual-mono plugin
-        for n in self.nodes:
-            if n.node_type == "lv2" and n.params.get("_dual_mono"):
-                # Force port metadata to be populated
-                n.ports()
-                base_params = {k: v for k, v in n.params.items()
-                               if k not in ("_ports", "_stereo_map", "_dual_mono")
-                               and isinstance(v, (int, float))}
-                for side in ("L", "R"):
-                    d = {
-                        "id":      f"{n.node_id}__{side}",
-                        "type":    "lv2",
-                        "lv2_uri": n.params.get("lv2_uri", ""),
-                    }
-                    if base_params:
-                        d["params"] = base_params
-                    nodes.append(d)
 
         connections = []
         for c in self.connections:
@@ -1089,20 +907,10 @@ class GraphModel:
 
                 def _node_id_for_side(node_obj, base_id, side):
                     """Return the server node id for one channel of a stereo wire."""
-                    if node_obj and node_obj.node_type == "lv2" and node_obj.params.get("_dual_mono"):
-                        return f"{base_id}__{side}"
                     return base_id
 
                 def _port_for_side(node_obj, port_id, side):
                     """Return the server port symbol for one channel of a stereo wire."""
-                    if node_obj and node_obj.node_type == "lv2":
-                        if node_obj.params.get("_dual_mono"):
-                            # The server node has only one audio port; use its symbol directly
-                            return port_id
-                        sm = node_obj.params.get("_stereo_map", {})
-                        pair = sm.get(port_id)
-                        if pair:
-                            return pair[side]
                     # Plugin-backed nodes go through PluginAdapterNode, which expands
                     # an AudioStereo port named "audio_out" to "audio_out_L"/"audio_out_R".
                     # The graph-model logical port "audio" maps to server "audio_out_{side}"
@@ -1128,20 +936,10 @@ class GraphModel:
                 # MIDI or CONTROL — mostly pass through as-is.
                 # Exception: if the destination is a dual-mono LV2 node, the
                 # control value needs to reach both __L and __R instances.
-                if (dst_node and dst_node.node_type == "lv2"
-                        and dst_node.params.get("_dual_mono")):
-                    for side in ("L", "R"):
-                        connections.append({
-                            "from_node": from_node,
-                            "from_port": c.from_port,
-                            "to_node":   f"{to_node}__{side}",
-                            "to_port":   c.to_port,
-                        })
-                else:
-                    connections.append({
-                        "from_node": from_node, "from_port": c.from_port,
-                        "to_node":   to_node,   "to_port":   c.to_port,
-                    })
+                connections.append({
+                    "from_node": from_node, "from_port": c.from_port,
+                    "to_node":   to_node,   "to_port":   c.to_port,
+                })
 
         return {"cmd": "set_graph", "bpm": bpm, "nodes": nodes, "connections": connections}
 

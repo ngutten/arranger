@@ -120,7 +120,6 @@ constexpr const char* CMD_GET_NODE_DATA = "get_node_data";
 //   "type": "fluidsynth"          // SF2-backed MIDI synth
 //           | "sine"              // built-in sine fallback
 //           | "sampler"           // sample player (pitch+vel adjusted)
-//           | "lv2"               // LV2 plugin
 //           | "mixer"             // N-input stereo mixer (always one, id="mixer")
 //           | "control_source"    // emits control values from event stream
 //           | "track_source",     // addressable event source for one sequencer track
@@ -128,7 +127,6 @@ constexpr const char* CMD_GET_NODE_DATA = "get_node_data";
 //                                 //     to downstream processor nodes
 //   // type-specific fields:
 //   "sf2_path": str,              // fluidsynth only
-//   "lv2_uri": str,               // lv2 only
 //   "sample_path": str,           // sampler only
 //   "channel_count": int,         // mixer: number of input channels (default 2)
 //   "params": {str: float, ...}   // initial parameter values

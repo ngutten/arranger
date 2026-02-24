@@ -62,7 +62,6 @@ class GraphEditorWindow(QWidget):
     """
 
     closed = Signal()
-    _lv2_plugins_ready = Signal(object)   # carries the response dict; emitted from worker thread
 
     def __init__(self, model: GraphModel, server_engine,
                  state, on_graph_changed: Callable = None,
@@ -299,7 +298,6 @@ class GraphEditorWindow(QWidget):
             "fluidsynth":          "FluidSynth",
             "sine":                "Sine",
             "sampler":             "Sampler",
-            "lv2":                 "LV2",
             "mixer":               "Mixer",
             "output":              "Output",
             "control_source":      "Control Source",
@@ -400,7 +398,7 @@ class GraphEditorWindow(QWidget):
 
         # A node is a "synth" (can be default target for new tracks) if it's
         # a known synth type OR a plugin with Event input + Audio output.
-        is_synth = node.node_type in ("fluidsynth", "sine", "sampler", "lv2")
+        is_synth = node.node_type in ("fluidsynth", "sine", "sampler")
         if not is_synth:
             ports = node.ports()
             has_event_in = any(p.ptype == PortType.MIDI and not p.is_output for p in ports)

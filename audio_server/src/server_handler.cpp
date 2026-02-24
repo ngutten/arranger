@@ -6,10 +6,6 @@
 #include "plugin_api.h"
 #include "plugin_loader.h"
 
-#ifdef AS_ENABLE_LV2
-#include "synth_node.h"  // list_lv2_plugins
-#endif
-
 #include <iostream>
 
 using json = nlohmann::json;
@@ -62,9 +58,6 @@ json ServerHandler::dispatch(const std::string& cmd, const json& req) {
                 {"features", {
 #ifdef AS_ENABLE_SF2
                     "fluidsynth",
-#endif
-#ifdef AS_ENABLE_LV2
-                    "lv2",
 #endif
                     "sine", "mixer", "control_source", "track_source",
                     "note_on", "note_off", "all_notes_off", "set_node_config"
@@ -168,15 +161,6 @@ json ServerHandler::dispatch(const std::string& cmd, const json& req) {
         }
         return {{"status", "error"}, {"message", "unknown format: " + fmt}};
     }
-
-    // -------------------------------------------------------------------
-#ifdef AS_ENABLE_LV2
-    if (cmd == protocol::CMD_LIST_PLUGINS) {
-        std::string prefix = req.value("uri_prefix", "");
-        std::string plugins_json = list_lv2_plugins(prefix);
-        return {{"status", "ok"}, {"plugins", json::parse(plugins_json)}};
-    }
-#endif
 
     // -------------------------------------------------------------------
     if (cmd == protocol::CMD_NOTE_ON) {

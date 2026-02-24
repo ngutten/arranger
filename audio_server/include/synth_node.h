@@ -252,9 +252,8 @@ private:
 
 struct NodeDesc {
     std::string id;
-    std::string type;          // "fluidsynth"|"sine"|"lv2"|"mixer"|"control_source"|"track_source"|"note_gate"
+    std::string type;          // "fluidsynth"|"sine"|"mixer"|"control_source"|"track_source"|"note_gate"
     std::string sf2_path;      // fluidsynth
-    std::string lv2_uri;       // lv2
     std::string sample_path;   // sampler (future)
     int         channel_count = 2;  // mixer
     int         pitch_lo      = 0;   // note_gate
