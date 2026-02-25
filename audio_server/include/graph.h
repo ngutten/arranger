@@ -77,6 +77,7 @@ public:
     virtual void program_change(int channel, int bank, int program) {}
     virtual void pitch_bend(int channel, int value) {}
     virtual void channel_volume(int channel, int volume) {}
+    virtual void note_tune(int channel, int note, float semitones) {}
     virtual void all_notes_off(int channel = -1) {}
     virtual void push_control(double beat, float normalized_value) {}
 

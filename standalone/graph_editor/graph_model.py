@@ -495,23 +495,28 @@ class GraphNode:
             d["gate_mode"] = self.params.get("gate_mode", 0)
 
         # For plugin-backed nodes, pass config_params through the params dict
-        # so make_node() can forward them via configure()
-        # Some string values (e.g. sf2_path)
-        # travel via their dedicated top-level NodeDesc fields
+        # so make_node() can forward them via configure().
+        # Config params must arrive as JSON strings so graph.cpp routes them
+        # through Plugin::configure() (string_params path) rather than
+        # set_param() (control port path), which doesn't handle config keys.
         desc = get_plugin_descriptor(self.node_type)
+        config_param_ids: set = set()
         if desc:
             config_params_by_id = {cp["id"]: cp for cp in desc.get("config_params", [])}
-            for cid, cp in config_params_by_id.items():
+            config_param_ids = set(config_params_by_id.keys())
+            for cid in config_params_by_id:
                 if cid in self.params:
                     val = self.params[cid]
-                    # String config params (filepath, string, etc.) go into params too;
-                    # graph.cpp forwards them via configure() for plugin-backed nodes.
+                    if isinstance(val, bool):
+                        val = "true" if val else "false"
+                    elif not isinstance(val, str):
+                        val = str(val)
                     d.setdefault("params", {})[cid] = val
-            
+
         # Internal cache keys to exclude from server payload
         _internal_keys = {"sf2_path", "sample_path",
                           "channel_count", "_ports", "_stereo_map", "_dual_mono",
-                          "_plugin_desc"}
+                          "_plugin_desc"} | config_param_ids
         param_keys = {k: v for k, v in self.params.items()
                       if k not in _internal_keys
                       and isinstance(v, (int, float))}

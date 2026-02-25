@@ -160,13 +160,21 @@ def build_beat_pattern_preview(state):
             'tsDen': state.ts_den, 'tracks': tracks}
 
 
-def render_and_play_arr(arr, sf2_path, player):
+def render_and_play_arr(arr, sf2_path, player, engine=None):
     """Render an arrangement dict and play via player in a background thread.
-    
-    Used for pattern previews. Separate from export since this takes
-    a pre-built arrangement dict rather than building from state.
+
+    When an engine (BindingEngine) is supplied, the server's in-process
+    FluidSynth renderer is used.  This preserves per-note pitch bends (via
+    note_tune / fluid_synth_tune_notes) which the external fluidsynth
+    subprocess cannot reproduce.  Falls back to the MIDI-export path when no
+    engine is available.
     """
     def work():
+        if engine is not None:
+            wav = engine.render_arr_wav(arr)
+            if wav:
+                player.play_async(wav)
+            return
         midi = create_midi(arr)
         wav = None
         if sf2_path:

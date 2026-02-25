@@ -372,20 +372,16 @@ std::string AudioEngine::set_node_config(const std::string& node_id,
     try { cfg = nlohmann::json::parse(config_json); }
     catch (const std::exception& e) { return std::string("config JSON error: ") + e.what(); }
 
-#ifdef AS_ENABLE_SF2
-    // FluidSynthNode: sf2_path reload
-    if (auto* fs = dynamic_cast<FluidSynthNode*>(node)) {
-        if (cfg.contains("sf2_path")) {
-            // Reload is destructive — rebuild a new node and swap it in.
-            // For now we delegate to a re-set_graph from the caller; here we
-            // just report that sf2_path changes require set_graph. A proper
-            // hot-reload can be added later when FluidSynthNode exposes a
-            // reload() method.
-            return "sf2_path changes require a set_graph call (hot-reload not yet implemented)";
+    // PluginAdapterNode: route config changes through plugin->configure()
+    if (auto* pa = dynamic_cast<PluginAdapterNode*>(node)) {
+        for (auto& [key, val] : cfg.items()) {
+            std::string str_val;
+            if (val.is_string()) str_val = val.get<std::string>();
+            else str_val = val.dump();
+            pa->plugin()->configure(key, str_val);
         }
         return {};
     }
-#endif
 
     // MixerNode: master_gain, channel_count
     if (auto* mx = dynamic_cast<MixerNode*>(node)) {

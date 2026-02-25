@@ -387,6 +387,10 @@ void PluginAdapterNode::channel_volume(int channel, int volume) {
     plugin_->channel_volume(channel, volume);
 }
 
+void PluginAdapterNode::note_tune(int channel, int note, float semitones) {
+    plugin_->note_tune(channel, note, semitones);
+}
+
 void PluginAdapterNode::push_control(double beat, float normalized_value) {
     for (auto& m : control_map_) {
         if (!m.is_output) {

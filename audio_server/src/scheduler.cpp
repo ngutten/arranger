@@ -41,7 +41,8 @@ std::unique_ptr<Schedule> Schedule::from_json(const std::string& j_str, std::str
         else if (type_str == "program")  evt.type = EventType::Program;
         else if (type_str == "volume")   evt.type = EventType::Volume;
         else if (type_str == "bend")     evt.type = EventType::Bend;
-        else if (type_str == "control")  evt.type = EventType::Control;
+        else if (type_str == "control")    evt.type = EventType::Control;
+        else if (type_str == "note_tune")  evt.type = EventType::NoteTune;
         else {
             err = "Unknown event type: " + type_str;
             return nullptr;
@@ -54,13 +55,14 @@ std::unique_ptr<Schedule> Schedule::from_json(const std::string& j_str, std::str
     // Sort: beat ascending, then priority (off/bend/prog before on)
     auto priority = [](EventType t) -> int {
         switch (t) {
-            case EventType::NoteOff: return 0;
-            case EventType::Bend:    return 1;
-            case EventType::Program: return 1;
-            case EventType::Volume:  return 1;
-            case EventType::Control: return 1;
-            case EventType::NoteOn:  return 2;
-            default:                 return 1;
+            case EventType::NoteOff:  return 0;
+            case EventType::Bend:     return 1;
+            case EventType::Program:  return 1;
+            case EventType::Volume:   return 1;
+            case EventType::Control:  return 1;
+            case EventType::NoteTune: return 1;
+            case EventType::NoteOn:   return 2;
+            default:                  return 1;
         }
     };
 
@@ -155,6 +157,9 @@ void Dispatcher::dispatch(double start_beat, double end_beat, Graph* graph) {
                         break;
                     case EventType::Control:
                         node->push_control(e.beat, e.value);
+                        break;
+                    case EventType::NoteTune:
+                        node->note_tune(e.channel, e.pitch, e.value);
                         break;
                 }
             }

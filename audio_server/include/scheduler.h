@@ -23,6 +23,7 @@ enum class EventType : uint8_t {
     Volume      = 3,   // pitch=volume
     Bend        = 4,   // pitch=14-bit bend value (8192=center)
     Control     = 5,   // value=normalized 0..1, delivered to control_source node
+    NoteTune    = 6,   // per-note pitch offset; channel=ch, pitch=note, value=semitones (float)
 };
 
 struct SchedEvent {

@@ -72,11 +72,15 @@ json ServerHandler::dispatch(const std::string& cmd, const json& req) {
 
     // -------------------------------------------------------------------
     if (cmd == protocol::CMD_SET_GRAPH) {
+        // Try to open the audio stream for live playback, but do not block
+        // graph setup if it fails.  The graph is needed for offline rendering
+        // even on headless systems where PortAudio has no output device.
         if (!engine_.is_open()) {
-            std::string err = engine_.open();
-            if (!err.empty())
-                return {{"status", "error"}, {"message", "stream: " + err}};
-            stream_open_ = true;
+            std::string open_err = engine_.open();
+            if (open_err.empty())
+                stream_open_ = true;
+            // Stream failure is non-fatal here: set_graph still proceeds so
+            // render_offline_wav() works without audio hardware.
         }
         std::string err = engine_.set_graph(req.dump());
         if (!err.empty()) return {{"status", "error"}, {"message", err}};

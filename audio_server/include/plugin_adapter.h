@@ -30,6 +30,7 @@ public:
     void program_change(int channel, int bank, int program) override;
     void pitch_bend(int channel, int value) override;
     void channel_volume(int channel, int volume) override;
+    void note_tune(int channel, int note, float semitones) override;
     void push_control(double beat, float normalized_value) override;
 
     Plugin* plugin() { return plugin_.get(); }

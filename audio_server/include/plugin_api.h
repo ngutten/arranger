@@ -288,6 +288,7 @@ public:
     virtual void program_change(int channel, int bank, int program) { (void)channel; (void)bank; (void)program; }
     virtual void control_change(int channel, int cc, int value) { (void)channel; (void)cc; (void)value; }
     virtual void channel_volume(int channel, int volume) { (void)channel; (void)volume; }
+    virtual void note_tune(int channel, int note, float semitones) { (void)channel; (void)note; (void)semitones; }
 
     virtual void on_transport_stop() {}
 

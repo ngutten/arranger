@@ -884,7 +884,8 @@ class App(QMainWindow):
         """Render an arrangement and play it in a background thread."""
         from .ops.export import _get_sf2_path
         play_ops.render_and_play_arr(
-            arr, _get_sf2_path(self.state.sf2), self.player)
+            arr, _get_sf2_path(self.state.sf2), self.player,
+            engine=self.engine)
 
     # ---- Pattern/Beat Pattern Dialogs ----
     

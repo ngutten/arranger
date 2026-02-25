@@ -196,104 +196,6 @@ void ControlSourceNode::process(const ProcessContext& /*ctx*/,
 }
 
 // ---------------------------------------------------------------------------
-// FluidSynthNode
-// ---------------------------------------------------------------------------
-
-#ifdef AS_ENABLE_SF2
-#include <fluidsynth.h>
-
-FluidSynthNode::FluidSynthNode(const std::string& id_, const std::string& sf2_path)
-    : sf2_path_(sf2_path)
-{
-    id = id_;
-}
-
-FluidSynthNode::~FluidSynthNode() { deactivate(); }
-
-std::vector<Node::PortDecl> FluidSynthNode::declare_ports() const {
-    return {
-        {"audio_out_L", PortType::AudioMono, true},
-        {"audio_out_R", PortType::AudioMono, true},
-    };
-}
-
-void FluidSynthNode::activate(float sample_rate, int max_block_size) {
-    sample_rate_ = sample_rate;
-    block_size_  = max_block_size;
-
-    fset_ = new_fluid_settings();
-    fluid_settings_setnum(static_cast<fluid_settings_t*>(fset_),
-                          "synth.sample-rate", sample_rate);
-    fluid_settings_setnum(static_cast<fluid_settings_t*>(fset_),
-                          "synth.gain", 0.15);
-    fluid_settings_setint(static_cast<fluid_settings_t*>(fset_),
-                          "synth.threadsafe-api", 0);
-
-    fs_ = new_fluid_synth(static_cast<fluid_settings_t*>(fset_));
-    sfid_ = fluid_synth_sfload(static_cast<fluid_synth_t*>(fs_),
-                                sf2_path_.c_str(), 1);
-    if (sfid_ == FLUID_FAILED)
-        throw std::runtime_error("FluidSynth: failed to load " + sf2_path_);
-
-    for (int ch = 0; ch < 16; ++ch)
-        if (ch != 9)
-            fluid_synth_program_select(static_cast<fluid_synth_t*>(fs_),
-                                       ch, sfid_, 0, 0);
-
-    raw_buf_.resize(max_block_size * 2);
-}
-
-void FluidSynthNode::deactivate() {
-    if (fs_)   { delete_fluid_synth(static_cast<fluid_synth_t*>(fs_));     fs_   = nullptr; }
-    if (fset_) { delete_fluid_settings(static_cast<fluid_settings_t*>(fset_)); fset_ = nullptr; }
-    sfid_ = -1;
-}
-
-void FluidSynthNode::note_on(int ch, int pitch, int vel) {
-    fluid_synth_noteon(static_cast<fluid_synth_t*>(fs_), ch, pitch, vel);
-}
-void FluidSynthNode::note_off(int ch, int pitch) {
-    fluid_synth_noteoff(static_cast<fluid_synth_t*>(fs_), ch, pitch);
-}
-void FluidSynthNode::program_change(int ch, int bank, int prog) {
-    fluid_synth_program_select(static_cast<fluid_synth_t*>(fs_), ch, sfid_, bank, prog);
-}
-void FluidSynthNode::pitch_bend(int ch, int value) {
-    fluid_synth_pitch_bend(static_cast<fluid_synth_t*>(fs_), ch, value);
-}
-void FluidSynthNode::channel_volume(int ch, int vol) {
-    fluid_synth_cc(static_cast<fluid_synth_t*>(fs_), ch, 7, std::max(0, std::min(127, vol)));
-}
-void FluidSynthNode::all_notes_off(int channel) {
-    auto* fs = static_cast<fluid_synth_t*>(fs_);
-    if (channel == -1) {
-        for (int ch = 0; ch < 16; ++ch) {
-            fluid_synth_cc(fs, ch, 123, 0);
-            fluid_synth_cc(fs, ch, 120, 0);
-        }
-    } else {
-        fluid_synth_cc(fs, channel, 123, 0);
-        fluid_synth_cc(fs, channel, 120, 0);
-    }
-}
-
-void FluidSynthNode::process(const ProcessContext& ctx,
-                               const std::vector<PortBuffer>& /*inputs*/,
-                               std::vector<PortBuffer>& outputs)
-{
-    auto* fs = static_cast<fluid_synth_t*>(fs_);
-    float* L = outputs[0].audio;
-    float* R = outputs[1].audio;
-    fluid_synth_write_float(fs, ctx.block_size, L, 0, 1, R, 0, 1);
-    for (int i = 0; i < ctx.block_size; ++i) {
-        if (L[i] > 0.95f || L[i] < -0.95f) L[i] = std::tanh(L[i]);
-        if (R[i] > 0.95f || R[i] < -0.95f) R[i] = std::tanh(R[i]);
-    }
-}
-
-#endif // AS_ENABLE_SF2
-
-// ---------------------------------------------------------------------------
 // TrackSourceNode
 // ---------------------------------------------------------------------------
 
@@ -336,6 +238,9 @@ void TrackSourceNode::pitch_bend(int channel, int value) {
 }
 void TrackSourceNode::channel_volume(int channel, int volume) {
     for (auto* n : downstream_) n->channel_volume(channel, volume);
+}
+void TrackSourceNode::note_tune(int channel, int note, float semitones) {
+    for (auto* n : downstream_) n->note_tune(channel, note, semitones);
 }
 void TrackSourceNode::all_notes_off(int channel) {
     for (auto* n : downstream_) n->all_notes_off(channel);
@@ -452,8 +357,12 @@ void NoteGateNode::recompute_value_() {
 std::unique_ptr<Node> make_node(const NodeDesc& desc, std::string& err) {
     AS_LOG("graph", "make_node: id='%s' type='%s'", desc.id.c_str(), desc.type.c_str());
 
+    // Translate legacy short type names to canonical plugin IDs
+    std::string canonical_type = desc.type;
+    if (canonical_type == "fluidsynth") canonical_type = "builtin.fluidsynth";
+
     // --- Try plugin registry first ---
-    auto plugin = PluginRegistry::create(desc.type);
+    auto plugin = PluginRegistry::create(canonical_type);
     if (plugin) {
         AS_LOG("graph", "  -> resolved via plugin registry: '%s'", desc.type.c_str());
         // Pass NodeDesc-specific fields through configure()
@@ -486,13 +395,6 @@ std::unique_ptr<Node> make_node(const NodeDesc& desc, std::string& err) {
         return std::make_unique<TrackSourceNode>(desc.id);
     if (desc.type == "note_gate")
         return std::make_unique<NoteGateNode>(desc.id, desc.pitch_lo, desc.pitch_hi, desc.gate_mode);
-#ifdef AS_ENABLE_SF2
-    if (desc.type == "fluidsynth") {
-        if (desc.sf2_path.empty()) { err = "fluidsynth node requires sf2_path"; return nullptr; }
-        try { return std::make_unique<FluidSynthNode>(desc.id, desc.sf2_path); }
-        catch (const std::exception& e) { err = e.what(); return nullptr; }
-    }
-#endif
     err = "Unknown node type: " + desc.type;
     return nullptr;
 }

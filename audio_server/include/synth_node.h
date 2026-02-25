@@ -102,6 +102,7 @@ public:
     void program_change(int channel, int bank, int program) override;
     void pitch_bend(int channel, int value) override;
     void channel_volume(int channel, int volume) override;
+    void note_tune(int channel, int note, float semitones) override;
 
     // Transport all_notes_off — clears schedule-driven notes downstream,
     // but leaves preview notes alive.
@@ -151,45 +152,6 @@ private:
     int              read_idx_  { 0 };
     float            current_   { 0.0f };
 };
-
-// ---------------------------------------------------------------------------
-// FluidSynthNode — SF2-backed MIDI synth  (compiled only with AS_ENABLE_SF2)
-// ---------------------------------------------------------------------------
-
-#ifdef AS_ENABLE_SF2
-
-class FluidSynthNode final : public Node {
-public:
-    FluidSynthNode(const std::string& id_, const std::string& sf2_path);
-    ~FluidSynthNode() override;
-
-    std::vector<PortDecl> declare_ports() const override;
-    void activate(float sample_rate, int max_block_size) override;
-    void deactivate() override;
-    void process(const ProcessContext& ctx,
-                 const std::vector<PortBuffer>& inputs,
-                 std::vector<PortBuffer>& outputs) override;
-
-    void note_on(int channel, int pitch, int velocity) override;
-    void note_off(int channel, int pitch) override;
-    void program_change(int channel, int bank, int program) override;
-    void pitch_bend(int channel, int value) override;
-    void channel_volume(int channel, int volume) override;
-    void all_notes_off(int channel = -1) override;
-
-private:
-    std::string sf2_path_;
-    void*       fs_   = nullptr;  // fluid_synth_t* (opaque to avoid header dep)
-    void*       fset_ = nullptr;  // fluid_settings_t*
-    int         sfid_ = -1;
-    float       sample_rate_ = 44100.0f;
-    int         block_size_  = 0;
-
-    // Temp interleaved buffer: fluidsynth gives us int16 interleaved
-    std::vector<int16_t> raw_buf_;
-};
-
-#endif // AS_ENABLE_SF2
 
 // ---------------------------------------------------------------------------
 // NoteGateNode — converts a MIDI event stream into a control signal

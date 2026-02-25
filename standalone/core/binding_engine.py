@@ -18,16 +18,76 @@ from __future__ import annotations
 import json
 import threading
 import time
-from typing import Optional
+from typing import Optional, List
 
 from pathlib import Path
 
 from ..arranger_engine import AudioServer, AudioEngineConfig, load_plugin_library
 from .settings import Settings
+from .engine import _emit_note_tune_events, SchedEvent, EVT_NOTE_TUNE
 
 # ---------------------------------------------------------------------------
 # Graph builder
 # ---------------------------------------------------------------------------
+
+def _build_schedule_from_arr(arr: dict, node_id: str) -> List[dict]:
+    """Convert an arrangement dict (from build_pattern_preview) to server events.
+
+    Mirrors _build_server_schedule but operates on the arrangement dict format
+    rather than AppState, so it can be used for preview renders without touching
+    live state.
+    """
+    events: List[dict] = []
+    for track in arr.get("tracks", []):
+        ch = track.get("channel", 0) & 0x0F
+        events.append({
+            "beat": -1, "type": "program", "node_id": node_id,
+            "channel": ch, "pitch": track.get("program", 0),
+            "velocity": track.get("bank", 0), "value": 0.0,
+        })
+        events.append({
+            "beat": -1, "type": "volume", "node_id": node_id,
+            "channel": ch, "pitch": track.get("volume", 100),
+            "velocity": 0, "value": 0.0,
+        })
+
+        for pl in track.get("placements", []):
+            pat        = pl.get("pattern", {})
+            offset     = pl.get("time", 0)
+            transpose  = pl.get("transpose", 0)
+            reps       = pl.get("repeats", 1) or 1
+            pat_length = pat.get("length", 0)
+
+            for rep in range(reps):
+                rep_offset = offset + rep * pat_length
+                for n in pat.get("notes", []):
+                    p        = max(0, min(127, n["pitch"] + transpose))
+                    v        = max(1, min(127, n["velocity"]))
+                    on_beat  = rep_offset + n["start"]
+                    off_beat = on_beat + n["duration"]
+
+                    events.append({
+                        "beat": on_beat, "type": "note_on", "node_id": node_id,
+                        "channel": ch, "pitch": p, "velocity": v, "value": 0.0,
+                    })
+                    events.append({
+                        "beat": off_beat, "type": "note_off", "node_id": node_id,
+                        "channel": ch, "pitch": p, "velocity": 0, "value": 0.0,
+                    })
+
+                    bend = n.get("bend")
+                    if bend:
+                        tune_sched: list[SchedEvent] = []
+                        _emit_note_tune_events(tune_sched, ch, p, on_beat,
+                                               n["duration"], bend)
+                        for te in tune_sched:
+                            events.append({
+                                "beat": te.beat, "type": "note_tune",
+                                "node_id": node_id, "channel": ch,
+                                "pitch": p, "velocity": 0, "value": te.value,
+                            })
+    return events
+
 
 def _build_graph(state, sf2_path: Optional[str]) -> dict:
     """Build the default track_source graph for the current session state.
@@ -78,9 +138,9 @@ def _build_graph(state, sf2_path: Optional[str]) -> dict:
 # Setup events (program, volume) are emitted with beat=-1.  The server clamps
 # these to fire before any note-ons, matching build_schedule() semantics.
 #
-# Bend auto-routing (the _BEND_POOL logic in engine.py) is not replicated here.
-# The server's fluidsynth node handles polyphony internally; bend curves are
-# emitted as "control" events on the same (node_id, channel) as the note.
+# Bend curves are emitted as "note_tune" events on the same (node_id, channel)
+# as the note.  The FluidSynth plugin applies them per-note via
+# fluid_synth_tune_notes, so no channel pool is needed.
 
 def _build_server_schedule(state) -> list[dict]:
     """Convert AppState to a flat list of server event dicts."""
@@ -130,15 +190,15 @@ def _build_server_schedule(state) -> list[dict]:
                 })
 
                 if n.bend:
-                    # Collect bend SchedEvents from engine helper, then convert.
-                    bend_sched: list[SchedEvent] = []
-                    _emit_bend_events(bend_sched, ch, on_beat, n.duration, n.bend)
-                    for be in bend_sched:
-                        norm = (be.pitch - 8192) / 8191.0
+                    # Emit per-note tune events — FluidSynth applies them
+                    # per-note via fluid_synth_tune_notes (no channel pool needed).
+                    tune_sched: list[SchedEvent] = []
+                    _emit_note_tune_events(tune_sched, ch, p, on_beat, n.duration, n.bend)
+                    for te in tune_sched:
                         events.append({
-                            "beat": be.beat, "type": "control",
+                            "beat": te.beat, "type": "note_tune",
                             "node_id": node_id, "channel": ch,
-                            "pitch": 0, "velocity": 0, "value": norm,
+                            "pitch": p, "velocity": 0, "value": te.value,
                         })
 
     # --- Beat tracks ---
@@ -246,6 +306,7 @@ class BindingEngine:
         self._sf2_path: Optional[str] = None
         self._graph_loaded             = False
         self._graph_track_ids          = frozenset()
+        self._send_lock                = threading.Lock()
 
         # Cache playing state so is_playing doesn't need a round-trip every call.
         self._is_playing   = False
@@ -265,11 +326,12 @@ class BindingEngine:
     # ------------------------------------------------------------------
 
     def _send(self, request: dict) -> Optional[dict]:
-        try:
-            return json.loads(self._server.handle(json.dumps(request)))
-        except Exception as e:
-            print(f"[BindingEngine] handle() error: {e}")
-            return None
+        with self._send_lock:
+            try:
+                return json.loads(self._server.handle(json.dumps(request)))
+            except Exception as e:
+                print(f"[BindingEngine] handle() error: {e}")
+                return None
 
     # ------------------------------------------------------------------
     # Graph / soundfont  (mirrors ServerEngine exactly)
@@ -317,7 +379,10 @@ class BindingEngine:
         if self.state.signal_graph is not None:
             self.state.signal_graph.sync_track_sources(self.state, self._sf2_path)
             self.state.signal_graph.sync_pattern_sources(self.state)
-        self._send(self._graph_payload())
+        resp = self._send(self._graph_payload())
+        if resp is None or resp.get("status") != "ok":
+            print(f"[BindingEngine] set_graph failed: {resp}")
+            return
         self._graph_loaded    = True
         self._graph_track_ids = self._current_track_ids()
         self._send({"cmd": "set_bpm", "bpm": self.state.bpm})
@@ -430,6 +495,65 @@ class BindingEngine:
             return base64.b64decode(resp["data"])
         except Exception as e:
             print(f"[BindingEngine] render decode error: {e}")
+            return None
+
+    def render_arr_wav(self, arr: dict) -> Optional[bytes]:
+        """Render an arrangement dict for preview via the server engine.
+
+        Unlike render_offline_wav(), this takes an arbitrary arrangement dict
+        (as produced by build_pattern_preview) rather than rebuilding from
+        AppState.  This lets pattern previews use the server's per-note tuning
+        (note_tune events / fluid_synth_tune_notes) instead of the MIDI
+        pitch-bend approximation used by the offline FluidSynth subprocess.
+
+        Thread-safe: uses _send_lock.  Marks graph dirty after rendering so
+        the next play() or note preview restores the real graph and schedule.
+        """
+        import base64
+
+        preview_node_id = "preview_track"
+        bpm = float(arr.get("bpm", 120.0))
+
+        synth_node: dict = {
+            "id": "synth",
+            "type": "fluidsynth" if self._sf2_path else "sine",
+        }
+        if self._sf2_path:
+            synth_node["sf2_path"] = self._sf2_path
+
+        preview_graph = {
+            "cmd": "set_graph",
+            "bpm": bpm,
+            "nodes": [
+                {"id": preview_node_id, "type": "track_source"},
+                synth_node,
+                {"id": "mixer", "type": "mixer", "channel_count": 1},
+            ],
+            "connections": [
+                {"from_node": preview_node_id, "from_port": "events_out",
+                 "to_node":   "synth",          "to_port":   "events_in"},
+                {"from_node": "synth", "from_port": "audio_out_L",
+                 "to_node":   "mixer", "to_port":   "audio_in_L_0"},
+                {"from_node": "synth", "from_port": "audio_out_R",
+                 "to_node":   "mixer", "to_port":   "audio_in_R_0"},
+            ],
+        }
+        events = _build_schedule_from_arr(arr, preview_node_id)
+
+        self._send(preview_graph)
+        self._send({"cmd": "set_schedule", "events": events})
+        resp = self._send({"cmd": "render", "format": "wav"})
+
+        # Mark graph dirty so the next play() / ensure_graph() rebuilds the
+        # real graph and schedule from AppState.
+        self._graph_loaded = False
+
+        if resp is None or resp.get("status") != "ok":
+            return None
+        try:
+            return base64.b64decode(resp["data"])
+        except Exception as e:
+            print(f"[BindingEngine] preview render decode error: {e}")
             return None
 
     # ------------------------------------------------------------------

@@ -1099,43 +1099,6 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable):
 
         return w
 
-    if t == "fluidsynth":
-        w = QWidget(parent)
-        w.setStyleSheet("background: transparent; color: #ccc;")
-        lay = QFormLayout(w)
-        lay.setContentsMargins(4, 2, 4, 2)
-        lay.setSpacing(3)
-
-        sf2_row = QWidget()
-        sf2_lay = QHBoxLayout(sf2_row)
-        sf2_lay.setContentsMargins(0, 0, 0, 0)
-        sf2_lay.setSpacing(3)
-        sf2_edit = QLineEdit(node.params.get("sf2_path", ""))
-        sf2_edit.setPlaceholderText("SF2 path…")
-        sf2_edit.setReadOnly(True)
-        sf2_edit.setStyleSheet("color: #aaa; background: #0d1117; border: 1px solid #2a3a5c;")
-        sf2_lay.addWidget(sf2_edit)
-        browse_btn = QPushButton("…")
-        browse_btn.setMaximumWidth(24)
-        browse_btn.setStyleSheet("background: #1a2236; color: #ccc;")
-
-        def _browse():
-            from PySide6.QtWidgets import QFileDialog
-            path, _ = QFileDialog.getOpenFileName(
-                w, "Select SF2", "", "SoundFont (*.sf2)",
-                options=QFileDialog.Option.DontUseNativeDialog)
-            if path:
-                sf2_edit.setText(path)
-                on_change(node.node_id, "sf2_path", path)
-        browse_btn.clicked.connect(_browse)
-        sf2_lay.addWidget(browse_btn)
-        lay.addRow(QLabel("SF2:"), sf2_row)
-
-        def _on_sf2_text_changed(text):
-            on_change(node.node_id, "sf2_path", text)
-        sf2_edit.textChanged.connect(_on_sf2_text_changed)
-        return w
-
     if t == "sampler":
         w = QWidget(parent)
         w.setStyleSheet("background: transparent; color: #ccc;")
