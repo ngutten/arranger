@@ -416,18 +416,22 @@ class GraphNode:
         t = self.node_type
         if t == "track_source":    return TRACK_SOURCE_PORTS
         if t == "midi_source":     return MIDI_SOURCE_PORTS
-        if t == "control_source":  return CONTROL_SOURCE_PORTS
         if t == "fluidsynth":      return FLUIDSYNTH_PORTS
         if t == "sine":            return SINE_PORTS
         if t == "pattern_source":      return PATTERN_SOURCE_PORTS
         if t == "beat_pattern_source": return BEAT_PATTERN_SOURCE_PORTS
-        # "sampler" falls through to plugin descriptor so ADSR control ports show.
-        # Fall back to minimal ports if descriptor not yet loaded from server.
+        # "sampler" and "control_source" fall through to plugin descriptor
         if t == "sampler":
             desc = get_plugin_descriptor(t)
             if desc:
                 return _plugin_ports_from_descriptor(desc, self.params)
             return SAMPLER_PORTS   # fallback: events_in + audio only
+        if t == "control_source":
+            # Now uses plugin descriptor from builtin.control_source
+            desc = get_plugin_descriptor(t)
+            if desc:
+                return _plugin_ports_from_descriptor(desc, self.params)
+            return CONTROL_SOURCE_PORTS   # fallback for backward compatibility
         if t == "split_stereo":    return SPLIT_STEREO_PORTS
         if t == "merge_stereo":    return MERGE_STEREO_PORTS
         if t == "note_gate":       return NOTE_GATE_PORTS

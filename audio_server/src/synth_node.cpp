@@ -166,36 +166,6 @@ void MixerNode::set_param(const std::string& name, float value) {
 }
 
 // ---------------------------------------------------------------------------
-// ControlSourceNode  (unchanged from original)
-// ---------------------------------------------------------------------------
-
-ControlSourceNode::ControlSourceNode(const std::string& id_) { id = id_; }
-
-std::vector<Node::PortDecl> ControlSourceNode::declare_ports() const {
-    return {
-        {"control_out", PortType::Control, true, 0.0f, 0.0f, 1.0f},
-    };
-}
-
-void ControlSourceNode::push_control(double beat, float value) {
-    int wi = write_idx_.load(std::memory_order_relaxed);
-    ring_[wi % RING_SIZE] = {beat, value};
-    write_idx_.store(wi + 1, std::memory_order_release);
-}
-
-void ControlSourceNode::process(const ProcessContext& /*ctx*/,
-                                  const std::vector<PortBuffer>& /*inputs*/,
-                                  std::vector<PortBuffer>& outputs)
-{
-    int wi = write_idx_.load(std::memory_order_acquire);
-    while (read_idx_ < wi) {
-        current_ = ring_[read_idx_ % RING_SIZE].value;
-        read_idx_++;
-    }
-    outputs[0].control = current_;
-}
-
-// ---------------------------------------------------------------------------
 // TrackSourceNode
 // ---------------------------------------------------------------------------
 
@@ -360,6 +330,7 @@ std::unique_ptr<Node> make_node(const NodeDesc& desc, std::string& err) {
     // Translate legacy short type names to canonical plugin IDs
     std::string canonical_type = desc.type;
     if (canonical_type == "fluidsynth") canonical_type = "builtin.fluidsynth";
+    if (canonical_type == "control_source") canonical_type = "builtin.control_source";
 
     // --- Try plugin registry first ---
     auto plugin = PluginRegistry::create(canonical_type);
@@ -389,8 +360,6 @@ std::unique_ptr<Node> make_node(const NodeDesc& desc, std::string& err) {
         return std::make_unique<SineNode>(desc.id);
     if (desc.type == "mixer")
         return std::make_unique<MixerNode>(desc.id, desc.channel_count);
-    if (desc.type == "control_source")
-        return std::make_unique<ControlSourceNode>(desc.id);
     if (desc.type == "track_source")
         return std::make_unique<TrackSourceNode>(desc.id);
     if (desc.type == "note_gate")

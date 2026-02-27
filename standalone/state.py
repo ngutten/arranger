@@ -389,6 +389,115 @@ class BeatInstrument:
         )
 
 
+@dataclass
+class AutomationPoint:
+    """Single point in an automation curve.
+    
+    Similar to pitch bend points in Note.bend, but for general automation.
+    time is in beats relative to pattern start.
+    value is the control value (typically 0.0-1.0, but user-configurable range).
+    curve determines interpolation: 'linear', 'step', 'smooth' (cubic spline).
+    """
+    time: float
+    value: float
+    curve: str = 'linear'
+
+    def to_dict(self):
+        return {'time': self.time, 'value': self.value, 'curve': self.curve}
+
+    @staticmethod
+    def from_dict(d):
+        return AutomationPoint(
+            time=d['time'], value=d['value'], curve=d.get('curve', 'linear')
+        )
+
+
+@dataclass
+class AutomationPattern:
+    """Automation curve pattern - like Pattern/BeatPattern but for control signals.
+    
+    Points define the curve shape. Interpolation happens between points.
+    min_value/max_value define the editing range (not clamped on output).
+    """
+    id: int
+    name: str
+    length: float = 4.0
+    color: str = '#4a90e2'
+    points: list = field(default_factory=list)  # list[AutomationPoint]
+    min_value: float = 0.0
+    max_value: float = 1.0
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'name': self.name, 'length': self.length,
+            'color': self.color,
+            'points': [p.to_dict() for p in self.points],
+            'minValue': self.min_value, 'maxValue': self.max_value,
+        }
+
+    @staticmethod
+    def from_dict(d):
+        return AutomationPattern(
+            id=d['id'], name=d['name'], length=d['length'],
+            color=d.get('color', '#4a90e2'),
+            points=[AutomationPoint.from_dict(p) for p in d.get('points', [])],
+            min_value=d.get('minValue', 0.0),
+            max_value=d.get('maxValue', 1.0),
+        )
+
+
+@dataclass
+class AutomationTrack:
+    """Track containing automation pattern placements.
+    
+    target_node and target_param reference a ControlSource node in the signal graph.
+    User must manually create the ControlSource node and connect it to the desired
+    parameter, then configure this track to reference that node.
+    """
+    id: int
+    name: str
+    target_node: str = ""    # Node ID in signal graph (e.g., "control_source_1")
+    target_param: str = ""   # Parameter/port ID (typically "control_out")
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'name': self.name,
+            'targetNode': self.target_node, 'targetParam': self.target_param,
+        }
+
+    @staticmethod
+    def from_dict(d):
+        return AutomationTrack(
+            id=d['id'], name=d['name'],
+            target_node=d.get('targetNode', ''),
+            target_param=d.get('targetParam', ''),
+        )
+
+
+@dataclass
+class AutomationPlacement:
+    """Instance of an automation pattern on an automation track."""
+    id: int
+    track_id: int
+    pattern_id: int
+    time: float = 0
+    repeats: int = 1
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'trackId': self.track_id,
+            'patternId': self.pattern_id, 'time': self.time,
+            'repeats': self.repeats,
+        }
+
+    @staticmethod
+    def from_dict(d):
+        return AutomationPlacement(
+            id=d['id'], track_id=d['trackId'], pattern_id=d['patternId'],
+            time=d.get('time', 0), repeats=d.get('repeats', 1),
+        )
+
+
 class AppState:
     """Central application state with observer pattern for UI updates.
 
@@ -405,6 +514,7 @@ class AppState:
     _COLLECTIONS = (
         'patterns', 'tracks', 'placements',
         'beat_kit', 'beat_patterns', 'beat_tracks', 'beat_placements',
+        'automation_patterns', 'automation_tracks', 'automation_placements',
     )
 
     def __init__(self):
@@ -422,6 +532,10 @@ class AppState:
         self._beat_tracks = IndexedList()
         self._beat_placements = IndexedList()
 
+        self._automation_patterns = IndexedList()
+        self._automation_tracks = IndexedList()
+        self._automation_placements = IndexedList()
+
         self.sf2 = None  # SF2Info or dict with path/name/presets
 
         # Selection state
@@ -431,6 +545,9 @@ class AppState:
         self.sel_beat_pat: Optional[int] = None
         self.sel_beat_trk: Optional[int] = None
         self.sel_beat_pl: Optional[int] = None
+        self.sel_auto_pat: Optional[int] = None
+        self.sel_auto_trk: Optional[int] = None
+        self.sel_auto_pl: Optional[int] = None
 
         # Editing state
         self.tool: str = 'edit'
@@ -512,6 +629,30 @@ class AppState:
     def beat_placements(self, value):
         self._beat_placements = value if isinstance(value, IndexedList) else IndexedList(value)
 
+    @property
+    def automation_patterns(self) -> IndexedList:
+        return self._automation_patterns
+
+    @automation_patterns.setter
+    def automation_patterns(self, value):
+        self._automation_patterns = value if isinstance(value, IndexedList) else IndexedList(value)
+
+    @property
+    def automation_tracks(self) -> IndexedList:
+        return self._automation_tracks
+
+    @automation_tracks.setter
+    def automation_tracks(self, value):
+        self._automation_tracks = value if isinstance(value, IndexedList) else IndexedList(value)
+
+    @property
+    def automation_placements(self) -> IndexedList:
+        return self._automation_placements
+
+    @automation_placements.setter
+    def automation_placements(self, value):
+        self._automation_placements = value if isinstance(value, IndexedList) else IndexedList(value)
+
     def new_id(self) -> int:
         nid = self._next_id
         self._next_id += 1
@@ -545,6 +686,15 @@ class AppState:
 
     def find_beat_instrument(self, iid) -> Optional[BeatInstrument]:
         return self._beat_kit.get(iid)
+
+    def find_automation_pattern(self, apid) -> Optional[AutomationPattern]:
+        return self._automation_patterns.get(apid)
+
+    def find_automation_track(self, atid) -> Optional[AutomationTrack]:
+        return self._automation_tracks.get(atid)
+
+    def find_automation_placement(self, aplid) -> Optional[AutomationPlacement]:
+        return self._automation_placements.get(aplid)
 
     def compute_transpose(self, pl: Placement) -> int:
         """Compute total transposition for a placement (manual + key shift)."""
@@ -633,6 +783,9 @@ class AppState:
             'beatPatterns': [p.to_dict() for p in self.beat_patterns],
             'beatTracks': [t.to_dict() for t in self.beat_tracks],
             'beatPlacements': [p.to_dict() for p in self.beat_placements],
+            'automationPatterns': [p.to_dict() for p in self.automation_patterns],
+            'automationTracks': [t.to_dict() for t in self.automation_tracks],
+            'automationPlacements': [p.to_dict() for p in self.automation_placements],
             'sf2Path': self.sf2.path if self.sf2 else None,
             'nextId': self._next_id,
             'signalGraph': (self.signal_graph.to_dict()
@@ -653,6 +806,9 @@ class AppState:
         self.beat_patterns = [BeatPattern.from_dict(p) for p in d.get('beatPatterns', [])]
         self.beat_tracks = [BeatTrack.from_dict(t) for t in d.get('beatTracks', [])]
         self.beat_placements = [BeatPlacement.from_dict(p) for p in d.get('beatPlacements', [])]
+        self.automation_patterns = [AutomationPattern.from_dict(p) for p in d.get('automationPatterns', [])]
+        self.automation_tracks = [AutomationTrack.from_dict(t) for t in d.get('automationTracks', [])]
+        self.automation_placements = [AutomationPlacement.from_dict(p) for p in d.get('automationPlacements', [])]
         self._next_id = d.get('nextId', 1)
         self.sel_pat = None
         self.sel_trk = self.tracks[0].id if self.tracks else None
@@ -660,6 +816,9 @@ class AppState:
         self.sel_beat_pat = None
         self.sel_beat_trk = None
         self.sel_beat_pl = None
+        self.sel_auto_pat = None
+        self.sel_auto_trk = None
+        self.sel_auto_pl = None
         # sf2Path is stored but the caller must reload the SF2 file
         self._sf2_path_hint = d.get('sf2Path')
         # Signal graph
