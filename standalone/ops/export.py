@@ -23,6 +23,12 @@ def export_midi(state):
     return create_midi(arr)
 
 
+def export_musicxml(state):
+    """Return MusicXML bytes for the arrangement."""
+    from .export_musicxml import create_musicxml
+    return create_musicxml(state)
+
+
 def render_wav(state, engine=None):
     """Render arrangement to WAV bytes.
     

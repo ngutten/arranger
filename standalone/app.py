@@ -1091,7 +1091,7 @@ class App(QMainWindow):
     # ---- Export ----
 
     def do_export(self, fmt):
-        """Export the arrangement as MIDI, WAV, or MP3."""
+        """Export the arrangement as MIDI, WAV, MP3, or MusicXML."""
         if fmt == 'midi':
             path, _ = QFileDialog.getSaveFileName(
                 None, 'Export MIDI', '', 'MIDI files (*.mid);;All files (*.*)',
@@ -1100,6 +1100,17 @@ class App(QMainWindow):
                 midi = export_ops.export_midi(self.state)
                 with open(path, 'wb') as f:
                     f.write(midi)
+            return
+
+        if fmt == 'musicxml':
+            path, _ = QFileDialog.getSaveFileName(
+                None, 'Export MusicXML', '',
+                'MusicXML files (*.musicxml *.xml);;All files (*.*)',
+                options=QFileDialog.DontUseNativeDialog)
+            if path:
+                data = export_ops.export_musicxml(self.state)
+                with open(path, 'wb') as f:
+                    f.write(data)
             return
 
         # Get file path BEFORE starting background thread

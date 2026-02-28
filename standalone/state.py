@@ -198,19 +198,24 @@ class Note:
     # beat_offset is relative to note start, clamped to [0, duration].
     # semitones is in [-2.0, 2.0]. Empty list = no bend.
     bend: list = field(default_factory=list)
+    # Lyric syllable associated with this note (for singing synthesis / export).
+    lyric: str = ''
 
     def to_dict(self):
         d = {'pitch': self.pitch, 'start': self.start,
              'duration': self.duration, 'velocity': self.velocity}
         if self.bend:
             d['bend'] = self.bend
+        if self.lyric:
+            d['lyric'] = self.lyric
         return d
 
     @staticmethod
     def from_dict(d):
         return Note(pitch=d['pitch'], start=d['start'],
                     duration=d['duration'], velocity=d.get('velocity', 100),
-                    bend=d.get('bend', []))
+                    bend=d.get('bend', []),
+                    lyric=d.get('lyric', ''))
 
 
 @dataclass

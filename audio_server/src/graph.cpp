@@ -42,6 +42,7 @@ static PatternData parse_pattern_data(const json& jp) {
         n.velocity = static_cast<uint8_t>(jn.value("velocity", 100));
         n.program  = jn.value("program", -1);
         n.bank     = jn.value("bank",    -1);
+        n.lyric    = jn.value("lyric",   "");
         pd.notes.push_back(n);
     }
 
@@ -240,6 +241,9 @@ void Graph::wire_pattern_ports() {
         if (!adapter) continue;
 
         adapter->set_pattern(c.to_port, pd);
+        // Notify the plugin so it can inspect the full pattern data (including
+        // per-note lyrics) before activate() is called.
+        adapter->plugin()->on_pattern_connected(*pd);
     }
 }
 

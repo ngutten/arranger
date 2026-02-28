@@ -224,6 +224,29 @@ std::string AudioEngine::set_schedule(const std::string& schedule_json) {
     auto sched = Schedule::from_json(schedule_json, err);
     if (!sched) return err;
 
+    // Pre-deliver lyric syllables to singing plugins so they can pre-render
+    // phonemes before playback starts.  NoteOn events with non-empty lyrics
+    // are pushed in beat order to the target track_source node, which fans
+    // them out to its downstream plugin nodes.
+    {
+        Graph* g = active_graph_.load(std::memory_order_acquire);
+        if (g) {
+            for (const auto& evt : sched->events()) {
+                if (evt.type == EventType::NoteOn) {
+                    Node* n = g->find_node(evt.node_id);
+                    // Pass lyric for every NoteOn — empty lyric lets singing plugins
+                    // insert a null (silent) entry so their syllable counter stays
+                    // in sync with the full note stream.
+                    if (n) n->push_lyric(evt.beat, evt.lyric);
+                }
+            }
+            // Signal end of lyric delivery so plugins can publish their sequences.
+            for (const auto& nid : g->eval_order()) {
+                if (Node* n = g->find_node(nid)) n->on_schedule_loaded();
+            }
+        }
+    }
+
     // Apply immediately on the calling thread so render_offline() and
     // arrangement_length() work without needing the audio callback to run.
     // If the stream is active the audio thread will pick up check_pending()
@@ -482,7 +505,10 @@ void AudioEngine::process_block(float* L, float* R, int frames) {
                         Graph* g = active_graph_.load(std::memory_order_acquire);
                         if (g) for (auto& nid : g->eval_order()) {
                             auto* n = g->find_node(nid);
-                            if (n) n->all_notes_off(-1);
+                            if (n) {
+                                n->all_notes_off(-1);
+                                n->on_seek(ce.arg);
+                            }
                         }
                     }
                     break;

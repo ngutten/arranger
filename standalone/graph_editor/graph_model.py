@@ -151,7 +151,7 @@ def serialize_pattern(pattern) -> dict:
     """
     notes = []
     for n in pattern.notes:
-        notes.append({
+        note_dict = {
             "beat":     n.start,
             "duration": n.duration,
             "channel":  0,
@@ -159,7 +159,10 @@ def serialize_pattern(pattern) -> dict:
             "velocity": n.velocity,
             "program":  -1,
             "bank":     -1,
-        })
+        }
+        if n.lyric:
+            note_dict["lyric"] = n.lyric
+        notes.append(note_dict)
     return {
         "notes":           notes,
         "length_beats":    float(pattern.length),

@@ -3,7 +3,8 @@
 import time
 
 from PySide6.QtWidgets import (QFrame, QWidget, QScrollArea, QLabel, QPushButton,
-                                QComboBox, QSlider, QVBoxLayout, QHBoxLayout)
+                                QComboBox, QSlider, QVBoxLayout, QHBoxLayout,
+                                QLineEdit)
 from PySide6.QtCore import Qt, QRect, QPoint, QRectF
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QKeyEvent
 
@@ -96,6 +97,11 @@ class PianoRoll(QFrame):
         self.bend_btn.clicked.connect(lambda: self._set_tool('bend'))
         hdr_layout.addWidget(self.bend_btn)
 
+        self.lyrics_btn = QPushButton('Lyrics')
+        self.lyrics_btn.setCheckable(True)
+        self.lyrics_btn.clicked.connect(lambda: self._set_tool('lyrics'))
+        hdr_layout.addWidget(self.lyrics_btn)
+
         # Velocity slider
         hdr_layout.addWidget(QLabel('Vel'))
         self.vel_slider = QSlider(Qt.Horizontal)
@@ -184,6 +190,7 @@ class PianoRoll(QFrame):
         self.edit_btn.setChecked(self.state.tool == 'edit')
         self.slice_btn.setChecked(self.state.tool == 'slice')
         self.bend_btn.setChecked(self.state.tool == 'bend')
+        self.lyrics_btn.setChecked(self.state.tool == 'lyrics')
 
     def _on_vel_change(self, value):
         self.vel_label.setText(str(value))
@@ -516,6 +523,37 @@ class PianoRoll(QFrame):
         self._rec_events = []
         self.state.notify('note_add')
         self.refresh()
+
+    def _edit_lyric_for_note(self, note, x, y):
+        """Open an inline QLineEdit at the note's position to edit its lyric."""
+        note_x = int(note.start * self.BW)
+        note_y = (self.HI - note.pitch) * self.NH
+        note_w = max(60, int(note.duration * self.BW))
+
+        editor = QLineEdit(self.grid_widget)
+        editor.setText(note.lyric or '')
+        editor.setGeometry(note_x, note_y + 1, note_w, self.NH - 2)
+        editor.setFont(QFont('TkDefaultFont', 7))
+        editor.setStyleSheet(
+            'QLineEdit { background: #1a1a2e; color: #fff;'
+            ' border: 1px solid #9b5de5; padding: 0px; }'
+        )
+        editor.show()
+        editor.setFocus()
+        editor.selectAll()
+
+        committed = [False]
+
+        def commit():
+            if committed[0]:
+                return
+            committed[0] = True
+            note.lyric = editor.text().strip()
+            editor.deleteLater()
+            self.state.notify('note_edit')
+            self.refresh()
+
+        editor.editingFinished.connect(commit)
 
     def keyPressEvent(self, event: QKeyEvent):
         """Handle keyboard shortcuts."""
@@ -881,6 +919,17 @@ class PianoGridWidget(QWidget):
                 painter.setFont(QFont('TkDefaultFont', 6))
                 painter.drawText(int(x + 2), y + self.parent_roll.NH - 3, f'v{n.velocity}')
 
+            # Lyric text drawn inside the note block (always visible when present)
+            if n.lyric and w > 8:
+                lyr_color = QColor('#fee440') if sel else QColor('#ffe08a')
+                painter.setPen(lyr_color)
+                painter.setFont(QFont('TkDefaultFont', 7))
+                painter.setClipRect(int(x + 2), y + 1, int(w - 4), self.parent_roll.NH - 2)
+                painter.drawText(
+                    int(x + 2), y + 1, int(w - 4), self.parent_roll.NH - 2,
+                    Qt.AlignLeft | Qt.AlignVCenter, n.lyric)
+                painter.setClipping(False)
+
         # Bend curves — drawn on top of all notes
         _in_bend_mode = s.tool == 'bend'
         for i, n in enumerate(pat.notes):
@@ -1201,6 +1250,11 @@ def _on_click(self, event):
                 self.state.notify('note_edit')
                 self.refresh()
 
+    elif self.state.tool == 'lyrics':
+        n, i, _ = self._hit_note(x, y)
+        if n:
+            self._edit_lyric_for_note(n, x, y)
+
 def _on_drag(self, event):
     """Handle mouse drag."""
     pat = self.state.find_pattern(self.state.sel_pat)
@@ -1337,6 +1391,15 @@ def _on_right_click(self, event):
         if bn is not None and bi >= 0:
             bn.bend.pop(bi)
             self.app.engine.mark_dirty()
+            self.state.notify('note_edit')
+            self.refresh()
+        return
+
+    if self.state.tool == 'lyrics':
+        # Right-click in lyrics mode clears the lyric on the hit note
+        n, i, _ = self._hit_note(x, y)
+        if n and n.lyric:
+            n.lyric = ''
             self.state.notify('note_edit')
             self.refresh()
         return

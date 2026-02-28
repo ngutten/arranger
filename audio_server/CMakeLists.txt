@@ -10,6 +10,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(ENABLE_SF2      "Build with SF2/FluidSynth support"              ON)
 option(ENABLE_SNDFILE  "Build Sampler plugin with libsndfile audio I/O" ON)
 option(ENABLE_TESTS  "Build test programs"                            ON)
+option(ENABLE_ESPEAK
+    "Build singing plugin with espeak-ng (ON=auto-detect, OFF=disable)"
+    ON)
 
 # ---------------------------------------------------------------------------
 # Platform detection
@@ -54,15 +57,22 @@ endif()
 
 find_package(PkgConfig REQUIRED)
 
-# PortAudio - try pkg-config first, then fallback to find_library
+# PortAudio - try pkg-config first, then fallback to find_library (optional)
 pkg_check_modules(PORTAUDIO portaudio-2.0)
 if(NOT PORTAUDIO_FOUND)
     message(STATUS "pkg-config didn't find portaudio, trying find_library...")
-    find_library(PORTAUDIO_LIBRARY NAMES portaudio REQUIRED)
+    find_library(PORTAUDIO_LIBRARY NAMES portaudio)
     find_path(PORTAUDIO_INCLUDE_DIR portaudio.h)
-    set(PORTAUDIO_LIBRARIES ${PORTAUDIO_LIBRARY})
-    set(PORTAUDIO_INCLUDE_DIRS ${PORTAUDIO_INCLUDE_DIR})
-    set(PORTAUDIO_FOUND TRUE)
+    if(PORTAUDIO_LIBRARY)
+        set(PORTAUDIO_LIBRARIES ${PORTAUDIO_LIBRARY})
+        set(PORTAUDIO_INCLUDE_DIRS ${PORTAUDIO_INCLUDE_DIR})
+        set(PORTAUDIO_FOUND TRUE)
+    else()
+        message(STATUS "PortAudio not found — real-time audio output will be unavailable")
+        set(PORTAUDIO_LIBRARIES "")
+        set(PORTAUDIO_INCLUDE_DIRS "")
+        set(PORTAUDIO_FOUND FALSE)
+    endif()
 endif()
 
 # nlohmann/json — header-only
@@ -438,6 +448,27 @@ if(ENABLE_SF2)
     )
     target_compile_definitions(arranger_plugin_fluidsynth PRIVATE AS_ENABLE_SF2)
     add_dependencies(audio_server_lib arranger_plugin_fluidsynth)
+endif()
+
+# ---------------------------------------------------------------------------
+# Singing plugin (espeak-ng) — optional, auto-detected
+# ---------------------------------------------------------------------------
+if(ENABLE_ESPEAK)
+    pkg_check_modules(ESPEAK espeak-ng)
+    if(ESPEAK_FOUND)
+        message(STATUS "espeak-ng: ${ESPEAK_VERSION} — singing plugin enabled")
+        plugin_library(singing
+            SOURCES plugins/builtin/singing_plugin.cpp
+            LINK_LIBRARIES ${ESPEAK_LIBRARIES}
+            INCLUDE_DIRECTORIES ${ESPEAK_INCLUDE_DIRS}
+            LIBRARY_DIRECTORIES ${ESPEAK_LIBRARY_DIRS}
+        )
+        target_compile_definitions(arranger_plugin_singing PRIVATE AS_ENABLE_ESPEAK)
+        add_dependencies(audio_server_lib arranger_plugin_singing)
+    else()
+        message(STATUS "espeak-ng: not found — singing plugin disabled"
+                       " (install libespeak-ng-dev to enable, or set ENABLE_ESPEAK=OFF)")
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------

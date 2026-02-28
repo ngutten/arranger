@@ -363,12 +363,14 @@ class GraphEditorWindow(QWidget):
             QPointF(self._canvas.width() / 2, self._canvas.height() / 2)
         )
 
-        # Pre-populate params with config param defaults
+        # Pre-populate params with config param defaults (include empty-string
+        # defaults so params like lyrics_sequence reach node.params and are
+        # forwarded via configure() even before the user edits them).
         params = {}
         for cp in desc.get("config_params", []):
             cp_id = cp.get("id", "")
             cp_def = cp.get("default", "")
-            if cp_def:
+            if cp_def is not None:
                 params[cp_id] = cp_def
         # Pre-populate control input defaults
         for port in desc.get("ports", []):

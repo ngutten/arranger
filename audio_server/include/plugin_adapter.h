@@ -42,6 +42,10 @@ public:
         return event_output_storage_;
     }
 
+    void push_lyric(double beat, const std::string& lyric) override;
+    void on_schedule_loaded() override;
+    void on_seek(double beat) override;
+
     void set_control_connected(const std::string& port_id, bool connected);
 
     /// Called by Graph::activate() to inject a pattern into a pattern input port.
