@@ -96,6 +96,7 @@ static long ms_since(std::chrono::steady_clock::time_point t) {
 // ---------------------------------------------------------------------------
 
 static std::mutex          s_espeak_mutex;
+static std::atomic<int>    s_espeak_refcount{0};
 static std::vector<short>* s_espeak_buf = nullptr;
 
 static int espeak_synth_callback(short* wav, int numsamples,
@@ -429,24 +430,34 @@ private:
         _set_state(State::InitEspeak);
         auto t0 = std::chrono::steady_clock::now();
 
-        sing_log("_init_espeak: calling espeak_ng_InitializePath");
-        espeak_ng_InitializePath(nullptr);
+        if (s_espeak_refcount.fetch_add(1, std::memory_order_seq_cst) == 0) {
+            // First instance: actually initialise the process-global espeak state.
+            sing_log("_init_espeak: calling espeak_ng_InitializePath");
+            espeak_ng_InitializePath(nullptr);
 
-        sing_log("_init_espeak: calling espeak_ng_Initialize");
-        espeak_ng_STATUS status = espeak_ng_Initialize(nullptr);
-        sing_logf("_init_espeak: espeak_ng_Initialize returned %d (ENS_OK=%d)",
-                  (int)status, (int)ENS_OK);
-        if (status != ENS_OK) {
-            sing_logf("_init_espeak: FAILED — espeak_ng_Initialize returned %d", (int)status);
-            _set_state(State::Error);
-            return;
+            sing_log("_init_espeak: calling espeak_ng_Initialize");
+            espeak_ng_STATUS status = espeak_ng_Initialize(nullptr);
+            sing_logf("_init_espeak: espeak_ng_Initialize returned %d (ENS_OK=%d)",
+                      (int)status, (int)ENS_OK);
+            if (status != ENS_OK) {
+                sing_logf("_init_espeak: FAILED — espeak_ng_Initialize returned %d", (int)status);
+                s_espeak_refcount.fetch_sub(1, std::memory_order_seq_cst);
+                _set_state(State::Error);
+                return;
+            }
+
+            sing_log("_init_espeak: calling espeak_ng_InitializeOutput");
+            espeak_ng_InitializeOutput(ENOUTPUT_MODE_SYNCHRONOUS, 0, nullptr);
+
+            sing_log("_init_espeak: calling espeak_SetSynthCallback");
+            espeak_SetSynthCallback(espeak_synth_callback);
+        } else {
+            // espeak-ng is a process-global singleton; a concurrent instance has
+            // already initialised it.  Reuse the global state — do NOT call
+            // espeak_ng_Initialize again or the internal thread bookkeeping
+            // will be corrupted and espeak_ng_Terminate will deadlock.
+            sing_log("_init_espeak: espeak already globally initialised (shared instance), skipping");
         }
-
-        sing_log("_init_espeak: calling espeak_ng_InitializeOutput");
-        espeak_ng_InitializeOutput(ENOUTPUT_MODE_SYNCHRONOUS, 0, nullptr);
-
-        sing_log("_init_espeak: calling espeak_SetSynthCallback");
-        espeak_SetSynthCallback(espeak_synth_callback);
 
         _espeak_initialised = true;
         sing_logf("_init_espeak: done in %ldms", ms_since(t0));
@@ -454,10 +465,15 @@ private:
 
     void _teardown_espeak() {
         if (!_espeak_initialised) return;
-        sing_log("_teardown_espeak: calling espeak_ng_Terminate");
-        espeak_ng_Terminate();
         _espeak_initialised = false;
-        sing_log("_teardown_espeak: done");
+        if (s_espeak_refcount.fetch_sub(1, std::memory_order_seq_cst) == 1) {
+            // Last instance: safe to terminate the global espeak state.
+            sing_log("_teardown_espeak: calling espeak_ng_Terminate");
+            espeak_ng_Terminate();
+            sing_log("_teardown_espeak: done");
+        } else {
+            sing_log("_teardown_espeak: espeak still held by another instance, skipping Terminate");
+        }
     }
 
     // Pre-render all syllables and publish atomically.  MAIN THREAD ONLY.
