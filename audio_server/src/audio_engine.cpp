@@ -232,8 +232,11 @@ std::string AudioEngine::set_schedule(const std::string& schedule_json) {
         Graph* g = active_graph_.load(std::memory_order_acquire);
         if (g) {
             for (const auto& evt : sched->events()) {
-                if (evt.type == EventType::NoteOn && !evt.lyric.empty()) {
+                if (evt.type == EventType::NoteOn) {
                     Node* n = g->find_node(evt.node_id);
+                    // Pass lyric for every NoteOn — empty lyric lets singing plugins
+                    // insert a null (silent) entry so their syllable counter stays
+                    // in sync with the full note stream.
                     if (n) n->push_lyric(evt.beat, evt.lyric);
                 }
             }

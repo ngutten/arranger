@@ -245,12 +245,19 @@ public:
     // _sched_entries (sorted by beat, in the order the schedule delivers them).
     // on_schedule_loaded() publishes the complete sequence.
     void push_lyric(double beat, const std::string& lyric) override {
-        if (lyric.empty() || !_espeak_initialised) return;
-        sing_logf("push_lyric: beat=%.3f lyric='%.40s'", beat, lyric.c_str());
+        if (!_espeak_initialised) return;
         PcmEntry entry;
         entry.beat = beat;
-        entry.pcm  = _render_one(lyric);
-        sing_logf("push_lyric: rendered %zu samples", entry.pcm.size());
+        if (!lyric.empty()) {
+            sing_logf("push_lyric: beat=%.3f lyric='%.40s'", beat, lyric.c_str());
+            entry.pcm = _render_one(lyric);
+            sing_logf("push_lyric: rendered %zu samples", entry.pcm.size());
+        } else {
+            // No lyric on this note: insert a null (empty-PCM) entry so the
+            // syllable counter stays in sync with the full note stream.
+            // note_on() will drop it silently.
+            sing_logf("push_lyric: beat=%.3f no lyric — inserting null entry", beat);
+        }
         _sched_entries.push_back(std::move(entry));
     }
 
@@ -258,7 +265,8 @@ public:
     // on_schedule_loaded() — MAIN THREAD, called after all push_lyric() calls
     //
     // Publishes _sched_entries as the active PcmSeq, replacing any sequence
-    // built via the pattern port.  Resets the syllable cursor to 0.
+    // built via the pattern port.  Resets the syllable cursor to 0 and arms
+    // the transport-running flag so note_on() advances the cursor.
     void on_schedule_loaded() override {
         if (_sched_entries.empty()) return;
         sing_logf("on_schedule_loaded: publishing %zu schedule phoneme(s)",
@@ -267,6 +275,7 @@ public:
         _sched_entries.clear();
         _current_seq.store(&_old_seqs.back(), std::memory_order_release);
         _next_syllable.store(0, std::memory_order_relaxed);
+        _transport_running.store(true, std::memory_order_relaxed);
         _set_state(State::Ready);
     }
 
@@ -328,8 +337,14 @@ public:
             return;
         }
 
-        size_t idx = _next_syllable.fetch_add(1, std::memory_order_relaxed)
-                     % seq->size();
+        // During scheduled playback, advance the syllable cursor so each note
+        // gets the next phoneme.  During piano-roll preview (transport stopped),
+        // hold the cursor still so clicking notes doesn't consume syllables.
+        size_t idx;
+        if (_transport_running.load(std::memory_order_relaxed))
+            idx = _next_syllable.fetch_add(1, std::memory_order_relaxed) % seq->size();
+        else
+            idx = _next_syllable.load(std::memory_order_relaxed) % seq->size();
         const std::vector<short>& pcm = (*seq)[idx].pcm;
         if (pcm.empty()) {
             _dropped_notes.fetch_add(1, std::memory_order_relaxed);
@@ -338,7 +353,7 @@ public:
 
         float target_hz   = midi_to_hz(pitch);
         float base_hz     = _base_pitch_hz.load(std::memory_order_relaxed);
-        float pitch_ratio = base_hz / target_hz;
+        float pitch_ratio = target_hz / base_hz;  // higher note → faster read → higher pitch
 
         Voice v;
         v.pcm         = &pcm;
@@ -413,6 +428,7 @@ public:
             for (auto& v : _voices) v.active = false;
         }
         _next_syllable.store(0, std::memory_order_relaxed);
+        _transport_running.store(false, std::memory_order_relaxed);
     }
 
     // ------------------------------------------------------------------
@@ -473,6 +489,10 @@ private:
     std::list<PcmSeq>           _old_seqs;
 
     std::atomic<size_t>  _next_syllable{0};
+    // True while the transport is running (set by on_schedule_loaded, cleared
+    // by on_transport_stop).  Suppresses syllable-counter advancement during
+    // piano-roll preview note_ons so they don't consume scheduled phonemes.
+    std::atomic<bool>    _transport_running{false};
 
     // Diagnostics (all atomic so get_graph_data can read from main thread
     // while audio thread increments)
