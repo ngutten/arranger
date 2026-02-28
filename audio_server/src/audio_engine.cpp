@@ -228,7 +228,12 @@ std::string AudioEngine::set_schedule(const std::string& schedule_json) {
     // phonemes before playback starts.  NoteOn events with non-empty lyrics
     // are pushed in beat order to the target track_source node, which fans
     // them out to its downstream plugin nodes.
+    //
+    // Hold graph_mutex_ while traversing the graph so that a concurrent
+    // set_graph() cannot destroy the graph (and its plugin nodes) while we
+    // are still calling push_lyric()/on_schedule_loaded() on them.
     {
+        std::lock_guard<std::mutex> lk(graph_mutex_);
         Graph* g = active_graph_.load(std::memory_order_acquire);
         if (g) {
             for (const auto& evt : sched->events()) {
