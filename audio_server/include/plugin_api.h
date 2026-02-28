@@ -181,6 +181,7 @@ struct PatternNote {
     uint8_t velocity;    ///< MIDI velocity 1-127.
     int     program;     ///< MIDI program number, or -1 if unspecified.
     int     bank;        ///< MIDI bank, or -1 if unspecified.
+    std::string lyric;   ///< Optional lyric syllable (for singing synthesis).
 };
 
 /// A complete pattern snapshot delivered via a Pattern port.
@@ -291,6 +292,12 @@ public:
     virtual void note_tune(int channel, int note, float semitones) { (void)channel; (void)note; (void)semitones; }
 
     virtual void on_transport_stop() {}
+
+    /// Called during graph setup whenever a pattern_source is connected to
+    /// this plugin.  The full PatternData (including per-note lyrics) is
+    /// available here, before activate() runs, so the plugin can pre-render
+    /// anything it needs.  Default implementation is a no-op.
+    virtual void on_pattern_connected(const PatternData& /*pd*/) {}
 
     virtual float read_monitor(const std::string& port_id) { (void)port_id; return 0.0f; }
     virtual std::string get_graph_data(const std::string& port_id) { (void)port_id; return "{}"; }

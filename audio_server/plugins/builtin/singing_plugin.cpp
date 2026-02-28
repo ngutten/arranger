@@ -171,12 +171,6 @@ public:
         };
 
         d.config_params = {
-            { "lyrics_sequence",
-              "Lyrics sequence",
-              "Space-separated syllables to sing, one per successive note-on.\n"
-              "Example: \"hel lo world\"",
-              ConfigType::String,
-              "" },
             { "voice",
               "Voice",
               "espeak-ng voice name (e.g. \"en\", \"en-us\", \"en+f3\").",
@@ -198,10 +192,7 @@ public:
     void configure(const std::string& key, const std::string& value) override {
         sing_logf("configure: key='%s' value='%.40s'", key.c_str(), value.c_str());
 
-        if (key == "lyrics_sequence") {
-            _pending_lyrics = value;
-            _rebuild_pcm_seq();
-        } else if (key == "voice") {
+        if (key == "voice") {
             _voice = value.empty() ? "en" : value;
             _rebuild_pcm_seq();
         } else if (key == "base_pitch_hz") {
@@ -215,6 +206,26 @@ public:
                 sing_logf("configure: base_pitch_hz parse error for '%s'", value.c_str());
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // on_pattern_connected() — MAIN THREAD, called before activate()
+    //
+    // Extracts per-note lyrics from the connected pattern (notes are already
+    // sorted by beat) and assembles them into _pending_lyrics so that the
+    // activate() → _rebuild_pcm_seq() pass pre-renders the correct syllables.
+    void on_pattern_connected(const PatternData& pd) override {
+        std::string lyrics;
+        for (const auto& note : pd.notes) {
+            if (note.lyric.empty()) continue;
+            if (!lyrics.empty()) lyrics += ' ';
+            lyrics += note.lyric;
+        }
+        sing_logf("on_pattern_connected: %zu note(s), lyrics='%.60s'",
+                  pd.notes.size(), lyrics.c_str());
+        _pending_lyrics = std::move(lyrics);
+        // Don't call _rebuild_pcm_seq() here — espeak isn't initialised yet.
+        // activate() will call it once _init_espeak() has run.
     }
 
     // ------------------------------------------------------------------

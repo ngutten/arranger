@@ -57,15 +57,22 @@ endif()
 
 find_package(PkgConfig REQUIRED)
 
-# PortAudio - try pkg-config first, then fallback to find_library
+# PortAudio - try pkg-config first, then fallback to find_library (optional)
 pkg_check_modules(PORTAUDIO portaudio-2.0)
 if(NOT PORTAUDIO_FOUND)
     message(STATUS "pkg-config didn't find portaudio, trying find_library...")
-    find_library(PORTAUDIO_LIBRARY NAMES portaudio REQUIRED)
+    find_library(PORTAUDIO_LIBRARY NAMES portaudio)
     find_path(PORTAUDIO_INCLUDE_DIR portaudio.h)
-    set(PORTAUDIO_LIBRARIES ${PORTAUDIO_LIBRARY})
-    set(PORTAUDIO_INCLUDE_DIRS ${PORTAUDIO_INCLUDE_DIR})
-    set(PORTAUDIO_FOUND TRUE)
+    if(PORTAUDIO_LIBRARY)
+        set(PORTAUDIO_LIBRARIES ${PORTAUDIO_LIBRARY})
+        set(PORTAUDIO_INCLUDE_DIRS ${PORTAUDIO_INCLUDE_DIR})
+        set(PORTAUDIO_FOUND TRUE)
+    else()
+        message(STATUS "PortAudio not found — real-time audio output will be unavailable")
+        set(PORTAUDIO_LIBRARIES "")
+        set(PORTAUDIO_INCLUDE_DIRS "")
+        set(PORTAUDIO_FOUND FALSE)
+    endif()
 endif()
 
 # nlohmann/json — header-only
