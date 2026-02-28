@@ -366,7 +366,7 @@ public:
             "\"dropped_notes\":%zu,"
             "\"last_render_ms\":%ld"
             "}",
-            state_name(_state.load()),
+            state_name(static_cast<State>(_state.load())),
             _espeak_initialised ? "true" : "false",
             syl_count,
             _next_syllable.load(std::memory_order_relaxed) % (syl_count ? syl_count : 1),
