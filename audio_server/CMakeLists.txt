@@ -10,6 +10,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(ENABLE_SF2      "Build with SF2/FluidSynth support"              ON)
 option(ENABLE_SNDFILE  "Build Sampler plugin with libsndfile audio I/O" ON)
 option(ENABLE_TESTS  "Build test programs"                            ON)
+option(ENABLE_ESPEAK
+    "Build singing plugin with espeak-ng (ON=auto-detect, OFF=disable)"
+    ON)
 
 # ---------------------------------------------------------------------------
 # Platform detection
@@ -438,6 +441,27 @@ if(ENABLE_SF2)
     )
     target_compile_definitions(arranger_plugin_fluidsynth PRIVATE AS_ENABLE_SF2)
     add_dependencies(audio_server_lib arranger_plugin_fluidsynth)
+endif()
+
+# ---------------------------------------------------------------------------
+# Singing plugin (espeak-ng) — optional, auto-detected
+# ---------------------------------------------------------------------------
+if(ENABLE_ESPEAK)
+    pkg_check_modules(ESPEAK espeak-ng)
+    if(ESPEAK_FOUND)
+        message(STATUS "espeak-ng: ${ESPEAK_VERSION} — singing plugin enabled")
+        plugin_library(singing
+            SOURCES plugins/builtin/singing_plugin.cpp
+            LINK_LIBRARIES ${ESPEAK_LIBRARIES}
+            INCLUDE_DIRECTORIES ${ESPEAK_INCLUDE_DIRS}
+            LIBRARY_DIRECTORIES ${ESPEAK_LIBRARY_DIRS}
+        )
+        target_compile_definitions(arranger_plugin_singing PRIVATE AS_ENABLE_ESPEAK)
+        add_dependencies(audio_server_lib arranger_plugin_singing)
+    else()
+        message(STATUS "espeak-ng: not found — singing plugin disabled"
+                       " (install libespeak-ng-dev to enable, or set ENABLE_ESPEAK=OFF)")
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------

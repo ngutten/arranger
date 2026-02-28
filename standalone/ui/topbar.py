@@ -131,6 +131,10 @@ class TopBar(QFrame):
         mp3_btn.clicked.connect(lambda: self.app.do_export('mp3'))
         layout.addWidget(mp3_btn)
 
+        mxml_btn = QPushButton('MusicXML')
+        mxml_btn.clicked.connect(lambda: self.app.do_export('musicxml'))
+        layout.addWidget(mxml_btn)
+
         # Separator
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.VLine)

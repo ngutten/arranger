@@ -130,6 +130,11 @@ def create_midi(arr, tpb=480):
                     of = int((off + n['start'] + n['duration']) * tpb)
                     evs.append((on, bytes([0x90 | ch, p, v])))
                     evs.append((of, bytes([0x80 | ch, p, 0])))
+                    # Lyric meta-event (SMF type 0x05) placed at note-on tick
+                    lyric = n.get('lyric', '')
+                    if lyric:
+                        lb = lyric.encode('utf-8', errors='replace')
+                        evs.append((on, bytes([0xFF, 0x05]) + _vlq(len(lb)) + lb))
                     bend_pts = n.get('bend', [])
                     if bend_pts:
                         for tick, lsb, msb in _bend_curve_events(
