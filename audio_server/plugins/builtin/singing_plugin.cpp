@@ -18,7 +18,9 @@
 
 #include "plugin_api.h"
 
+// espeak-ng public headers
 #include <espeak-ng/espeak_ng.h>
+#include <espeak-ng/speak_lib.h>
 
 #include <algorithm>
 #include <atomic>
@@ -51,7 +53,6 @@ static float midi_to_hz(int midi_note) {
     return MIDI_A4_FREQ * std::pow(2.0f, (midi_note - MIDI_A4_NOTE) / 12.0f);
 }
 
-// Split a string on whitespace, collapsing runs of whitespace.
 static std::vector<std::string> split_words(const std::string& s) {
     std::vector<std::string> out;
     std::istringstream ss(s);
@@ -63,27 +64,23 @@ static std::vector<std::string> split_words(const std::string& s) {
 // ---------------------------------------------------------------------------
 // espeak-ng synthesis callback
 // ---------------------------------------------------------------------------
-// We drive espeak-ng synchronously from the main thread (configure/activate)
-// and collect samples into a vector.
+// espeak_ng's callback API is process-global: there is no per-call user_data
+// pointer delivered to the callback in a guaranteed way across all versions.
+// Since _get_pcm() is called synchronously while holding _cfg_mutex (and we
+// call espeak_Synchronize() before releasing), a file-scope pointer is safe.
 
 struct EspeakSynthState {
     std::vector<short> samples;
 };
 
-static int espeak_callback(short* wav, int numsamples, espeak_EVENT* events) {
-    (void)events;
-    if (!wav || numsamples <= 0) return 0;
-    // The user-data pointer is set to an EspeakSynthState* by the caller.
-    // espeak_ng passes it through all callback invocations for a single synth.
-    // We use the thread-local approach: the callback stores into a thread-local
-    // destination set by the synthesising thread.
-    // (espeak_ng's SetSynthCallback is process-global, so we protect with a mutex.)
-    // The pointer is captured via espeak_SetUserData / UserData field in events.
-    if (events && events->user_data) {
-        auto* state = static_cast<EspeakSynthState*>(events->user_data);
-        state->samples.insert(state->samples.end(), wav, wav + numsamples);
-    }
-    return 0;
+static EspeakSynthState* s_active_synth_state = nullptr;
+
+static int espeak_synth_callback(short* wav, int numsamples,
+                                 espeak_EVENT* /*events*/) {
+    if (wav && numsamples > 0 && s_active_synth_state)
+        s_active_synth_state->samples.insert(
+            s_active_synth_state->samples.end(), wav, wav + numsamples);
+    return 0;  // 0 = continue synthesis
 }
 
 // ---------------------------------------------------------------------------
@@ -144,9 +141,9 @@ public:
     void configure(const std::string& key, const std::string& value) override {
         if (key == "lyrics_sequence") {
             std::lock_guard<std::mutex> lk(_cfg_mutex);
-            _lyrics_seq     = split_words(value);
+            _lyrics_seq    = split_words(value);
             _syllable_cache.clear();
-            _next_syllable  = 0;
+            _next_syllable = 0;
         } else if (key == "voice") {
             std::lock_guard<std::mutex> lk(_cfg_mutex);
             _voice = value.empty() ? "en" : value;
@@ -165,9 +162,7 @@ public:
         _init_espeak();
     }
 
-    void deactivate() override {
-        _teardown_espeak();
-    }
+    void deactivate() override { _teardown_espeak(); }
 
     // ------------------------------------------------------------------
     void note_on(int /*ch*/, int pitch, int vel) override {
@@ -181,37 +176,31 @@ public:
             _next_syllable++;
         }
 
-        // Get (or render) the cached PCM for this syllable+voice.
-        const std::vector<short>& pcm = _get_pcm(syllable);
-        if (pcm.empty()) return;
+        const std::vector<short>* pcm = _get_pcm(syllable);
+        if (!pcm || pcm->empty()) return;
 
-        // Compute pitch-shift ratio: target_hz / base_hz
         float target_hz   = midi_to_hz(pitch);
         float base_hz     = _base_pitch_hz.load();
         float pitch_ratio = base_hz / target_hz;   // >1 → slower = lower pitch
         float gain        = vel / 127.0f;
 
-        // Start a new voice
         Voice v;
-        v.pcm        = &pcm;
-        v.pitch      = pitch;
-        v.read_pos   = 0.0;
+        v.pcm         = pcm;
+        v.pitch       = pitch;
+        v.read_pos    = 0.0;
         v.pitch_ratio = pitch_ratio;
-        v.gain       = gain;
-        v.active     = true;
+        v.gain        = gain;
+        v.active      = true;
 
         std::lock_guard<std::mutex> lk(_voice_mutex);
-        // Recycle a finished slot or append
         for (auto& slot : _voices) {
             if (!slot.active) { slot = v; return; }
         }
         if (_voices.size() < 16) _voices.push_back(v);
     }
 
-    void note_off(int /*ch*/, int pitch) override {
-        // Singing voices run to completion; note_off just lets them fade.
-        // (No action needed — they'll finish when samples are exhausted.)
-        (void)pitch;
+    void note_off(int /*ch*/, int /*pitch*/) override {
+        // Voices run to sample exhaustion; note_off is a no-op here.
     }
 
     void all_notes_off(int /*channel*/) override {
@@ -224,11 +213,10 @@ public:
         auto* audio = buffers.audio.get("audio_out");
         if (!audio) return;
 
-        // Zero the output buffers first
         std::fill(audio->left,  audio->left  + ctx.block_size, 0.0f);
         std::fill(audio->right, audio->right + ctx.block_size, 0.0f);
 
-        // Mix MIDI note events (note-on / note-off)
+        // Dispatch MIDI events from the event port
         if (auto* evport = buffers.events.get("events_in")) {
             if (evport->events) {
                 for (const auto& ev : *evport->events) {
@@ -241,7 +229,7 @@ public:
             }
         }
 
-        // Render active voices
+        // Mix active voices into the output buffer
         std::lock_guard<std::mutex> lk(_voice_mutex);
         float sr_ratio = _sample_rate / static_cast<float>(ESPEAK_SAMPLE_RATE);
 
@@ -249,17 +237,16 @@ public:
             if (!v.active || !v.pcm) continue;
 
             const std::vector<short>& pcm = *v.pcm;
-            const double step = v.pitch_ratio / sr_ratio;   // src samples per output sample
+            double step = v.pitch_ratio / sr_ratio;
 
             for (int i = 0; i < ctx.block_size; ++i) {
                 size_t idx0 = static_cast<size_t>(v.read_pos);
                 if (idx0 + 1 >= pcm.size()) { v.active = false; break; }
 
-                // Linear interpolation between adjacent PCM samples
-                double frac  = v.read_pos - idx0;
-                float  s0    = pcm[idx0]     * (1.0f / 32768.0f);
-                float  s1    = pcm[idx0 + 1] * (1.0f / 32768.0f);
-                float  samp  = static_cast<float>(s0 + frac * (s1 - s0)) * v.gain;
+                double frac = v.read_pos - static_cast<double>(idx0);
+                float  s0   = pcm[idx0]     * (1.0f / 32768.0f);
+                float  s1   = pcm[idx0 + 1] * (1.0f / 32768.0f);
+                float  samp = static_cast<float>(s0 + frac * (s1 - s0)) * v.gain;
 
                 audio->left[i]  += samp;
                 audio->right[i] += samp;
@@ -277,56 +264,50 @@ public:
     }
 
     void on_transport_stop() override {
-        std::lock_guard<std::mutex> lk(_voice_mutex);
-        for (auto& v : _voices) v.active = false;
-        // Reset lyric index so replay starts from the beginning.
-        std::lock_guard<std::mutex> lk2(_cfg_mutex);
+        {
+            std::lock_guard<std::mutex> lk(_voice_mutex);
+            for (auto& v : _voices) v.active = false;
+        }
+        std::lock_guard<std::mutex> lk(_cfg_mutex);
         _next_syllable = 0;
     }
 
 private:
     // ------------------------------------------------------------------
-    // Voice state (audio thread)
-    // ------------------------------------------------------------------
     struct Voice {
         const std::vector<short>* pcm   = nullptr;
-        int    pitch      = 60;
-        double read_pos   = 0.0;
+        int    pitch       = 60;
+        double read_pos    = 0.0;
         double pitch_ratio = 1.0;
-        float  gain       = 1.0f;
-        bool   active     = false;
+        float  gain        = 1.0f;
+        bool   active      = false;
     };
 
-    float                       _sample_rate = 44100.0f;
-    std::atomic<float>          _base_pitch_hz{ESPEAK_BASE_HZ};
+    float               _sample_rate = 44100.0f;
+    std::atomic<float>  _base_pitch_hz{ESPEAK_BASE_HZ};
 
-    std::mutex                  _voice_mutex;
-    std::vector<Voice>          _voices;
+    std::mutex          _voice_mutex;
+    std::vector<Voice>  _voices;
 
-    // ------------------------------------------------------------------
-    // Configuration (main thread, protected by _cfg_mutex)
-    // ------------------------------------------------------------------
-    std::mutex                  _cfg_mutex;
-    std::vector<std::string>    _lyrics_seq;
-    size_t                      _next_syllable = 0;
-    std::string                 _voice         = "en";
+    std::mutex                   _cfg_mutex;
+    std::vector<std::string>     _lyrics_seq;
+    size_t                       _next_syllable = 0;
+    std::string                  _voice         = "en";
 
-    // Cache: syllable text → pre-rendered PCM at ESPEAK_SAMPLE_RATE
+    // Cache: syllable → pre-rendered PCM at ESPEAK_SAMPLE_RATE
+    // Owned here; Voice holds raw pointers that stay valid while the cache exists.
     std::unordered_map<std::string, std::vector<short>> _syllable_cache;
-
-    // ------------------------------------------------------------------
-    // espeak-ng lifecycle
-    // ------------------------------------------------------------------
 
     bool _espeak_initialised = false;
 
+    // ------------------------------------------------------------------
     void _init_espeak() {
         if (_espeak_initialised) return;
         espeak_ng_InitializePath(nullptr);
-        espeak_ng_ERROR_CODE err = espeak_ng_Initialize(nullptr);
-        if (err != ENS_OK) return;
+        // espeak_ng_Initialize returns espeak_ng_STATUS (int); ENS_OK == 0
+        if (espeak_ng_Initialize(nullptr) != ENS_OK) return;
         espeak_ng_InitializeOutput(ENOUTPUT_MODE_SYNCHRONOUS, 0, nullptr);
-        espeak_SetSynthCallback(espeak_callback);
+        espeak_SetSynthCallback(espeak_synth_callback);
         _espeak_initialised = true;
     }
 
@@ -336,45 +317,44 @@ private:
         _espeak_initialised = false;
     }
 
-    // ------------------------------------------------------------------
-    // Render a syllable to PCM (cached)
-    // ------------------------------------------------------------------
-    const std::vector<short>& _get_pcm(const std::string& syllable) {
+    // Render a syllable to PCM (cached).  Must be called while holding _cfg_mutex.
+    // Returns nullptr if espeak is not initialised or synthesis fails.
+    const std::vector<short>* _get_pcm(const std::string& syllable) {
         std::lock_guard<std::mutex> lk(_cfg_mutex);
 
         auto it = _syllable_cache.find(syllable);
-        if (it != _syllable_cache.end()) return it->second;
+        if (it != _syllable_cache.end()) return &it->second;
 
-        std::vector<short>& out = _syllable_cache[syllable];
-        if (!_espeak_initialised) return out;
+        auto& out = _syllable_cache[syllable];
+        if (!_espeak_initialised) return &out;   // empty
 
-        // Set voice
         espeak_SetVoiceByName(_voice.c_str());
 
-        // Prepare callback state: espeak_ng requires that user_data be
-        // threaded through the event list.  We embed a pointer to `out`
-        // in a local EspeakSynthState and set it as the UserData on the
-        // synth call.  The callback retrieves it from events[0].user_data.
+        // Use the file-scope pointer pattern: safe because:
+        //  • We hold _cfg_mutex throughout.
+        //  • espeak_Synth in synchronous mode blocks until done.
+        //  • espeak_Synchronize() ensures all callbacks have fired.
         EspeakSynthState synth_state;
-        espeak_SetUserData(&synth_state);   // sets the user_data in events
+        s_active_synth_state = &synth_state;
 
-        unsigned int flags = espeakCHARS_UTF8 | espeakSSML;
-        // Wrap in SSML to suppress prosody variations (monotone helps for pitch shift)
-        std::string ssml = "<speak><prosody pitch=\"medium\" rate=\"slow\">"
+        // Wrap in SSML to suppress prosody variation for more even pitch shifting.
+        std::string ssml = "<speak><prosody rate=\"slow\">"
                            + syllable + "</prosody></speak>";
 
         espeak_Synth(ssml.c_str(),
                      ssml.size() + 1,
-                     0,            // position (chars from start)
+                     0,              // position
                      POS_CHARACTER,
-                     0,            // end position (0 = all)
-                     flags,
-                     nullptr,      // unique_identifier
-                     &synth_state);
+                     0,              // end position (0 = all)
+                     espeakCHARS_UTF8 | espeakSSML,
+                     nullptr,        // unique_identifier
+                     nullptr);       // user_data (unused; we use the static ptr)
+
         espeak_Synchronize();
+        s_active_synth_state = nullptr;
 
         out = std::move(synth_state.samples);
-        return out;
+        return &out;
     }
 };
 
