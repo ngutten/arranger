@@ -155,15 +155,19 @@ public:
         d.category     = "Synth";
         d.doc =
             "Prototype singing synthesiser using espeak-ng phoneme rendering.\n"
-            "Each successive note-on consumes the next syllable from the\n"
-            "lyrics_sequence parameter.  Pitch is set by resampling the\n"
-            "espeak audio to match the MIDI note frequency.\n\n"
-            "Quality is intentionally robotic — this is a proof-of-concept.\n"
-            "Right-click the plugin in the graph editor to configure lyrics.";
+            "Connect a Pattern Source to the Lyrics port so the plugin knows\n"
+            "which syllable to sing for each note-on event.  Pitch is set by\n"
+            "resampling the espeak audio to match the MIDI note frequency.\n\n"
+            "Quality is intentionally robotic — this is a proof-of-concept.";
         d.author  = "builtin";
         d.version = 1;
 
         d.ports = {
+            { "lyrics_in", "Lyrics",
+              "Pattern containing per-note lyric syllables.\n"
+              "Connect a Pattern Source node here so the plugin knows which\n"
+              "syllable to sing for each note-on event.",
+              PluginPortType::Pattern, PortRole::Input },
             { "events_in",  "Events", "MIDI note input",
               PluginPortType::Event, PortRole::Input },
             { "audio_out",  "Audio",  "Stereo audio output",
