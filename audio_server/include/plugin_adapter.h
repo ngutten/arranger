@@ -45,6 +45,8 @@ public:
     void push_lyric(double beat, const std::string& lyric,
                     int pitch = -1, double duration_beats = 0.0) override;
     void on_schedule_loaded() override;
+    void prerender() override;
+    void set_bpm(float bpm) override;
     void on_seek(double beat) override;
 
     void set_control_connected(const std::string& port_id, bool connected);

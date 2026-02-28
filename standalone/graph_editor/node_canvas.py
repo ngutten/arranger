@@ -1417,7 +1417,11 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
         cp_default = cp.get("default", "")
         stored = node.params.get(cp_id, cp_default)
 
-        if cp_type == "filepath":
+        # Skip advanced params unless user has set a value
+        if cp.get("advanced", False) and not stored:
+            continue
+
+        if cp_type == "filepath" or cp_type == "dirpath":
             row = QWidget()
             row_lay = QHBoxLayout(row)
             row_lay.setContentsMargins(0, 0, 0, 0)
@@ -1433,9 +1437,14 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
 
             file_filter = cp.get("file_filter", "All Files (*)")
             save_mode = cp.get("save_mode", False)
-            def _browse(checked=False, e=edit, cid=cp_id, ff=file_filter, sm=save_mode):
+            is_dir = (cp_type == "dirpath")
+            def _browse(checked=False, e=edit, cid=cp_id, ff=file_filter, sm=save_mode, dr=is_dir):
                 from PySide6.QtWidgets import QFileDialog
-                if sm:
+                if dr:
+                    p = QFileDialog.getExistingDirectory(
+                        w, f"Select {cp_display}", "",
+                        options=QFileDialog.Option.DontUseNativeDialog | QFileDialog.Option.ShowDirsOnly)
+                elif sm:
                     p, _ = QFileDialog.getSaveFileName(
                         w, f"Select {cp_display}", "", ff,
                         options=QFileDialog.Option.DontUseNativeDialog)

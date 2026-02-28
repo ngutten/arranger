@@ -89,6 +89,7 @@ static void write_wav_f32(const char* path, const float* pcm, int len, int sr) {
 static auto s_t0 = std::chrono::steady_clock::now();
 
 static void sing_log(const char* msg) {
+    /*
     auto now = std::chrono::steady_clock::now();
     long ms = static_cast<long>(
         std::chrono::duration_cast<std::chrono::milliseconds>(now - s_t0).count());
@@ -97,15 +98,18 @@ static void sing_log(const char* msg) {
     std::fprintf(stderr, "[SINGING][tid=%s][+%ldms] %s\n",
                  tid.str().c_str(), ms, msg);
     std::fflush(stderr);
+    */
 }
 
 static void sing_logf(const char* fmt, ...) {
+    /*
     char buf[512];
     va_list ap;
     va_start(ap, fmt);
     std::vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     sing_log(buf);
+    */
 }
 
 // ---------------------------------------------------------------------------

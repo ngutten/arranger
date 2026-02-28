@@ -99,6 +99,10 @@ json ServerHandler::dispatch(const std::string& cmd, const json& req) {
         engine_.play();
         return {{"status", "ok"}};
     }
+    if (cmd == protocol::CMD_PRERENDER) {
+        engine_.prerender();
+        return {{"status", "ok"}};
+    }
     if (cmd == protocol::CMD_STOP) {
         engine_.stop();
         return {{"status", "ok"}};
@@ -286,6 +290,7 @@ json ServerHandler::dispatch(const std::string& cmd, const json& req) {
                 switch (cp.type) {
                     case ConfigType::String:      jcp["type"] = "string"; break;
                     case ConfigType::FilePath:    jcp["type"] = "filepath"; break;
+                    case ConfigType::DirPath:     jcp["type"] = "dirpath"; break;
                     case ConfigType::Integer:     jcp["type"] = "integer"; break;
                     case ConfigType::Float:       jcp["type"] = "float"; break;
                     case ConfigType::Bool:        jcp["type"] = "bool"; break;
@@ -296,6 +301,8 @@ json ServerHandler::dispatch(const std::string& cmd, const json& req) {
                     jcp["file_filter"] = cp.file_filter;
                 if (cp.save_mode)
                     jcp["save_mode"] = true;
+                if (cp.advanced)
+                    jcp["advanced"] = true;
                 if (!cp.choices.empty())
                     jcp["choices"] = cp.choices;
                 config_params.push_back(jcp);

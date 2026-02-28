@@ -374,6 +374,7 @@ class BindingEngine:
         self._sf2_path: Optional[str] = None
         self._graph_loaded             = False
         self._graph_track_ids          = frozenset()
+        self._last_graph_hash          = ""
         self._send_lock                = threading.Lock()
 
         # Cache playing state so is_playing doesn't need a round-trip every call.
@@ -447,12 +448,26 @@ class BindingEngine:
         if self.state.signal_graph is not None:
             self.state.signal_graph.sync_track_sources(self.state, self._sf2_path)
             self.state.signal_graph.sync_pattern_sources(self.state)
-        resp = self._send(self._graph_payload())
-        if resp is None or resp.get("status") != "ok":
-            print(f"[BindingEngine] set_graph failed: {resp}")
-            return
-        self._graph_loaded    = True
-        self._graph_track_ids = self._current_track_ids()
+
+        payload = self._graph_payload()
+        # Hash the graph payload to detect structural changes.
+        # Only send set_graph if the structure actually changed —
+        # avoids destroying/recreating plugin instances (expensive for
+        # plugins like DiffSinger that load ONNX models on activate).
+        import json as _json
+        payload_str = _json.dumps(payload, sort_keys=True)
+        import hashlib
+        graph_hash = hashlib.md5(payload_str.encode()).hexdigest()
+
+        if graph_hash != self._last_graph_hash:
+            resp = self._send(payload)
+            if resp is None or resp.get("status") != "ok":
+                print(f"[BindingEngine] set_graph failed: {resp}")
+                return
+            self._graph_loaded    = True
+            self._graph_track_ids = self._current_track_ids()
+            self._last_graph_hash = graph_hash
+
         self._send({"cmd": "set_bpm", "bpm": self.state.bpm})
         
         # Adjust all programming beats to just after the current beat to make sure they re-fire
@@ -463,6 +478,7 @@ class BindingEngine:
 
     def play(self):
         self.mark_dirty()
+        self._send({"cmd": "prerender"})
         self._send({"cmd": "play"})
         self._is_playing = True
 
@@ -556,6 +572,7 @@ class BindingEngine:
     def render_offline_wav(self) -> Optional[bytes]:
         import base64
         self.mark_dirty()
+        self._send({"cmd": "prerender"})
         resp = self._send({"cmd": "render", "format": "wav"})
         if resp is None or resp.get("status") != "ok":
             return None
@@ -615,6 +632,7 @@ class BindingEngine:
         # Mark graph dirty so the next play() / ensure_graph() rebuilds the
         # real graph and schedule from AppState.
         self._graph_loaded = False
+        self._last_graph_hash = ""
 
         if resp is None or resp.get("status") != "ok":
             return None

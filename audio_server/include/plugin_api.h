@@ -106,6 +106,7 @@ struct PortDescriptor {
 enum class ConfigType {
     String,
     FilePath,
+    DirPath,
     Integer,
     Float,
     Bool,
@@ -120,6 +121,7 @@ struct ConfigParam {
     std::string   default_value;
     std::string   file_filter;
     bool          save_mode = false;
+    bool          advanced  = false;  // hidden by default in the UI
     std::vector<std::string> choices;
 };
 
@@ -317,6 +319,24 @@ public:
     /// schedule have been delivered.  The plugin should finalize and publish
     /// its pre-rendered phoneme sequence so the audio thread can read it.
     virtual void on_schedule_loaded() {}
+
+    /// Called from the main thread before playback starts (or before offline
+    /// render).  The audio thread is guaranteed NOT to be running during this
+    /// call.  Plugins that need heavy pre-computation (e.g. neural synthesis)
+    /// should do it here rather than in process() or on_schedule_loaded().
+    ///
+    /// The engine calls prerender() after on_schedule_loaded() but before the
+    /// transport starts.  It is NOT called on every set_schedule — only when
+    /// explicitly requested (e.g. before play, before offline render).
+    /// This means graph edits while stopped do NOT trigger prerender.
+    ///
+    /// Plugins should cache their render output and use prerender() to check
+    /// whether the cache is still valid (e.g. by hashing note data).
+    virtual void prerender() {}
+
+    /// Called from the main thread before prerender() to provide the current
+    /// BPM.  Useful for computing frame durations from beat durations.
+    virtual void set_bpm(float /*bpm*/) {}
 
     /// Called from the audio thread when the transport seeks to a new beat
     /// position.  The plugin should reposition its phoneme cursor so that

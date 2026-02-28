@@ -23,7 +23,7 @@ public:
         PluginDescriptor d;
         d.id           = "builtin.pattern_stamper";
         d.display_name = "Pattern Stamper";
-        d.category     = "EventEffect";
+        d.category     = "Event";
         d.doc          = "Stamps a pattern onto incoming MIDI notes. Supports duration clipping.";
         
         d.ports = {

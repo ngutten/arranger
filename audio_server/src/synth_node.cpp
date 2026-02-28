@@ -230,11 +230,17 @@ void TrackSourceNode::preview_all_notes_off() {
 }
 
 void TrackSourceNode::push_lyric(double beat, const std::string& lyric,
-                                  int pitch, double duration_beats) {
+                                 int pitch, double duration_beats) {
     for (auto* n : downstream_) n->push_lyric(beat, lyric, pitch, duration_beats);
 }
 void TrackSourceNode::on_schedule_loaded() {
     for (auto* n : downstream_) n->on_schedule_loaded();
+}
+void TrackSourceNode::prerender() {
+    for (auto* n : downstream_) n->prerender();
+}
+void TrackSourceNode::set_bpm(float bpm) {
+    for (auto* n : downstream_) n->set_bpm(bpm);
 }
 
 // ---------------------------------------------------------------------------

@@ -63,6 +63,7 @@ public:
     // -----------------------------------------------------------------------
 
     void play();
+    void prerender();
     void stop();
     void seek(double beat);
     void set_loop(double start, double end);   // call with (0,0) to disable

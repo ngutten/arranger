@@ -49,6 +49,7 @@ constexpr const char* CMD_SET_GRAPH     = "set_graph";      // → {status}
 
 // -- Transport --
 constexpr const char* CMD_PLAY          = "play";           // → {status}
+constexpr const char* CMD_PRERENDER     = "prerender";      // → {status}
 constexpr const char* CMD_STOP          = "stop";           // → {status}
 constexpr const char* CMD_SEEK          = "seek";           // {beat: float} → {status}
 constexpr const char* CMD_SET_LOOP      = "set_loop";       // {start,end} or {enabled:false} → {status}

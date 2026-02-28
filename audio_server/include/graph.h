@@ -85,12 +85,18 @@ public:
     /// pre-rendered.  TrackSourceNode fans this out to downstream nodes;
     /// PluginAdapterNode forwards it to the plugin.
     virtual void push_lyric(double beat, const std::string& lyric,
-                            int pitch = -1,
-                            double duration_beats = 0.0) {}
+                            int pitch = -1, double duration_beats = 0.0) {}
 
     /// Called from main thread after all push_lyric() calls for a schedule.
     /// Signals the node to publish its pre-rendered phoneme sequence.
     virtual void on_schedule_loaded() {}
+
+    /// Called from main thread before playback or offline render.
+    /// Audio thread is guaranteed not running.  Heavy pre-computation goes here.
+    virtual void prerender() {}
+
+    /// Called from main thread before prerender() to provide the current BPM.
+    virtual void set_bpm(float /*bpm*/) {}
 
     /// Called from audio thread on a transport seek.  The node should
     /// reposition any beat-indexed cursor to the note at or after beat.

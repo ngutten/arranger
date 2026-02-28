@@ -48,6 +48,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -93,6 +94,7 @@ struct DsConfig {
     float mel_fmin    = 40.0f;
     float mel_fmax    = 16000.0f;
     int   k_step      = 0;
+    float max_depth   = 0.6f;
     bool  use_shallow_diffusion = true;
 
     bool load(const std::string& path, std::string& err) {
@@ -119,12 +121,13 @@ struct DsConfig {
                 else if (key == "fmin" || key == "mel_fmin") mel_fmin = std::stof(val);
                 else if (key == "fmax" || key == "mel_fmax") mel_fmax = std::stof(val);
                 else if (key == "K_step") k_step = std::stoi(val);
+                else if (key == "max_depth") max_depth = std::stof(val);
                 else if (key == "use_shallow_diffusion")
                     use_shallow_diffusion = (val == "true" || val == "True" || val == "1");
             } catch (...) {}
         }
-        ds_log("dsconfig: sr=%d hop=%d mels=%d fmin=%.0f fmax=%.0f k_step=%d",
-               sample_rate, hop_size, n_mels, mel_fmin, mel_fmax, k_step);
+        ds_log("dsconfig: sr=%d hop=%d mels=%d fmin=%.0f fmax=%.0f k_step=%d max_depth=%.2f",
+               sample_rate, hop_size, n_mels, mel_fmin, mel_fmax, k_step, max_depth);
         return true;
     }
 };
@@ -133,19 +136,131 @@ struct DsConfig {
 // Phoneme dictionary (dsdict.txt)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Phoneme dictionary loader
+// ---------------------------------------------------------------------------
+// Supports two formats:
+//   1. JSON array:  ["AP", "SP", "aa", "ae", ...]  — index = phoneme ID
+//      (used by TIGER and newer DiffSinger voices, file is phonemes.json)
+//   2. Text:        phoneme ID  (one per line, space/tab separated)
+//      (older dsdict.txt format)
+//   3. phonemes.txt: one phoneme per line, line number = ID
+//      (referenced from dsconfig.yaml)
+
 static bool load_phoneme_dict(const std::string& path,
                               std::unordered_map<std::string, int64_t>& out,
                               std::string& err) {
     std::ifstream f(path);
     if (!f.is_open()) { err = "Cannot open dict: " + path; return false; }
-    std::string line;
-    while (std::getline(f, line)) {
-        if (line.empty() || line[0] == '#') continue;
-        std::istringstream ss(line);
-        std::string phoneme; int64_t id;
-        if (ss >> phoneme >> id) out[phoneme] = id;
+
+    // Read entire file
+    std::string content((std::istreambuf_iterator<char>(f)),
+                         std::istreambuf_iterator<char>());
+
+    // Detect format by looking for JSON
+    size_t first_nonws = content.find_first_not_of(" \t\r\n");
+    if (first_nonws != std::string::npos &&
+        (content[first_nonws] == '[' || content[first_nonws] == '{')) {
+
+        bool is_object = (content[first_nonws] == '{');
+
+        if (is_object) {
+            // JSON object format: {"AP": 1, "SP": 2, "en/b": 7, ...}
+            // Minimal parser: find "key": value pairs
+            size_t pos = 0;
+            while (pos < content.size()) {
+                size_t q1 = content.find('"', pos);
+                if (q1 == std::string::npos) break;
+                size_t q2 = content.find('"', q1 + 1);
+                if (q2 == std::string::npos) break;
+                std::string key = content.substr(q1 + 1, q2 - q1 - 1);
+
+                // Find the colon and then the integer value
+                size_t colon = content.find(':', q2 + 1);
+                if (colon == std::string::npos) break;
+
+                // Skip whitespace after colon
+                size_t vstart = content.find_first_not_of(" \t\r\n", colon + 1);
+                if (vstart == std::string::npos) break;
+
+                // Read integer (or next quote if it's a string value)
+                if (content[vstart] == '"') {
+                    // String value — skip (we want int IDs)
+                    pos = content.find('"', vstart + 1);
+                    if (pos != std::string::npos) pos++;
+                    continue;
+                }
+
+                // Parse integer
+                char* end = nullptr;
+                long long id = std::strtoll(content.c_str() + vstart, &end, 10);
+                if (end != content.c_str() + vstart) {
+                    out[key] = static_cast<int64_t>(id);
+                }
+                pos = (end != nullptr) ? (end - content.c_str()) : (vstart + 1);
+            }
+        } else {
+            // JSON array format: ["AP", "SP", "aa", ...]
+            int64_t id = 0;
+            size_t pos = content.find('[');
+            while (pos < content.size()) {
+                size_t q1 = content.find('"', pos + 1);
+                if (q1 == std::string::npos) break;
+                size_t q2 = content.find('"', q1 + 1);
+                if (q2 == std::string::npos) break;
+                std::string phoneme = content.substr(q1 + 1, q2 - q1 - 1);
+                if (!phoneme.empty()) out[phoneme] = id;
+                id++;
+                pos = q2;
+            }
+        }
+        ds_log("Loaded %zu phonemes from JSON array: %s", out.size(), path.c_str());
+        return true;
     }
-    ds_log("Loaded %zu phonemes from %s", out.size(), path.c_str());
+
+    // Try text format: either "phoneme ID" or one-phoneme-per-line
+    std::istringstream ss(content);
+    std::string line;
+    int64_t line_num = 0;
+    bool has_explicit_ids = false;
+
+    // Peek at first non-empty line to detect format
+    std::vector<std::string> lines;
+    while (std::getline(ss, line)) {
+        if (!line.empty() && line[0] != '#') lines.push_back(line);
+    }
+
+    if (!lines.empty()) {
+        // Check if first line has two tokens (phoneme + ID)
+        std::istringstream first(lines[0]);
+        std::string tok1, tok2;
+        if ((first >> tok1 >> tok2) && !tok2.empty()) {
+            // Try to parse tok2 as integer
+            try { std::stoll(tok2); has_explicit_ids = true; } catch (...) {}
+        }
+    }
+
+    for (const auto& l : lines) {
+        if (has_explicit_ids) {
+            // Format: "phoneme ID"
+            std::istringstream ls(l);
+            std::string phoneme; int64_t id;
+            if (ls >> phoneme >> id) out[phoneme] = id;
+        } else {
+            // Format: one phoneme per line, line number = ID
+            // (skip empty lines but count them for ID)
+            std::string trimmed = l;
+            size_t a = trimmed.find_first_not_of(" \t\r\n");
+            size_t b = trimmed.find_last_not_of(" \t\r\n");
+            if (a != std::string::npos)
+                trimmed = trimmed.substr(a, b - a + 1);
+            if (!trimmed.empty())
+                out[trimmed] = line_num;
+            line_num++;
+        }
+    }
+
+    ds_log("Loaded %zu phonemes from text: %s", out.size(), path.c_str());
     return true;
 }
 
@@ -240,8 +355,12 @@ class DiffSingerPlugin final : public Plugin {
         std::vector<NoteInfo> notes;
         double start_beat() const { return notes.front().beat; }
         double end_beat() const {
-            auto& n = notes.back();
-            return n.beat + (n.duration_beats > 0 ? n.duration_beats : 0.5);
+            double mx = 0;
+            for (const auto& n : notes) {
+                double e = n.beat + (n.duration_beats > 0 ? n.duration_beats : 0.5);
+                if (e > mx) mx = e;
+            }
+            return mx;
         }
     };
 
@@ -250,6 +369,9 @@ class DiffSingerPlugin final : public Plugin {
         int    pcm_start;
         int    pcm_length;
     };
+
+    // Tracks which phoneme IDs in a phrase belong to which note.
+    struct PhonemeSpan { size_t start, count; };
 
     struct Render {
         std::vector<float>     pcm;
@@ -288,11 +410,12 @@ public:
         d.category     = "Synth";
         d.doc =
             "Neural singing voice synthesis using DiffSinger.\n"
-            "Diffusion acoustic model + NSF-HiFiGAN vocoder.\n"
-            "Pre-renders full phrases before playback.\n"
+            "Set 'model_dir' to a DiffSinger voice package directory\n"
+            "(containing dsconfig.yaml) and the plugin auto-discovers\n"
+            "all model files. Individual paths can still be overridden.\n"
             "GPU acceleration with automatic CPU fallback.";
         d.author  = "builtin";
-        d.version = 2;
+        d.version = 3;
 
         d.ports = {
             {"lyrics_in","Lyrics","Pattern with per-note lyrics",
@@ -304,16 +427,17 @@ public:
         };
 
         d.config_params = {
-            {"acoustic_path","Acoustic Model","Path to acoustic ONNX",
-             ConfigType::FilePath,""},
-            {"vocoder_path","Vocoder Model","Path to NSF-HiFiGAN ONNX",
-             ConfigType::FilePath,""},
-            {"duration_path","Duration Model","Path to duration ONNX (optional)",
-             ConfigType::FilePath,""},
-            {"dsconfig_path","Config File","Path to dsconfig.yaml",
-             ConfigType::FilePath,""},
-            {"dict_path","Phoneme Dictionary","Path to dsdict.txt",
-             ConfigType::FilePath,""},
+            // Primary: just point at the voice package root
+            {"model_dir","Model Directory",
+             "Path to DiffSinger voice package (contains dsconfig.yaml). "
+             "Auto-discovers all model files.",
+             ConfigType::DirPath,""},
+            // Phoneme system
+            {"phoneme_set","Phoneme Set",
+             "auto = detect from dict, arpabet = ARPAbet (TIGER/EN), "
+             "ipa = raw IPA, xsampa = X-SAMPA",
+             ConfigType::String,"auto"},
+            // Voice & speaker
             {"voice","Voice","espeak-ng voice (e.g. en-us)",
              ConfigType::String,"en-us"},
             {"speaker_id","Speaker ID","Speaker index (multi-speaker)",
@@ -321,6 +445,19 @@ public:
             {"phrase_gap","Phrase Gap (beats)",
              "Beat gap threshold for phrase splitting",
              ConfigType::Float,"0.5"},
+            // Overrides (optional — auto-discovered from dsconfig.yaml)
+            {"acoustic_path","Acoustic Model (override)",
+             "Override auto-discovered acoustic ONNX path",
+             ConfigType::FilePath,"", "", false, true},
+            {"vocoder_path","Vocoder Model (override)",
+             "Override auto-discovered vocoder ONNX path",
+             ConfigType::FilePath,"", "", false, true},
+            {"duration_path","Duration Model (override)",
+             "Override auto-discovered duration ONNX path",
+             ConfigType::FilePath,"", "", false, true},
+            {"dict_path","Phoneme Dict (override)",
+             "Override auto-discovered phoneme dict path",
+             ConfigType::FilePath,"", "", false, true},
         };
         return d;
     }
@@ -331,11 +468,12 @@ public:
 
     void configure(const std::string& key, const std::string& val) override {
         ds_log("configure: %s = '%.60s'", key.c_str(), val.c_str());
-        if      (key == "acoustic_path")  acoustic_path_ = val;
-        else if (key == "vocoder_path")   vocoder_path_  = val;
-        else if (key == "duration_path")  duration_path_ = val;
-        else if (key == "dsconfig_path")  dsconfig_path_ = val;
-        else if (key == "dict_path")      dict_path_     = val;
+        if      (key == "model_dir")      model_dir_      = val;
+        else if (key == "acoustic_path")  acoustic_path_  = val;
+        else if (key == "vocoder_path")   vocoder_path_   = val;
+        else if (key == "duration_path")  duration_path_  = val;
+        else if (key == "dict_path")      dict_path_      = val;
+        else if (key == "phoneme_set")    phoneme_set_    = val;
         else if (key == "voice")          voice_ = val.empty() ? "en-us" : val;
         else if (key == "speaker_id")  { try { speaker_id_ = std::stoi(val); } catch (...) {} }
         else if (key == "phrase_gap")  { try { phrase_gap_ = std::stof(val); } catch (...) {} }
@@ -353,17 +491,31 @@ public:
         espeak_ok_ = init_espeak();
         if (!espeak_ok_) ds_log("WARNING: espeak init failed");
 
+        // --- Auto-discover model files from model_dir ---
+        if (!model_dir_.empty()) {
+            discover_models();
+        }
+
+        // --- Load dsconfig.yaml ---
         if (!dsconfig_path_.empty()) {
             std::string err;
             if (!cfg_.load(dsconfig_path_, err)) {
                 error_ = err; set_state(State::Error); return;
             }
         }
+
+        // --- Load phoneme dict ---
         if (!dict_path_.empty()) {
             std::string err;
             if (!load_phoneme_dict(dict_path_, phoneme_dict_, err))
                 ds_log("WARNING: %s", err.c_str());
         }
+
+        // --- Auto-detect phoneme set if "auto" ---
+        if (phoneme_set_ == "auto" || phoneme_set_.empty()) {
+            detect_phoneme_set();
+        }
+        ds_log("phoneme_set: %s", phoneme_set_.c_str());
 
         choose_provider();
         if (!load_models()) { set_state(State::Error); return; }
@@ -403,20 +555,65 @@ public:
     void on_schedule_loaded() override {
         if (pending_.empty()) return;
         ds_log("on_schedule_loaded: %zu notes", pending_.size());
-        auto t0 = std::chrono::steady_clock::now();
 
         resolve_pitches();
 
-        // Group notes into phrases
-        auto phrases = build_phrases(pending_);
-        ds_log("  → %zu phrases", phrases.size());
-
-        // Pre-render all phrases
-        auto render = pre_render_phrases(phrases);
+        // Stash the resolved notes for prerender().
+        // We do NOT render here — prerender() is called separately
+        // before playback or offline render.
+        pending_notes_ = pending_;
         pending_.clear();
         pat_cache_.clear();
+    }
 
-        if (!render) { ds_log("pre-render FAILED"); return; }
+    // ==================================================================
+    // prerender() — called from main thread before play/render.
+    // Audio thread is guaranteed not running.
+    // ==================================================================
+
+    void prerender() override {
+        if (pending_notes_.empty() && !cache_valid_) {
+            ds_log("prerender: no notes and no cache");
+            return;
+        }
+
+        // Check if notes have changed since last render (cache check).
+        // Include BPM in hash so tempo changes invalidate cache.
+        uint64_t hash = hash_notes(pending_notes_.empty()
+                                     ? cached_notes_ : pending_notes_);
+        // Mix in BPM
+        { float b = bpm_;
+          auto* p = reinterpret_cast<const uint8_t*>(&b);
+          for (int i = 0; i < 4; ++i) { hash ^= p[i]; hash *= 1099511628211ULL; }
+        }
+        if (hash == cached_hash_ && cache_valid_) {
+            ds_log("prerender: cache hit (hash=%llu, %zu samples)",
+                   (unsigned long long)hash,
+                   old_renders_.empty() ? 0 : old_renders_.back().pcm.size());
+            // Re-publish the existing render (in case graph was rebuilt)
+            if (!old_renders_.empty())
+                current_render_.store(&old_renders_.back(),
+                                      std::memory_order_release);
+            next_note_.store(0, std::memory_order_relaxed);
+            return;
+        }
+
+        // Notes changed — need to re-render.
+        if (!pending_notes_.empty()) {
+            cached_notes_ = pending_notes_;
+            pending_notes_.clear();
+        }
+
+        ds_log("prerender: rendering %zu notes (hash=%llu)",
+               cached_notes_.size(), (unsigned long long)hash);
+        auto t0 = std::chrono::steady_clock::now();
+
+        auto phrases = build_phrases(cached_notes_);
+        ds_log("  → %zu phrases", phrases.size());
+
+        auto render = pre_render_phrases(phrases);
+
+        if (!render) { ds_log("prerender FAILED"); return; }
 
         long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - t0).count();
@@ -428,6 +625,9 @@ public:
         old_renders_.push_back(std::move(*render));
         current_render_.store(&old_renders_.back(), std::memory_order_release);
         next_note_.store(0, std::memory_order_relaxed);
+
+        cached_hash_ = hash;
+        cache_valid_ = true;
     }
 
     void on_seek(double beat) override {
@@ -538,6 +738,10 @@ public:
         next_note_.store(0, std::memory_order_relaxed);
     }
 
+    void set_bpm(float bpm) override {
+        if (bpm > 0) bpm_ = bpm;
+    }
+
     std::string get_graph_data(const std::string&) override {
         const Render* r = current_render_.load(std::memory_order_acquire);
         char buf[512];
@@ -558,11 +762,14 @@ private:
     static constexpr int MAX_PHRASE_NOTES = 64;
 
     // ---- Config ----
+    std::string model_dir_;
     std::string acoustic_path_, vocoder_path_, duration_path_;
     std::string dsconfig_path_, dict_path_;
     std::string voice_ = "en-us";
+    std::string phoneme_set_ = "auto";
     int   speaker_id_ = 0;
     float phrase_gap_  = 0.5f;  // beats
+    float bpm_         = 120.0f;
     DsConfig cfg_;
     std::unordered_map<std::string, int64_t> phoneme_dict_;
 
@@ -582,6 +789,10 @@ private:
     // ---- Schedule (main thread) ----
     std::vector<NoteInfo> pending_;
     std::vector<NoteInfo> pat_cache_;
+    std::vector<NoteInfo> pending_notes_;  // stashed by on_schedule_loaded for prerender
+    std::vector<NoteInfo> cached_notes_;   // notes from last successful render
+    uint64_t cached_hash_ = 0;
+    bool     cache_valid_  = false;
 
     // ---- Render (atomic publish) ----
     std::atomic<const Render*> current_render_{nullptr};
@@ -668,15 +879,17 @@ private:
 
             // 1. Phonemize all notes in the phrase, concatenate phoneme IDs
             //    Keep track of which phoneme IDs belong to which note.
-            struct PhonemeSpan { size_t start, count; };
+            // Keep track of which phoneme IDs belong to which note.
             std::vector<int64_t> all_ph_ids;
             std::vector<PhonemeSpan> spans;
 
             for (const auto& ni : phrase.notes) {
                 size_t ph_start = all_ph_ids.size();
                 if (ni.lyric.empty()) {
-                    // Silent note: insert silence/breath phoneme
-                    all_ph_ids.push_back(0);  // SP token
+                    // Silent note: insert SP (silence) token
+                    int64_t sp_id = phoneme_dict_.count("SP") ?
+                                    phoneme_dict_.at("SP") : 2;
+                    all_ph_ids.push_back(sp_id);
                 } else {
                     std::string ipa = espeak_ok_
                         ? phonemize(ni.lyric, voice_) : ni.lyric;
@@ -705,9 +918,11 @@ private:
             // Try beat-based duration computation first
             if (phrase.notes[0].duration_beats > 0) {
                 compute_durations_from_beats(phrase.notes, spans, durs, N);
-            } else if (duration_sess_) {
-                infer_duration(all_ph_ids, durs, N);
             }
+            // Note: duration_sess_ is NOT used here. The TIGER/OpenUtau
+            // duration model expects encoder hidden states as input, not
+            // raw phoneme IDs. We always use beat-based durations from
+            // the score, which are more accurate for our use case.
 
             // Ensure N is computed
             if (N == 0) { for (auto d : durs) N += d; }
@@ -781,14 +996,7 @@ private:
         // evenly across that note's phonemes.
         //
         // frames_per_beat = sample_rate / (hop_size * bpm / 60)
-        // We don't know bpm here directly, but we can estimate from note
-        // spacing. Use a default of 120 bpm if we can't estimate.
-        // TODO: pass bpm through from engine (maybe via configure)
-
-        float bpm = 120.0f;
-        // Quick estimate: if we have at least 2 notes with known durations
-        // and the first note has a non-trivial beat position, we can try
-        // to infer bpm. For now, just use 120.
+        float bpm = bpm_;
         float frames_per_beat = cfg_.sample_rate / (cfg_.hop_size * bpm / 60.0f);
 
         N = 0;
@@ -852,37 +1060,197 @@ private:
     }
 
     // ==================================================================
-    // Phoneme → ID
+    // Phoneme → ID (with language prefix and IPA→ARPAbet mapping)
     // ==================================================================
+
+    // IPA → ARPAbet mapping for English (covers espeak-ng output)
+    // This handles the most common mappings. Extended phonemes like
+    // TIGER's [ax], [dx] are included.
+    struct PhonemeMapping { const char* ipa; const char* arpa; };
+    static constexpr PhonemeMapping ipa_to_arpa[] = {
+        // Vowels
+        {"ɑː", "aa"},  {"ɑ", "aa"},   {"æ", "ae"},   {"ʌ", "ah"},
+        {"ɔː", "ao"},  {"ɔ", "ao"},   {"aʊ", "aw"},  {"ə", "ax"},
+        {"ɚ", "er"},   {"ɝ", "er"},   {"eɪ", "ey"},  {"ɛ", "eh"},
+        {"ɪ", "ih"},   {"iː", "iy"},  {"i", "iy"},   {"oʊ", "ow"},
+        {"ʊ", "uh"},   {"uː", "uw"},  {"u", "uw"},   {"aɪ", "ay"},
+        {"ɔɪ", "oy"},  {"ɒ", "oh"},
+        // Consonants
+        {"b", "b"},     {"d", "d"},    {"f", "f"},     {"ɡ", "g"},
+        {"g", "g"},     {"h", "hh"},   {"dʒ", "jh"},   {"k", "k"},
+        {"l", "l"},     {"m", "m"},    {"n", "n"},     {"ŋ", "ng"},
+        {"p", "p"},     {"ɹ", "r"},    {"r", "r"},     {"s", "s"},
+        {"ʃ", "sh"},   {"t", "t"},    {"tʃ", "ch"},   {"θ", "th"},
+        {"ð", "dh"},   {"v", "v"},    {"w", "w"},     {"j", "y"},
+        {"z", "z"},     {"ʒ", "zh"},   {"ɾ", "dx"},    {"ʔ", "q"},
+        // Diphthongs that may appear as single tokens
+        {"eː", "ey"},  {"oː", "ow"},
+    };
+
+    // Try to find a phoneme in the dict, with language prefix fallback
+    int64_t lookup_phoneme(const std::string& ph) const {
+        // Direct lookup first
+        auto it = phoneme_dict_.find(ph);
+        if (it != phoneme_dict_.end()) return it->second;
+
+        // Try with language prefix (en/ by default, configurable via voice_)
+        std::string lang_prefix;
+        if (voice_.find("en") != std::string::npos) lang_prefix = "en/";
+        else if (voice_.find("zh") != std::string::npos) lang_prefix = "zh/";
+        else if (voice_.find("ja") != std::string::npos) lang_prefix = "ja/";
+        else if (voice_.find("de") != std::string::npos) lang_prefix = "de/";
+        else if (voice_.find("fr") != std::string::npos) lang_prefix = "fr/";
+        else if (voice_.find("es") != std::string::npos) lang_prefix = "es/";
+        else if (voice_.find("ko") != std::string::npos) lang_prefix = "ko/";
+        else if (voice_.find("ru") != std::string::npos) lang_prefix = "ru/";
+        else if (voice_.find("pt") != std::string::npos) lang_prefix = "pt/";
+        else if (voice_.find("th") != std::string::npos) lang_prefix = "th/";
+        else lang_prefix = "en/";
+
+        it = phoneme_dict_.find(lang_prefix + ph);
+        if (it != phoneme_dict_.end()) return it->second;
+
+        return -1;  // not found
+    }
 
     std::vector<int64_t> to_phoneme_ids(const std::string& ipa) {
         std::vector<int64_t> ids;
+
         if (phoneme_dict_.empty()) {
             for (unsigned char c : ipa) ids.push_back(c);
-        } else {
+            if (ids.empty()) ids.push_back(0);
+            return ids;
+        }
+
+        // If phoneme_set is "ipa", the dict keys are already IPA —
+        // try direct lookup of space-separated tokens first
+        if (phoneme_set_ == "ipa") {
             std::istringstream ss(ipa);
             std::string tok;
             while (ss >> tok) {
-                auto it = phoneme_dict_.find(tok);
-                if (it != phoneme_dict_.end()) {
-                    ids.push_back(it->second);
-                } else {
-                    for (char c : tok) {
-                        auto it2 = phoneme_dict_.find(std::string(1, c));
-                        if (it2 != phoneme_dict_.end()) ids.push_back(it2->second);
-                    }
+                int64_t id = lookup_phoneme(tok);
+                if (id >= 0) ids.push_back(id);
+            }
+            if (ids.empty()) ids.push_back(phoneme_dict_.count("SP") ?
+                                            phoneme_dict_.at("SP") : 0);
+            return ids;
+        }
+
+        // For arpabet/xsampa: parse IPA string via greedy longest-match,
+        // map to ARPAbet, then look up with language prefix
+        size_t pos = 0;
+        while (pos < ipa.size()) {
+            // Skip whitespace and stress marks
+            if (ipa[pos] == ' ' || ipa[pos] == '\t' ||
+                ipa[pos] == '\xCB' ||  // start of ˈ or ˌ (stress marks)
+                ipa[pos] == '\xCC' ||  // combining characters
+                ipa[pos] == '\xCD') {  // more combining
+                pos++;
+                // Skip continuation bytes of multi-byte UTF-8
+                while (pos < ipa.size() && (ipa[pos] & 0xC0) == 0x80) pos++;
+                continue;
+            }
+
+            // Try longest match against IPA→ARPAbet table
+            int best_len = 0;
+            const char* best_arpa = nullptr;
+
+            for (const auto& m : ipa_to_arpa) {
+                int mlen = std::strlen(m.ipa);
+                if (pos + mlen <= ipa.size() &&
+                    std::strncmp(ipa.c_str() + pos, m.ipa, mlen) == 0 &&
+                    mlen > best_len) {
+                    best_len = mlen;
+                    best_arpa = m.arpa;
                 }
             }
+
+            if (best_arpa) {
+                int64_t id = lookup_phoneme(best_arpa);
+                if (id >= 0) ids.push_back(id);
+                else ds_log("    phoneme '%s' (from IPA) not in dict", best_arpa);
+                pos += best_len;
+            } else {
+                // Try the raw character(s) as a single phoneme
+                // Determine UTF-8 character length
+                int clen = 1;
+                unsigned char c = ipa[pos];
+                if ((c & 0xE0) == 0xC0) clen = 2;
+                else if ((c & 0xF0) == 0xE0) clen = 3;
+                else if ((c & 0xF8) == 0xF0) clen = 4;
+                clen = std::min(clen, (int)(ipa.size() - pos));
+
+                std::string raw = ipa.substr(pos, clen);
+                int64_t id = lookup_phoneme(raw);
+                if (id >= 0) {
+                    ids.push_back(id);
+                } else {
+                    // Skip unknown character silently
+                }
+                pos += clen;
+            }
         }
-        if (ids.empty()) ids.push_back(0);
+
+        if (ids.empty()) ids.push_back(phoneme_dict_.count("SP") ?
+                                        phoneme_dict_.at("SP") : 0);
         return ids;
     }
 
     // ==================================================================
     // ONNX: acoustic (phrase-level)
     // ==================================================================
-    // Inputs: tokens[1,T], durations[1,T], f0[1,N], speedup[1], spk_id[1]
-    // Output: mel[1, N, n_mels]
+    // Queries actual model inputs by name and type, builds tensors accordingly.
+    // Known DiffSinger acoustic inputs:
+    //   tokens/ph_seq:    int64[1,T]   phoneme IDs
+    //   durations/ph_dur: int64[1,T]   frames per phoneme
+    //   f0/f0_seq:        float[1,N]   Hz pitch curve (N = sum(durations))
+    //   languages:        int64[1,T]   language ID per phoneme (multi-lang models)
+    //   spk_id:           int64[1]     speaker index
+    //   spk_embed:        float[1,H]   speaker embedding (alt to spk_id)
+    //   gender:           float[1,N]   key shift / gender (-1 to 1)
+    //   velocity:         float[1,N]   speed/velocity
+    //   depth:            float[1]     shallow diffusion depth (0-1)
+    //   steps:            int64[1]     diffusion steps
+    //   speedup:          int64[1]     diffusion speedup factor
+
+    // Helper: create a tensor of the right type filled with a default value,
+    // matching the model's expected shape for a given input index.
+    Ort::Value make_default_tensor(Ort::Session& sess, size_t input_idx,
+                                   int64_t T, int64_t N,
+                                   // Backing storage — caller must keep alive
+                                   std::vector<int64_t>& i64_buf,
+                                   std::vector<float>& f32_buf,
+                                   int64_t default_i64, float default_f32) {
+        auto type_info = sess.GetInputTypeInfo(input_idx);
+        auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
+        auto elem_type = tensor_info.GetElementType();
+        auto shape = tensor_info.GetShape();
+
+        // Replace dynamic dims (-1) with our known sizes
+        for (auto& d : shape) {
+            if (d <= 0) {
+                // Heuristic: if shape has 2 dims [1, ?], second is T or N
+                // Use T for token-length inputs, N for frame-length inputs
+                d = (shape.size() == 2) ? T : 1;  // conservative default
+            }
+        }
+
+        int64_t numel = 1;
+        for (auto d : shape) numel *= d;
+        if (numel <= 0) numel = 1;
+
+        if (elem_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+            size_t off = i64_buf.size();
+            i64_buf.resize(off + numel, default_i64);
+            return Ort::Value::CreateTensor<int64_t>(
+                mem_info_, i64_buf.data() + off, numel, shape.data(), shape.size());
+        } else {
+            size_t off = f32_buf.size();
+            f32_buf.resize(off + numel, default_f32);
+            return Ort::Value::CreateTensor<float>(
+                mem_info_, f32_buf.data() + off, numel, shape.data(), shape.size());
+        }
+    }
 
     bool infer_acoustic(const std::vector<int64_t>& ph_ids,
                         const std::vector<int64_t>& durs,
@@ -890,23 +1258,20 @@ private:
                         std::vector<float>& mel_out, int& mel_frames) {
         try {
             int64_t T = (int64_t)ph_ids.size();
+
+            // Backing storage for tensors we build (must outlive the Run call)
+            std::vector<int64_t> i64_store;
+            std::vector<float> f32_store;
+            i64_store.reserve(T * 4 + N + 16);
+            f32_store.reserve(N * 4 + 16);
+
+            // Pre-built tensors for known inputs
             std::array<int64_t,2> s1T = {1, T};
             std::array<int64_t,2> s1N = {1, N};
             std::array<int64_t,1> s1  = {1};
 
-            auto t_tok = Ort::Value::CreateTensor<int64_t>(
-                mem_info_, const_cast<int64_t*>(ph_ids.data()), T, s1T.data(), 2);
-            auto t_dur = Ort::Value::CreateTensor<int64_t>(
-                mem_info_, const_cast<int64_t*>(durs.data()), T, s1T.data(), 2);
-            auto t_f0  = Ort::Value::CreateTensor<float>(
-                mem_info_, const_cast<float*>(f0.data()), N, s1N.data(), 2);
-
-            int64_t speedup = 10;
-            auto t_spd = Ort::Value::CreateTensor<int64_t>(
-                mem_info_, &speedup, 1, s1.data(), 1);
-            int64_t spk = speaker_id_;
-            auto t_spk = Ort::Value::CreateTensor<int64_t>(
-                mem_info_, &spk, 1, s1.data(), 1);
+            // Language IDs: all same language (0 = first language)
+            std::vector<int64_t> lang_ids(T, 0);  // TODO: map from voice_ config
 
             Ort::AllocatorWithDefaultOptions alloc;
             size_t n_in = acoustic_sess_->GetInputCount();
@@ -924,20 +1289,76 @@ private:
 
             for (size_t i = 0; i < n_in; ++i) {
                 const auto& nm = in_strs[i];
-                if      (nm == "tokens" || nm == "phone" || nm == "ph_seq")
-                    in_vals.push_back(std::move(t_tok));
-                else if (nm == "durations" || nm == "ph_dur" || nm == "dur_seq")
-                    in_vals.push_back(std::move(t_dur));
-                else if (nm == "f0" || nm == "f0_seq")
-                    in_vals.push_back(std::move(t_f0));
-                else if (nm == "speedup" || nm == "speed")
-                    in_vals.push_back(std::move(t_spd));
-                else if (nm == "spk_id" || nm == "spk_embed")
-                    in_vals.push_back(std::move(t_spk));
+
+                if (nm == "tokens" || nm == "phone" || nm == "ph_seq") {
+                    in_vals.push_back(Ort::Value::CreateTensor<int64_t>(
+                        mem_info_, const_cast<int64_t*>(ph_ids.data()), T,
+                        s1T.data(), 2));
+                }
+                else if (nm == "durations" || nm == "ph_dur" || nm == "dur_seq") {
+                    in_vals.push_back(Ort::Value::CreateTensor<int64_t>(
+                        mem_info_, const_cast<int64_t*>(durs.data()), T,
+                        s1T.data(), 2));
+                }
+                else if (nm == "f0" || nm == "f0_seq") {
+                    in_vals.push_back(Ort::Value::CreateTensor<float>(
+                        mem_info_, const_cast<float*>(f0.data()), N,
+                        s1N.data(), 2));
+                }
+                else if (nm == "languages" || nm == "lang_seq") {
+                    in_vals.push_back(Ort::Value::CreateTensor<int64_t>(
+                        mem_info_, lang_ids.data(), T, s1T.data(), 2));
+                }
+                else if (nm == "spk_id") {
+                    size_t off = i64_store.size();
+                    i64_store.push_back(static_cast<int64_t>(speaker_id_));
+                    in_vals.push_back(Ort::Value::CreateTensor<int64_t>(
+                        mem_info_, i64_store.data() + off, 1, s1.data(), 1));
+                }
+                else if (nm == "gender" || nm == "key_shift") {
+                    // float[1,N] — 0.0 = neutral
+                    size_t off = f32_store.size();
+                    f32_store.resize(off + N, 0.0f);
+                    in_vals.push_back(Ort::Value::CreateTensor<float>(
+                        mem_info_, f32_store.data() + off, N, s1N.data(), 2));
+                }
+                else if (nm == "velocity" || nm == "speed") {
+                    // float[1,N] — 1.0 = normal speed
+                    size_t off = f32_store.size();
+                    f32_store.resize(off + N, 1.0f);
+                    in_vals.push_back(Ort::Value::CreateTensor<float>(
+                        mem_info_, f32_store.data() + off, N, s1N.data(), 2));
+                }
+                else if (nm == "depth") {
+                    // float[1] — shallow diffusion depth from dsconfig
+                    size_t off = f32_store.size();
+                    f32_store.push_back(cfg_.max_depth);
+                    in_vals.push_back(Ort::Value::CreateTensor<float>(
+                        mem_info_, f32_store.data() + off, 1, s1.data(), 1));
+                }
+                else if (nm == "steps") {
+                    // int64[1] — diffusion steps
+                    size_t off = i64_store.size();
+                    i64_store.push_back(1000);  // full steps; depth controls actual depth
+                    in_vals.push_back(Ort::Value::CreateTensor<int64_t>(
+                        mem_info_, i64_store.data() + off, 1, s1.data(), 1));
+                }
+                else if (nm == "speedup") {
+                    size_t off = i64_store.size();
+                    i64_store.push_back(10);
+                    in_vals.push_back(Ort::Value::CreateTensor<int64_t>(
+                        mem_info_, i64_store.data() + off, 1, s1.data(), 1));
+                }
+                else if (nm == "spk_embed") {
+                    // float[1,H] — speaker embedding, use zeros
+                    in_vals.push_back(make_default_tensor(
+                        *acoustic_sess_, i, T, N, i64_store, f32_store, 0, 0.0f));
+                }
                 else {
-                    ds_log("    unknown input '%s' → dummy", nm.c_str());
-                    float d = 0; in_vals.push_back(
-                        Ort::Value::CreateTensor<float>(mem_info_, &d, 1, s1.data(), 1));
+                    // Unknown input — query type and provide correct-typed default
+                    ds_log("    unknown input '%s' → typed default", nm.c_str());
+                    in_vals.push_back(make_default_tensor(
+                        *acoustic_sess_, i, T, N, i64_store, f32_store, 0, 0.0f));
                 }
             }
 
@@ -1065,6 +1486,290 @@ private:
     // Provider selection & model loading (unchanged)
     // ==================================================================
 
+    // ==================================================================
+    // Note hashing for render cache
+    // ==================================================================
+
+    static uint64_t hash_notes(const std::vector<NoteInfo>& notes) {
+        // FNV-1a 64-bit hash over the note data that affects rendering:
+        // beat, pitch, duration, lyric
+        uint64_t h = 14695981039346656037ULL;
+        auto mix = [&](const void* data, size_t len) {
+            auto* p = static_cast<const uint8_t*>(data);
+            for (size_t i = 0; i < len; ++i) {
+                h ^= p[i];
+                h *= 1099511628211ULL;
+            }
+        };
+        for (const auto& n : notes) {
+            mix(&n.beat, sizeof(n.beat));
+            mix(&n.pitch, sizeof(n.pitch));
+            mix(&n.duration_beats, sizeof(n.duration_beats));
+            mix(n.lyric.data(), n.lyric.size());
+        }
+        return h;
+    }
+
+    // ==================================================================
+    // Auto-discovery from model_dir + dsconfig.yaml
+    // ==================================================================
+
+    // Join path components, ensuring exactly one separator
+    static std::string pjoin(const std::string& a, const std::string& b) {
+        if (a.empty()) return b;
+        if (b.empty()) return a;
+        bool a_slash = (a.back() == '/');
+        bool b_slash = (b.front() == '/');
+        if (a_slash && b_slash) return a + b.substr(1);
+        if (!a_slash && !b_slash) return a + "/" + b;
+        return a + b;
+    }
+
+    static bool file_exists(const std::string& p) {
+        std::ifstream f(p); return f.good();
+    }
+
+    // Find first *.onnx in a directory
+    static std::string find_onnx_in_dir(const std::string& dir) {
+        // Use a simple approach: try common names, then glob
+        for (const char* name : {"model.onnx", "vocoder.onnx"}) {
+            std::string p = pjoin(dir, name);
+            if (file_exists(p)) return p;
+        }
+        // Try shell glob
+        std::string cmd = "ls " + dir + "/*.onnx 2>/dev/null | head -1";
+        if (FILE* fp = popen(cmd.c_str(), "r")) {
+            char buf[512]; buf[0] = 0;
+            if (fgets(buf, sizeof(buf), fp)) {
+                size_t len = std::strlen(buf);
+                if (len > 0 && buf[len-1] == '\n') buf[len-1] = 0;
+            }
+            pclose(fp);
+            if (buf[0]) return std::string(buf);
+        }
+        return {};
+    }
+
+    void discover_models() {
+        std::string base = model_dir_;
+        // Strip trailing slash
+        while (!base.empty() && base.back() == '/') base.pop_back();
+
+        ds_log("discover_models: base='%s'", base.c_str());
+
+        // 1. Find dsconfig.yaml
+        if (dsconfig_path_.empty()) {
+            std::string p = pjoin(base, "dsconfig.yaml");
+            if (file_exists(p)) dsconfig_path_ = p;
+            else ds_log("  dsconfig.yaml not found in %s", base.c_str());
+        }
+
+        // 2. Parse dsconfig.yaml to discover relative paths
+        if (!dsconfig_path_.empty()) {
+            std::ifstream f(dsconfig_path_);
+            if (f.is_open()) {
+                std::string line;
+                while (std::getline(f, line)) {
+                    auto pound = line.find('#');
+                    if (pound != std::string::npos) line.resize(pound);
+                    auto colon = line.find(':');
+                    if (colon == std::string::npos) continue;
+                    // Only look at top-level keys (no leading whitespace)
+                    if (line[0] == ' ' || line[0] == '\t') continue;
+
+                    auto trim = [](std::string s) {
+                        size_t a = s.find_first_not_of(" \t\r\n");
+                        size_t b = s.find_last_not_of(" \t\r\n");
+                        return (a == std::string::npos) ? std::string() : s.substr(a, b - a + 1);
+                    };
+                    std::string key = trim(line.substr(0, colon));
+                    std::string val = trim(line.substr(colon + 1));
+
+                    if (key == "acoustic" && acoustic_path_.empty()) {
+                        std::string p = pjoin(base, val);
+                        if (file_exists(p)) {
+                            acoustic_path_ = p;
+                            ds_log("  acoustic: %s", p.c_str());
+                        }
+                    }
+                    else if (key == "phonemes" && dict_path_.empty()) {
+                        std::string p = pjoin(base, val);
+                        if (file_exists(p)) {
+                            dict_path_ = p;
+                            ds_log("  phonemes: %s", p.c_str());
+                        }
+                    }
+                    else if (key == "vocoder" && vocoder_path_.empty()) {
+                        // May be a directory name or a .onnx path
+                        std::string p = pjoin(base, val);
+                        if (file_exists(p) && val.find(".onnx") != std::string::npos) {
+                            vocoder_path_ = p;
+                        } else {
+                            // It's a directory — find .onnx inside
+                            std::string onnx = find_onnx_in_dir(p);
+                            if (!onnx.empty()) vocoder_path_ = onnx;
+                        }
+                        if (!vocoder_path_.empty())
+                            ds_log("  vocoder: %s", vocoder_path_.c_str());
+                    }
+                }
+            }
+        }
+
+        // 3. Look for duration model in common locations
+        if (duration_path_.empty()) {
+            for (const char* sub : {
+                "dsdur/files/dur.onnx", "dsdur/dur.onnx",
+                "dsdur/files/duration.onnx", "duration.onnx"
+            }) {
+                std::string p = pjoin(base, sub);
+                if (file_exists(p)) {
+                    duration_path_ = p;
+                    ds_log("  duration: %s", p.c_str());
+                    break;
+                }
+            }
+        }
+
+        // 4. Fallback: look for acoustic.onnx directly if dsconfig didn't specify
+        if (acoustic_path_.empty()) {
+            for (const char* sub : {
+                "dsacoustic/acoustic.onnx", "acoustic.onnx",
+                "dsacoustic/model.onnx"
+            }) {
+                std::string p = pjoin(base, sub);
+                if (file_exists(p)) {
+                    acoustic_path_ = p;
+                    ds_log("  acoustic (fallback): %s", p.c_str());
+                    break;
+                }
+            }
+        }
+
+        // 5. Fallback: find phoneme dict
+        if (dict_path_.empty()) {
+            for (const char* sub : {
+                "dsacoustic/phonemes.json", "phonemes.json",
+                "dsacoustic/phonemes.txt", "phonemes.txt",
+                "dsdict.txt"
+            }) {
+                std::string p = pjoin(base, sub);
+                if (file_exists(p)) {
+                    dict_path_ = p;
+                    ds_log("  dict (fallback): %s", p.c_str());
+                    break;
+                }
+            }
+        }
+
+        ds_log("discover_models: acoustic=%s vocoder=%s duration=%s dict=%s",
+               acoustic_path_.empty() ? "(none)" : "OK",
+               vocoder_path_.empty() ? "(none)" : "OK",
+               duration_path_.empty() ? "(none)" : "OK",
+               dict_path_.empty() ? "(none)" : "OK");
+    }
+
+    // ==================================================================
+    // Phoneme set auto-detection
+    // ==================================================================
+
+    void detect_phoneme_set() {
+        if (phoneme_dict_.empty()) {
+            phoneme_set_ = "ipa";
+            return;
+        }
+
+        // Check if dict keys have language prefixes (en/xx style)
+        // and what the unprefixed phonemes look like
+        int arpa_hits = 0, ipa_hits = 0, xsampa_hits = 0, total = 0;
+
+        // ARPAbet indicators: aa, ae, ah, ao, aw, ax, ay, eh, er, ey, ih, iy, ow, uh, uw
+        static const char* arpa_vowels[] = {
+            "aa","ae","ah","ao","aw","ax","ay","eh","er","ey",
+            "ih","iy","ow","uh","uw","oy","jh","hh","ng","sh","ch","zh","th","dh"
+        };
+
+        for (const auto& [key, id] : phoneme_dict_) {
+            // Strip language prefix if present
+            std::string ph = key;
+            auto slash = ph.find('/');
+            if (slash != std::string::npos) ph = ph.substr(slash + 1);
+            if (ph.empty() || ph == "AP" || ph == "SP") continue;
+
+            total++;
+            for (const char* a : arpa_vowels) {
+                if (ph == a) { arpa_hits++; break; }
+            }
+            // IPA indicator: contains non-ASCII
+            for (char c : ph) {
+                if (static_cast<unsigned char>(c) > 127) { ipa_hits++; break; }
+            }
+        }
+
+        if (total > 0) {
+            float arpa_frac = arpa_hits / (float)total;
+            float ipa_frac  = ipa_hits / (float)total;
+
+            if (arpa_frac > 0.05f) phoneme_set_ = "arpabet";
+            else if (ipa_frac > 0.3f) phoneme_set_ = "ipa";
+            else phoneme_set_ = "arpabet";  // default for ASCII-only dicts
+        } else {
+            phoneme_set_ = "ipa";
+        }
+
+        ds_log("detect_phoneme_set: %d arpa/%d ipa/%d total → %s",
+               arpa_hits, ipa_hits, total, phoneme_set_.c_str());
+    }
+
+    // ==================================================================
+    // Model I/O logging
+    // ==================================================================
+
+    void log_model_io(const char* label, Ort::Session& sess) {
+        Ort::AllocatorWithDefaultOptions alloc;
+        auto type_str = [](ONNXTensorElementDataType t) -> const char* {
+            switch (t) {
+                case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:   return "float32";
+                case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:   return "int64";
+                case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:   return "int32";
+                case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:  return "float64";
+                case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:    return "int8";
+                case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: return "float16";
+                default: return "other";
+            }
+        };
+        size_t n_in = sess.GetInputCount();
+        for (size_t i = 0; i < n_in; ++i) {
+            auto name = sess.GetInputNameAllocated(i, alloc);
+            auto info = sess.GetInputTypeInfo(i).GetTensorTypeAndShapeInfo();
+            auto shape = info.GetShape();
+            std::string sh;
+            for (size_t j = 0; j < shape.size(); ++j) {
+                if (j) sh += ",";
+                sh += (shape[j] < 0) ? "?" : std::to_string(shape[j]);
+            }
+            ds_log("  %s input[%zu]: %-20s %s[%s]", label, i,
+                   name.get(), type_str(info.GetElementType()), sh.c_str());
+        }
+        size_t n_out = sess.GetOutputCount();
+        for (size_t i = 0; i < n_out; ++i) {
+            auto name = sess.GetOutputNameAllocated(i, alloc);
+            auto info = sess.GetOutputTypeInfo(i).GetTensorTypeAndShapeInfo();
+            auto shape = info.GetShape();
+            std::string sh;
+            for (size_t j = 0; j < shape.size(); ++j) {
+                if (j) sh += ",";
+                sh += (shape[j] < 0) ? "?" : std::to_string(shape[j]);
+            }
+            ds_log("  %s output[%zu]: %-20s %s[%s]", label, i,
+                   name.get(), type_str(info.GetElementType()), sh.c_str());
+        }
+    }
+
+    // ==================================================================
+    // Provider selection & model loading
+    // ==================================================================
+
     void choose_provider() {
         size_t model_mem = estimate_model_mem(acoustic_path_)
                          + estimate_model_mem(vocoder_path_)
@@ -1091,9 +1796,15 @@ private:
             if (use_gpu_) {
                 try {
                     OrtCUDAProviderOptionsV2* co = nullptr;
-                    Ort::GetApi().CreateCUDAProviderOptions(&co);
-                    opts.AppendExecutionProvider_CUDA_V2(*co);
-                    Ort::GetApi().ReleaseCUDAProviderOptions(co);
+                    auto status = Ort::GetApi().CreateCUDAProviderOptions(&co);
+                    if (status == nullptr) {
+                        opts.AppendExecutionProvider_CUDA_V2(*co);
+                        Ort::GetApi().ReleaseCUDAProviderOptions(co);
+                        ds_log("CUDA execution provider added");
+                    } else {
+                        ds_log("CUDA provider creation failed → CPU");
+                        use_gpu_ = false;
+                    }
                 } catch (const Ort::Exception& e) {
                     ds_log("CUDA failed (%s) → CPU", e.what());
                     use_gpu_ = false;
@@ -1104,11 +1815,14 @@ private:
             }
             ds_log("Loading acoustic: %s", acoustic_path_.c_str());
             acoustic_sess_ = std::make_unique<Ort::Session>(*ort_env_, acoustic_path_.c_str(), opts);
+            log_model_io("acoustic", *acoustic_sess_);
             ds_log("Loading vocoder: %s", vocoder_path_.c_str());
             vocoder_sess_  = std::make_unique<Ort::Session>(*ort_env_, vocoder_path_.c_str(), opts);
+            log_model_io("vocoder", *vocoder_sess_);
             if (!duration_path_.empty()) {
                 ds_log("Loading duration: %s", duration_path_.c_str());
                 duration_sess_ = std::make_unique<Ort::Session>(*ort_env_, duration_path_.c_str(), opts);
+                log_model_io("duration", *duration_sess_);
             }
             ds_log("All models loaded"); return true;
         } catch (const Ort::Exception& e) {

@@ -236,32 +236,26 @@ std::string AudioEngine::set_schedule(const std::string& schedule_json) {
         std::lock_guard<std::mutex> lk(graph_mutex_);
         Graph* g = active_graph_.load(std::memory_order_acquire);
         if (g) {
-            const auto& events = sched->events();
-
-            for (size_t ei = 0; ei < events.size(); ++ei) {
-                const auto& evt = events[ei];
+            const auto& evts = sched->events();
+            for (size_t i = 0; i < evts.size(); ++i) {
+                const auto& evt = evts[i];
                 if (evt.type == EventType::NoteOn) {
                     Node* n = g->find_node(evt.node_id);
                     if (!n) continue;
 
-                    // Compute note duration by scanning forward for the
-                    // matching NoteOff (same node/channel/pitch).
+                    // Compute duration by scanning forward for the matching NoteOff
+                    // (same node, channel, pitch).
                     double dur = 0.0;
-                    for (size_t j = ei + 1; j < events.size(); ++j) {
-                        const auto& e2 = events[j];
+                    for (size_t j = i + 1; j < evts.size(); ++j) {
+                        const auto& e2 = evts[j];
                         if (e2.type == EventType::NoteOff &&
                             e2.node_id == evt.node_id &&
                             e2.channel == evt.channel &&
-                            e2.pitch   == evt.pitch &&
-                            e2.beat    >  evt.beat) {
+                            e2.pitch   == evt.pitch) {
                             dur = e2.beat - evt.beat;
                             break;
                         }
                     }
-
-                    // Pass lyric, pitch, and duration for every NoteOn.
-                    // Empty lyric lets singing plugins insert a silent entry
-                    // so their syllable counter stays in sync.
                     n->push_lyric(evt.beat, evt.lyric,
                                   static_cast<int>(evt.pitch), dur);
                 }
@@ -287,6 +281,26 @@ void AudioEngine::play() {
     dispatcher_.check_pending();  // make sure latest schedule is active
     setup_restore_pending_.store(true, std::memory_order_release);  // restore channel state
     send_cmd(Cmd::Play);
+}
+
+void AudioEngine::prerender() {
+    // Call prerender() on all nodes in the active graph.
+    // Called from the main thread before play() — the audio thread is
+    // guaranteed not to be running (or at least not processing this graph).
+    std::lock_guard<std::mutex> lk(graph_mutex_);
+    Graph* g = active_graph_.load(std::memory_order_acquire);
+    if (!g) return;
+
+    // Forward BPM to all plugins so they can compute frame durations.
+    float bpm = bpm_;
+    for (const auto& nid : g->eval_order()) {
+        if (Node* n = g->find_node(nid))
+            n->set_bpm(bpm);
+    }
+
+    for (const auto& nid : g->eval_order()) {
+        if (Node* n = g->find_node(nid)) n->prerender();
+    }
 }
 
 void AudioEngine::stop() {
