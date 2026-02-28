@@ -111,7 +111,13 @@ static int espeak_synth_callback(short* wav, int numsamples,
 // ---------------------------------------------------------------------------
 
 class SingingPlugin final : public Plugin {
-    using PcmSeq = std::vector<std::vector<short>>;
+    // Each rendered syllable: its absolute arrangement beat (for seek) and
+    // the espeak PCM.  beat == 0.0 for pattern-port entries (no seek support).
+    struct PcmEntry {
+        double             beat = 0.0;
+        std::vector<short> pcm;
+    };
+    using PcmSeq = std::vector<PcmEntry>;
 
     // States for diagnostic reporting (transitions logged to stderr)
     enum class State : int {
@@ -155,15 +161,19 @@ public:
         d.category     = "Synth";
         d.doc =
             "Prototype singing synthesiser using espeak-ng phoneme rendering.\n"
-            "Each successive note-on consumes the next syllable from the\n"
-            "lyrics_sequence parameter.  Pitch is set by resampling the\n"
-            "espeak audio to match the MIDI note frequency.\n\n"
-            "Quality is intentionally robotic — this is a proof-of-concept.\n"
-            "Right-click the plugin in the graph editor to configure lyrics.";
+            "Connect a Pattern Source to the Lyrics port so the plugin knows\n"
+            "which syllable to sing for each note-on event.  Pitch is set by\n"
+            "resampling the espeak audio to match the MIDI note frequency.\n\n"
+            "Quality is intentionally robotic — this is a proof-of-concept.";
         d.author  = "builtin";
         d.version = 1;
 
         d.ports = {
+            { "lyrics_in", "Lyrics",
+              "Pattern containing per-note lyric syllables.\n"
+              "Connect a Pattern Source node here so the plugin knows which\n"
+              "syllable to sing for each note-on event.",
+              PluginPortType::Pattern, PortRole::Input },
             { "events_in",  "Events", "MIDI note input",
               PluginPortType::Event, PortRole::Input },
             { "audio_out",  "Audio",  "Stereo audio output",
@@ -229,6 +239,68 @@ public:
     }
 
     // ------------------------------------------------------------------
+    // push_lyric() — MAIN THREAD, called from AudioEngine::set_schedule()
+    //
+    // Renders one syllable from the arrangement schedule and appends it to
+    // _sched_entries (sorted by beat, in the order the schedule delivers them).
+    // on_schedule_loaded() publishes the complete sequence.
+    void push_lyric(double beat, const std::string& lyric) override {
+        if (!_espeak_initialised) return;
+        PcmEntry entry;
+        entry.beat = beat;
+        if (!lyric.empty()) {
+            sing_logf("push_lyric: beat=%.3f lyric='%.40s'", beat, lyric.c_str());
+            entry.pcm = _render_one(lyric);
+            sing_logf("push_lyric: rendered %zu samples", entry.pcm.size());
+        } else {
+            // No lyric on this note: insert a null (empty-PCM) entry so the
+            // syllable counter stays in sync with the full note stream.
+            // note_on() will drop it silently.
+            sing_logf("push_lyric: beat=%.3f no lyric — inserting null entry", beat);
+        }
+        _sched_entries.push_back(std::move(entry));
+    }
+
+    // ------------------------------------------------------------------
+    // on_schedule_loaded() — MAIN THREAD, called after all push_lyric() calls
+    //
+    // Publishes _sched_entries as the active PcmSeq, replacing any sequence
+    // built via the pattern port.  Resets the syllable cursor to 0 and arms
+    // the transport-running flag so note_on() advances the cursor.
+    void on_schedule_loaded() override {
+        if (_sched_entries.empty()) return;
+        sing_logf("on_schedule_loaded: publishing %zu schedule phoneme(s)",
+                  _sched_entries.size());
+        _old_seqs.push_back(std::move(_sched_entries));
+        _sched_entries.clear();
+        _current_seq.store(&_old_seqs.back(), std::memory_order_release);
+        _next_syllable.store(0, std::memory_order_relaxed);
+        _transport_running.store(true, std::memory_order_relaxed);
+        _set_state(State::Ready);
+    }
+
+    // ------------------------------------------------------------------
+    // on_seek() — AUDIO THREAD
+    //
+    // Repositions the syllable cursor to the first phoneme whose beat is >=
+    // the requested beat.  If the current sequence has no beat info (pattern
+    // port path, all beats == 0.0) the cursor resets to 0.
+    void on_seek(double beat) override {
+        const PcmSeq* seq = _current_seq.load(std::memory_order_acquire);
+        if (!seq || seq->empty()) {
+            _next_syllable.store(0, std::memory_order_relaxed);
+            return;
+        }
+        // Find the first entry whose beat >= requested beat.
+        size_t idx = seq->size();  // default: past the end
+        for (size_t i = 0; i < seq->size(); ++i) {
+            if ((*seq)[i].beat >= beat) { idx = i; break; }
+        }
+        // Wrap so note_on() always finds a phoneme (handles pattern-loop case).
+        _next_syllable.store(idx % seq->size(), std::memory_order_relaxed);
+    }
+
+    // ------------------------------------------------------------------
     // activate() — MAIN THREAD ONLY
     void activate(float sample_rate, int max_block_size) override {
         sing_logf("activate: sample_rate=%.0f block_size=%d", sample_rate, max_block_size);
@@ -265,9 +337,15 @@ public:
             return;
         }
 
-        size_t idx = _next_syllable.fetch_add(1, std::memory_order_relaxed)
-                     % seq->size();
-        const std::vector<short>& pcm = (*seq)[idx];
+        // During scheduled playback, advance the syllable cursor so each note
+        // gets the next phoneme.  During piano-roll preview (transport stopped),
+        // hold the cursor still so clicking notes doesn't consume syllables.
+        size_t idx;
+        if (_transport_running.load(std::memory_order_relaxed))
+            idx = _next_syllable.fetch_add(1, std::memory_order_relaxed) % seq->size();
+        else
+            idx = _next_syllable.load(std::memory_order_relaxed) % seq->size();
+        const std::vector<short>& pcm = (*seq)[idx].pcm;
         if (pcm.empty()) {
             _dropped_notes.fetch_add(1, std::memory_order_relaxed);
             return;
@@ -275,7 +353,7 @@ public:
 
         float target_hz   = midi_to_hz(pitch);
         float base_hz     = _base_pitch_hz.load(std::memory_order_relaxed);
-        float pitch_ratio = base_hz / target_hz;
+        float pitch_ratio = target_hz / base_hz;  // higher note → faster read → higher pitch
 
         Voice v;
         v.pcm         = &pcm;
@@ -308,17 +386,9 @@ public:
         std::fill(audio->left,  audio->left  + ctx.block_size, 0.0f);
         std::fill(audio->right, audio->right + ctx.block_size, 0.0f);
 
-        if (auto* evport = buffers.events.get("events_in")) {
-            if (evport->events) {
-                for (const auto& ev : *evport->events) {
-                    uint8_t status = ev.status & 0xF0;
-                    if (status == 0x90 && ev.data2 > 0)
-                        note_on(ev.channel, ev.data1, ev.data2);
-                    else if (status == 0x80 || (status == 0x90 && ev.data2 == 0))
-                        note_off(ev.channel, ev.data1);
-                }
-            }
-        }
+        // Note events are delivered directly via note_on()/note_off() by the
+        // PluginAdapterNode before process() is called — no need to re-read
+        // events_in here (that would double-trigger every note).
 
         std::lock_guard<std::mutex> lk(_voice_mutex);
         float sr_ratio = _sample_rate / static_cast<float>(ESPEAK_SAMPLE_RATE);
@@ -358,6 +428,7 @@ public:
             for (auto& v : _voices) v.active = false;
         }
         _next_syllable.store(0, std::memory_order_relaxed);
+        _transport_running.store(false, std::memory_order_relaxed);
     }
 
     // ------------------------------------------------------------------
@@ -406,9 +477,10 @@ private:
     std::vector<Voice>  _voices;
 
     // Main-thread-only:
-    std::string _pending_lyrics;
-    std::string _voice              = "en";
-    bool        _espeak_initialised = false;
+    std::string      _pending_lyrics;            // pattern-port path
+    PcmSeq           _sched_entries;             // schedule path: accumulates in push_lyric()
+    std::string      _voice              = "en";
+    bool             _espeak_initialised = false;
 
     // Pre-rendered PCM: audio thread reads _current_seq atomically.
     // _old_seqs is a std::list (push_back never moves elements) so raw
@@ -417,6 +489,10 @@ private:
     std::list<PcmSeq>           _old_seqs;
 
     std::atomic<size_t>  _next_syllable{0};
+    // True while the transport is running (set by on_schedule_loaded, cleared
+    // by on_transport_stop).  Suppresses syllable-counter advancement during
+    // piano-roll preview note_ons so they don't consume scheduled phonemes.
+    std::atomic<bool>    _transport_running{false};
 
     // Diagnostics (all atomic so get_graph_data can read from main thread
     // while audio thread increments)
@@ -514,9 +590,12 @@ private:
             sing_logf("_rebuild_pcm_seq: rendering word %zu/%zu: '%s'",
                       i + 1, words.size(), words[i].c_str());
             auto t_word = std::chrono::steady_clock::now();
-            seq.push_back(_render_one(words[i]));
+            PcmEntry entry;
+            entry.beat = 0.0;   // pattern-port path: no absolute beat info
+            entry.pcm  = _render_one(words[i]);
             sing_logf("_rebuild_pcm_seq: '%s' done — %zu samples in %ldms",
-                      words[i].c_str(), seq.back().size(), ms_since(t_word));
+                      words[i].c_str(), entry.pcm.size(), ms_since(t_word));
+            seq.push_back(std::move(entry));
         }
 
         long total_ms = ms_since(t_total);

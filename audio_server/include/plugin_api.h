@@ -299,6 +299,23 @@ public:
     /// anything it needs.  Default implementation is a no-op.
     virtual void on_pattern_connected(const PatternData& /*pd*/) {}
 
+    /// Called from the main thread (in AudioEngine::set_schedule()) once for
+    /// each NoteOn event that carries a non-empty lyric, in beat order.
+    /// beat: absolute arrangement beat of the note.
+    /// The plugin should accumulate phoneme data for rendering.
+    /// Called AFTER activate() — espeak (or other synth) is ready.
+    virtual void push_lyric(double /*beat*/, const std::string& /*lyric*/) {}
+
+    /// Called from the main thread after all push_lyric() calls for a given
+    /// schedule have been delivered.  The plugin should finalize and publish
+    /// its pre-rendered phoneme sequence so the audio thread can read it.
+    virtual void on_schedule_loaded() {}
+
+    /// Called from the audio thread when the transport seeks to a new beat
+    /// position.  The plugin should reposition its phoneme cursor so that
+    /// the next note_on plays the phoneme for the note at or after beat.
+    virtual void on_seek(double /*beat*/) {}
+
     virtual float read_monitor(const std::string& port_id) { (void)port_id; return 0.0f; }
     virtual std::string get_graph_data(const std::string& port_id) { (void)port_id; return "{}"; }
     virtual void set_graph_data(const std::string& port_id, const std::string& json) { (void)port_id; (void)json; }

@@ -81,6 +81,19 @@ public:
     virtual void all_notes_off(int channel = -1) {}
     virtual void push_control(double beat, float normalized_value) {}
 
+    /// Called from main thread when a NoteOn lyric syllable should be
+    /// pre-rendered.  TrackSourceNode fans this out to downstream nodes;
+    /// PluginAdapterNode forwards it to the plugin.
+    virtual void push_lyric(double beat, const std::string& lyric) {}
+
+    /// Called from main thread after all push_lyric() calls for a schedule.
+    /// Signals the node to publish its pre-rendered phoneme sequence.
+    virtual void on_schedule_loaded() {}
+
+    /// Called from audio thread on a transport seek.  The node should
+    /// reposition any beat-indexed cursor to the note at or after beat.
+    virtual void on_seek(double beat) {}
+
     /// Return the pattern data stored in this node, if it is a pattern source.
     /// Returns nullptr for all other node types.
     virtual const PatternData* get_pattern_data() const { return nullptr; }

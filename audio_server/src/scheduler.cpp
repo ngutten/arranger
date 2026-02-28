@@ -29,6 +29,7 @@ std::unique_ptr<Schedule> Schedule::from_json(const std::string& j_str, std::str
         evt.velocity = static_cast<uint8_t>(je.value("velocity", 0));
         evt.value    = je.value("value", 0.0f);
         evt.node_id  = je.value("node_id", "");
+        evt.lyric    = je.value("lyric", "");
 
         // Setup events from the Python client have beat = -1 (program/volume
         // changes that must fire before any note-ons). Clamp to 0.0 so they

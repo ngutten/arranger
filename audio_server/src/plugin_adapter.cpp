@@ -391,6 +391,16 @@ void PluginAdapterNode::note_tune(int channel, int note, float semitones) {
     plugin_->note_tune(channel, note, semitones);
 }
 
+void PluginAdapterNode::push_lyric(double beat, const std::string& lyric) {
+    plugin_->push_lyric(beat, lyric);
+}
+void PluginAdapterNode::on_schedule_loaded() {
+    plugin_->on_schedule_loaded();
+}
+void PluginAdapterNode::on_seek(double beat) {
+    plugin_->on_seek(beat);
+}
+
 void PluginAdapterNode::push_control(double beat, float normalized_value) {
     for (auto& m : control_map_) {
         if (!m.is_output) {
