@@ -236,34 +236,13 @@ std::string AudioEngine::set_schedule(const std::string& schedule_json) {
         std::lock_guard<std::mutex> lk(graph_mutex_);
         Graph* g = active_graph_.load(std::memory_order_acquire);
         if (g) {
-            const auto& events = sched->events();
-
-            for (size_t ei = 0; ei < events.size(); ++ei) {
-                const auto& evt = events[ei];
+            for (const auto& evt : sched->events()) {
                 if (evt.type == EventType::NoteOn) {
                     Node* n = g->find_node(evt.node_id);
-                    if (!n) continue;
-
-                    // Compute note duration by scanning forward for the
-                    // matching NoteOff (same node/channel/pitch).
-                    double dur = 0.0;
-                    for (size_t j = ei + 1; j < events.size(); ++j) {
-                        const auto& e2 = events[j];
-                        if (e2.type == EventType::NoteOff &&
-                            e2.node_id == evt.node_id &&
-                            e2.channel == evt.channel &&
-                            e2.pitch   == evt.pitch &&
-                            e2.beat    >  evt.beat) {
-                            dur = e2.beat - evt.beat;
-                            break;
-                        }
-                    }
-
-                    // Pass lyric, pitch, and duration for every NoteOn.
-                    // Empty lyric lets singing plugins insert a silent entry
-                    // so their syllable counter stays in sync.
-                    n->push_lyric(evt.beat, evt.lyric,
-                                  static_cast<int>(evt.pitch), dur);
+                    // Pass lyric for every NoteOn — empty lyric lets singing plugins
+                    // insert a null (silent) entry so their syllable counter stays
+                    // in sync with the full note stream.
+                    if (n) n->push_lyric(evt.beat, evt.lyric);
                 }
             }
             // Signal end of lyric delivery so plugins can publish their sequences.

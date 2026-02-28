@@ -13,6 +13,9 @@ option(ENABLE_TESTS  "Build test programs"                            ON)
 option(ENABLE_ESPEAK
     "Build singing plugin with espeak-ng (ON=auto-detect, OFF=disable)"
     ON)
+option(ENABLE_DIFFSINGER
+    "Build DiffSinger neural singing plugin (requires onnxruntime + espeak-ng)"
+    ON)
 
 # ---------------------------------------------------------------------------
 # Platform detection
@@ -468,6 +471,67 @@ if(ENABLE_ESPEAK)
     else()
         message(STATUS "espeak-ng: not found — singing plugin disabled"
                        " (install libespeak-ng-dev to enable, or set ENABLE_ESPEAK=OFF)")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# DiffSinger plugin (ONNX Runtime + espeak-ng) — optional
+# ---------------------------------------------------------------------------
+# Paste into CMakeLists.txt after the singing plugin block.
+#
+# Dependencies:
+#   - onnxruntime C++ API (MIT license)
+#     Install: apt install libonnxruntime-dev  OR  download from
+#     https://github.com/microsoft/onnxruntime/releases
+#   - espeak-ng (already required by the singing plugin)
+#
+# Usage:
+#   cmake -DENABLE_DIFFSINGER=ON [-DONNXRUNTIME_ROOT=/path/to/ort] ..
+
+if(ENABLE_DIFFSINGER)
+    # --- Find ONNX Runtime ---
+    pkg_check_modules(ONNXRUNTIME libonnxruntime QUIET)
+
+    if(NOT ONNXRUNTIME_FOUND)
+        find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h
+            HINTS ${ONNXRUNTIME_ROOT}/include /usr/include/onnxruntime
+                  /usr/local/include/onnxruntime
+            PATH_SUFFIXES onnxruntime/core/session core/session)
+        find_library(ONNXRUNTIME_LIBRARY NAMES onnxruntime
+            HINTS ${ONNXRUNTIME_ROOT}/lib /usr/lib /usr/local/lib)
+
+        if(ONNXRUNTIME_INCLUDE_DIR AND ONNXRUNTIME_LIBRARY)
+            set(ONNXRUNTIME_FOUND TRUE)
+            set(ONNXRUNTIME_LIBRARIES ${ONNXRUNTIME_LIBRARY})
+            set(ONNXRUNTIME_INCLUDE_DIRS ${ONNXRUNTIME_INCLUDE_DIR})
+            message(STATUS "onnxruntime: found via find_path (${ONNXRUNTIME_LIBRARY})")
+        endif()
+    endif()
+
+    # --- Find espeak-ng (may already be found by singing plugin) ---
+    if(NOT ESPEAK_FOUND)
+        pkg_check_modules(ESPEAK espeak-ng)
+    endif()
+
+    if(ONNXRUNTIME_FOUND AND ESPEAK_FOUND)
+        message(STATUS "DiffSinger: enabled (onnxruntime + espeak-ng)")
+        plugin_library(diffsinger
+            SOURCES plugins/builtin/diffsinger_plugin.cpp
+            LINK_LIBRARIES ${ONNXRUNTIME_LIBRARIES} ${ESPEAK_LIBRARIES}
+            INCLUDE_DIRECTORIES ${ONNXRUNTIME_INCLUDE_DIRS} ${ESPEAK_INCLUDE_DIRS}
+            LIBRARY_DIRECTORIES ${ONNXRUNTIME_LIBRARY_DIRS} ${ESPEAK_LIBRARY_DIRS}
+        )
+        target_compile_definitions(arranger_plugin_diffsinger PRIVATE
+            AS_ENABLE_DIFFSINGER AS_ENABLE_ESPEAK)
+        add_dependencies(audio_server_lib arranger_plugin_diffsinger)
+    else()
+        if(NOT ONNXRUNTIME_FOUND)
+            message(STATUS "DiffSinger: DISABLED — onnxruntime not found"
+                " (set ONNXRUNTIME_ROOT or install libonnxruntime-dev)")
+        endif()
+        if(NOT ESPEAK_FOUND)
+            message(STATUS "DiffSinger: DISABLED — espeak-ng not found")
+        endif()
     endif()
 endif()
 

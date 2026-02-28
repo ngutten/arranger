@@ -115,7 +115,8 @@ public:
     void preview_all_notes_off();  // called by all_notes_off IPC with no transport flag
 
     // Lyric pre-delivery: fan out to all downstream nodes.
-    void push_lyric(double beat, const std::string& lyric) override;
+    void push_lyric(double beat, const std::string& lyric,
+                    int pitch = -1, double duration_beats = 0.0) override;
     void on_schedule_loaded() override;
 
 private:

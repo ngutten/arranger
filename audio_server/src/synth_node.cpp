@@ -229,8 +229,9 @@ void TrackSourceNode::preview_all_notes_off() {
     pending_off_.push_back({-1, -1});
 }
 
-void TrackSourceNode::push_lyric(double beat, const std::string& lyric) {
-    for (auto* n : downstream_) n->push_lyric(beat, lyric);
+void TrackSourceNode::push_lyric(double beat, const std::string& lyric,
+                                  int pitch, double duration_beats) {
+    for (auto* n : downstream_) n->push_lyric(beat, lyric, pitch, duration_beats);
 }
 void TrackSourceNode::on_schedule_loaded() {
     for (auto* n : downstream_) n->on_schedule_loaded();

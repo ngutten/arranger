@@ -84,7 +84,9 @@ public:
     /// Called from main thread when a NoteOn lyric syllable should be
     /// pre-rendered.  TrackSourceNode fans this out to downstream nodes;
     /// PluginAdapterNode forwards it to the plugin.
-    virtual void push_lyric(double beat, const std::string& lyric) {}
+    virtual void push_lyric(double beat, const std::string& lyric,
+                            int pitch = -1,
+                            double duration_beats = 0.0) {}
 
     /// Called from main thread after all push_lyric() calls for a schedule.
     /// Signals the node to publish its pre-rendered phoneme sequence.

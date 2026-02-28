@@ -301,10 +301,17 @@ public:
 
     /// Called from the main thread (in AudioEngine::set_schedule()) once for
     /// each NoteOn event that carries a non-empty lyric, in beat order.
-    /// beat: absolute arrangement beat of the note.
-    /// The plugin should accumulate phoneme data for rendering.
+    /// beat:           absolute arrangement beat of the note.
+    /// lyric:          lyric syllable text.
+    /// pitch:          MIDI note number (0-127), or -1 if unavailable.
+    /// duration_beats: duration in beats (from paired NoteOff), or 0.0 if
+    ///                 unavailable or no matching NoteOff was found.
+    ///
+    /// The plugin should accumulate note data for rendering.
     /// Called AFTER activate() — espeak (or other synth) is ready.
-    virtual void push_lyric(double /*beat*/, const std::string& /*lyric*/) {}
+    virtual void push_lyric(double /*beat*/, const std::string& /*lyric*/,
+                            int /*pitch*/ = -1,
+                            double /*duration_beats*/ = 0.0) {}
 
     /// Called from the main thread after all push_lyric() calls for a given
     /// schedule have been delivered.  The plugin should finalize and publish

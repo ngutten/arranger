@@ -391,8 +391,9 @@ void PluginAdapterNode::note_tune(int channel, int note, float semitones) {
     plugin_->note_tune(channel, note, semitones);
 }
 
-void PluginAdapterNode::push_lyric(double beat, const std::string& lyric) {
-    plugin_->push_lyric(beat, lyric);
+void PluginAdapterNode::push_lyric(double beat, const std::string& lyric,
+                                    int pitch, double duration_beats) {
+    plugin_->push_lyric(beat, lyric, pitch, duration_beats);
 }
 void PluginAdapterNode::on_schedule_loaded() {
     plugin_->on_schedule_loaded();

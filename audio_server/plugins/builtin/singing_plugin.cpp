@@ -404,7 +404,8 @@ public:
         _pending_lyrics = std::move(lyrics);
     }
 
-    void push_lyric(double beat, const std::string& lyric) override {
+    void push_lyric(double beat, const std::string& lyric,
+                    int /*pitch*/, double /*duration_beats*/) override {
         // Engine may call push_lyric before activate() during graph rebuild.
         // Lazily initialise espeak if needed so we can still render.
         if (!_espeak_initialised) {

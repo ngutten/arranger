@@ -42,7 +42,8 @@ public:
         return event_output_storage_;
     }
 
-    void push_lyric(double beat, const std::string& lyric) override;
+    void push_lyric(double beat, const std::string& lyric,
+                    int pitch = -1, double duration_beats = 0.0) override;
     void on_schedule_loaded() override;
     void on_seek(double beat) override;
 
