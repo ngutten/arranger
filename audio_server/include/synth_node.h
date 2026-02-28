@@ -114,6 +114,10 @@ public:
     void preview_note_off(int channel, int pitch);
     void preview_all_notes_off();  // called by all_notes_off IPC with no transport flag
 
+    // Lyric pre-delivery: fan out to all downstream nodes.
+    void push_lyric(double beat, const std::string& lyric) override;
+    void on_schedule_loaded() override;
+
 private:
     struct PreviewNote { int channel; int pitch; int velocity; };
 

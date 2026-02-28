@@ -34,6 +34,7 @@ struct SchedEvent {
     uint8_t   velocity;
     float     value;       // used by Control events
     std::string node_id;   // target node
+    std::string lyric;     // NoteOn only: per-note lyric syllable for singing plugins
 };
 
 // ---------------------------------------------------------------------------

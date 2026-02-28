@@ -178,11 +178,14 @@ def _build_server_schedule(state) -> list[dict]:
                 on_beat  = offset + n.start
                 off_beat = on_beat + n.duration
 
-                events.append({
+                note_on_evt = {
                     "beat": on_beat, "type": "note_on",
                     "node_id": node_id, "channel": ch,
                     "pitch": p, "velocity": v, "value": 0.0,
-                })
+                }
+                if n.lyric:
+                    note_on_evt["lyric"] = n.lyric
+                events.append(note_on_evt)
                 events.append({
                     "beat": off_beat, "type": "note_off",
                     "node_id": node_id, "channel": ch,
