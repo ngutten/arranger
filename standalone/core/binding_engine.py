@@ -244,6 +244,71 @@ def _build_server_schedule(state) -> list[dict]:
                             "pitch": inst.pitch, "velocity": 0, "value": 0.0,
                         })
 
+    # --- Automation tracks ---
+    # Iterate ControlSource nodes in the signal graph to find which automation
+    # tracks are being used, then generate control events from their placements.
+    if state.signal_graph:
+        from ..core.curve_utils import interpolate_curve
+        
+        for node in state.signal_graph.nodes:
+            if node.node_type != 'control_source':
+                continue
+            
+            # Get automation track ID from node params
+            track_id = node.params.get('automation_track_id', 0)
+            if track_id == 0:
+                continue  # No track selected
+            
+            # Find the automation track
+            auto_track = state.find_automation_track(track_id)
+            if not auto_track:
+                continue  # Track was deleted
+            
+            # Find all placements on this track
+            for ap in state.automation_placements:
+                if ap.track_id != track_id:
+                    continue
+                
+                # Find the pattern
+                pattern = state.find_automation_pattern(ap.pattern_id)
+                if not pattern or not pattern.points:
+                    continue
+                
+                # Generate control events from pattern
+                repeats = ap.repeats or 1
+                for rep in range(repeats):
+                    offset = ap.time + rep * pattern.length
+                    
+                    # Convert points to tuples for interpolation
+                    # Points are now stored normalized in [0, 1]
+                    curve_points = [(p.time, p.value, p.curve) for p in pattern.points]
+                    
+                    # Dense sampling for smooth curves (16 samples per beat)
+                    num_samples = max(16, int(pattern.length * 16))
+                    for i in range(num_samples + 1):  # +1 to include endpoint
+                        t = (i / num_samples) * pattern.length if num_samples > 0 else 0.0
+                        
+                        # Interpolate normalized value [0, 1]
+                        # Default to 0.0 for normalized range
+                        norm_value = interpolate_curve(curve_points, t, pattern.length, 0.0)
+                        
+                        # Clamp to [0, 1] just in case
+                        norm_value = max(0.0, min(1.0, norm_value))
+                        
+                        # Scale to pattern's output range [min_value, max_value]
+                        scaled_value = pattern.min_value + norm_value * (pattern.max_value - pattern.min_value)
+                        
+                        # Create control event with scaled value
+                        events.append({
+                            "beat": offset + t,
+                            "type": "control",
+                            "node_id": node.node_id,
+                            "channel": 0,   # unused for control events
+                            "pitch": 0,     # unused
+                            "velocity": 0,  # unused
+                            "value": scaled_value,  # scaled to [min_value, max_value]
+                        })
+
     return events
 
 # ---------------------------------------------------------------------------

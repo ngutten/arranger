@@ -9,7 +9,7 @@ from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QKeyEvent
 
 from ..state import NOTE_NAMES, scale_set, vel_color, Note
 from ..clipboard import NoteClipboard
-
+from ..core.curve_utils import interpolate_curve
 
 class PianoRoll(QFrame):
     """Piano roll editor with piano keys, note grid, and velocity lane."""
@@ -891,31 +891,15 @@ class PianoGridWidget(QWidget):
             note_y_center = (self.parent_roll.HI - n.pitch) * self.parent_roll.NH + self.parent_roll.NH // 2
 
             if n.bend:
-                # Build full point list with implicit zero at start/end
-                pts = sorted(n.bend, key=lambda p: p[0])
-                full = [[0.0, 0.0]] + [[p[0], p[1]] for p in pts] + [[n.duration, 0.0]]
+                # Convert bend points to (time, value, curve_type) tuples
+                # All bend points use 'smooth' interpolation
+                bend_points = [(t, v, 'smooth') for t, v in n.bend]
 
                 def _curve_y(beat_off):
-                    tc = max(0.0, min(n.duration, beat_off))
-                    seg = 0
-                    for k in range(len(full) - 1):
-                        if full[k][0] <= tc <= full[k+1][0]:
-                            seg = k
-                            break
-                    t1, v1 = full[seg]
-                    t2, v2 = full[min(len(full)-1, seg+1)]
-                    v0 = full[max(0, seg-1)][1]
-                    v3 = full[min(len(full)-1, seg+2)][1]
-                    seg_len = t2 - t1
-                    if seg_len > 1e-9:
-                        lt = max(0.0, min(1.0, (tc - t1) / seg_len))
-                        sem = 0.5 * ((2*v1) + (-v0+v2)*lt +
-                                     (2*v0-5*v1+4*v2-v3)*lt*lt +
-                                     (-v0+3*v1-3*v2+v3)*lt*lt*lt)
-                    else:
-                        sem = v2
-                    return note_y_center - int(sem / 2.0 * self.parent_roll.NH * 2)
-
+                    # Use shared interpolation utility
+                    semitones = interpolate_curve(bend_points, beat_off, n.duration, default_value=0.0)
+                    return note_y_center - int(semitones / 2.0 * self.parent_roll.NH * 2)
+                    
                 # Draw smooth curve by sampling
                 from PySide6.QtCore import QLineF
                 curve_color = QColor('#00f5d4')

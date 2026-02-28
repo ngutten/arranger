@@ -524,6 +524,10 @@ def compute_arrangement_length(state) -> float:
         pat = state.find_beat_pattern(bp.pattern_id)
         if pat:
             max_beat = max(max_beat, bp.time + pat.length * (bp.repeats or 1))
+    for ap in state.automation_placements:
+        pat = state.find_automation_pattern(ap.pattern_id)
+        if pat:
+            max_beat = max(max_beat, ap.time + pat.length * (ap.repeats or 1))
     return max_beat
 
 

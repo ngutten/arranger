@@ -47,6 +47,7 @@ from .ui.pattern_list import PatternList
 from .ui.arrangement import ArrangementView
 from .ui.piano_roll import PianoRoll
 from .ui.beat_grid import BeatGrid
+from .ui.automation_curve import AutomationCurve
 from .ui.track_panel import TrackPanel
 from .ui.dialogs import PatternDialog, BeatPatternDialog, SF2Dialog, ConfigDialog
 
@@ -80,6 +81,10 @@ class App(QMainWindow):
             'piano_roll_edit', 'beat_grid_edit',
             'track_deleted', 'beat_track_deleted',
             'ts', 'cut_placements', 'paste_placements', 'delete_placements',
+            # Automation undo triggers
+            'automation_edit', 'automation_pattern_dialog',
+            'automation_track_dialog', 'del_auto_pat', 'dup_auto_pat',
+            'automation_placement_edit', 'automation_placement_added',
         }
 
         # Realtime audio engine
@@ -285,19 +290,22 @@ class App(QMainWindow):
         self.arrangement = ArrangementView(self.splitter, self)
         self.splitter.addWidget(self.arrangement)
 
-        # Editor area (bottom) - switches between piano roll and beat grid
+        # Editor area (bottom) - switches between piano roll, beat grid, and automation curve
         self.editor_container = QWidget()
         self.editor_layout = QVBoxLayout(self.editor_container)
         self.editor_layout.setContentsMargins(0, 0, 0, 0)
         
         self.piano_roll = PianoRoll(self.editor_container, self)
         self.beat_grid = BeatGrid(self.editor_container, self)
+        self.automation_curve = AutomationCurve(self.editor_container, self)
 
         # Start with piano roll visible
         self.editor_layout.addWidget(self.piano_roll)
         self.editor_layout.addWidget(self.beat_grid)
+        self.editor_layout.addWidget(self.automation_curve)
         self.piano_roll.show()
         self.beat_grid.hide()
+        self.automation_curve.hide()
         self._current_editor = 'piano_roll'
 
         self.splitter.addWidget(self.editor_container)
@@ -496,8 +504,10 @@ class App(QMainWindow):
         self.arrangement.refresh()
         if self._current_editor == 'piano_roll':
             self.piano_roll.refresh()
-        else:
+        elif self._current_editor == 'beat_grid':
             self.beat_grid.refresh()
+        elif self._current_editor == 'automation_curve':
+            self.automation_curve.refresh()
         self.track_panel.refresh()
     
     def _push_undo(self, source=None):
@@ -518,6 +528,7 @@ class App(QMainWindow):
             self.piano_roll.clear_selection()
             self.arrangement.selected_placements = []
             self.arrangement.selected_beat_placements = []
+            self.arrangement.selected_automation_placements = []
             # Mark engine dirty directly, skip the notify→schedule path
             if self.engine and self.state.playing:
                 self.engine.mark_dirty()
@@ -535,20 +546,33 @@ class App(QMainWindow):
             self.piano_roll.clear_selection()
             self.arrangement.selected_placements = []
             self.arrangement.selected_beat_placements = []
+            self.arrangement.selected_automation_placements = []
             if self.engine and self.state.playing:
                 self.engine.mark_dirty()
             self._refresh_all()
 
     def _switch_editor(self):
-        """Switch between piano roll and beat grid based on selection."""
-        if self.state.sel_beat_pat and self._current_editor != 'beat_grid':
+        """Switch between piano roll, beat grid, and automation curve based on selection."""
+        if self.state.sel_auto_pat and self._current_editor != 'automation_curve':
+            # Switch to automation curve
             self.piano_roll.hide()
+            self.beat_grid.hide()
+            if self.automation_curve.parent() != self.editor_container:
+                self.editor_layout.addWidget(self.automation_curve)
+            self.automation_curve.show()
+            self._current_editor = 'automation_curve'
+        elif self.state.sel_beat_pat and self._current_editor != 'beat_grid':
+            # Switch to beat grid
+            self.piano_roll.hide()
+            self.automation_curve.hide()
             if self.beat_grid.parent() != self.editor_container:
                 self.editor_layout.addWidget(self.beat_grid)
             self.beat_grid.show()
             self._current_editor = 'beat_grid'
-        elif not self.state.sel_beat_pat and self._current_editor != 'piano_roll':
+        elif not self.state.sel_beat_pat and not self.state.sel_auto_pat and self._current_editor != 'piano_roll':
+            # Switch to piano roll
             self.beat_grid.hide()
+            self.automation_curve.hide()
             if self.piano_roll.parent() != self.editor_container:
                 self.editor_layout.addWidget(self.piano_roll)
             self.piano_roll.show()
@@ -564,7 +588,7 @@ class App(QMainWindow):
 
     def _on_copy(self):
         # Check if arranger has a selection
-        if self.arrangement.selected_placements or self.arrangement.selected_beat_placements:
+        if self.arrangement.selected_placements or self.arrangement.selected_beat_placements or self.arrangement.selected_automation_placements:
             self.arrangement.copy_selection()
         # Otherwise try piano roll
         elif self._current_editor == 'piano_roll':
@@ -573,7 +597,7 @@ class App(QMainWindow):
 
     def _on_cut(self):
         # Check if arranger has a selection
-        if self.arrangement.selected_placements or self.arrangement.selected_beat_placements:
+        if self.arrangement.selected_placements or self.arrangement.selected_beat_placements or self.arrangement.selected_automation_placements:
             self.arrangement.cut_selection()
         # Otherwise try piano roll
         elif self._current_editor == 'piano_roll':
@@ -729,6 +753,15 @@ class App(QMainWindow):
         if _HAS_GRAPH_EDITOR and self.state.signal_graph is not None:
             self.state.signal_graph.remove_track_source(btid)
             self._push_graph_to_engine()
+
+    def add_automation_track(self):
+        """Create a new automation track via dialog."""
+        from .ui.automation_dialogs import AutomationTrackDialog
+        dlg = AutomationTrackDialog(self, self.state, self.state.signal_graph)
+        if dlg.exec() and dlg.result_track:
+            self.state.automation_tracks.append(dlg.result_track)
+            self.state.sel_auto_trk = dlg.result_track.id
+            self.state.notify('automation_track_dialog')
 
     def _push_graph_to_engine(self) -> None:
         """Push the current graph model to the engine if it supports _send."""

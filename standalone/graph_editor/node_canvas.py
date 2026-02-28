@@ -1465,14 +1465,55 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
             lay.addRow(QLabel(cp_display + ":"), combo)
 
         elif cp_type == "integer":
-            spin = QSpinBox()
-            spin.setRange(0, 999999)
-            spin.setValue(int(stored) if stored else 0)
-            spin.setStyleSheet(STYLE_ACTIVE)
-            spin.setMaximumWidth(80)
-            spin.valueChanged.connect(
-                lambda v, cid=cp_id: on_change(node.node_id, cid, v))
-            lay.addRow(QLabel(cp_display + ":"), spin)
+            # Special handling for automation_track_id: show dropdown of track names
+            if cp_id == "automation_track_id":
+                # Get state from canvas (parent should be NodeGraphCanvas)
+                state = getattr(parent, '_state', None)
+                
+                if state and hasattr(state, 'automation_tracks'):
+                    combo = QComboBox()
+                    combo.setStyleSheet(STYLE_ACTIVE)
+                    combo.setMaximumWidth(200)
+                    
+                    # Add "(No automation track)" option
+                    combo.addItem("(No automation track)", 0)
+                    
+                    # Add all automation tracks by name
+                    for track in state.automation_tracks:
+                        combo.addItem(track.name, track.id)
+                    
+                    # Select current track
+                    current_id = int(stored) if stored else 0
+                    for i in range(combo.count()):
+                        if combo.itemData(i) == current_id:
+                            combo.setCurrentIndex(i)
+                            break
+                    
+                    # Connect to parameter change
+                    combo.currentIndexChanged.connect(
+                        lambda idx, cid=cp_id, cb=combo: on_change(node.node_id, cid, cb.itemData(idx)))
+                    
+                    lay.addRow(QLabel(cp_display + ":"), combo)
+                else:
+                    # Fallback to spinbox if state not available
+                    spin = QSpinBox()
+                    spin.setRange(0, 999999)
+                    spin.setValue(int(stored) if stored else 0)
+                    spin.setStyleSheet(STYLE_ACTIVE)
+                    spin.setMaximumWidth(80)
+                    spin.valueChanged.connect(
+                        lambda v, cid=cp_id: on_change(node.node_id, cid, v))
+                    lay.addRow(QLabel(cp_display + ":"), spin)
+            else:
+                # Default integer handling
+                spin = QSpinBox()
+                spin.setRange(0, 999999)
+                spin.setValue(int(stored) if stored else 0)
+                spin.setStyleSheet(STYLE_ACTIVE)
+                spin.setMaximumWidth(80)
+                spin.valueChanged.connect(
+                    lambda v, cid=cp_id: on_change(node.node_id, cid, v))
+                lay.addRow(QLabel(cp_display + ":"), spin)
 
         elif cp_type == "bool":
             cb = QCheckBox()

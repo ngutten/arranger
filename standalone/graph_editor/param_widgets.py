@@ -337,3 +337,119 @@ def create_float_widget(value: float,
         SmartFloatWidget instance with appropriate slider configuration
     """
     return SmartFloatWidget(value, min_val, max_val, label, parent)
+
+
+class AutomationTrackSelectorWidget(QWidget):
+    """Widget for selecting an automation track from available tracks.
+    
+    Used in ControlSource node settings to choose which automation track
+    to read control values from.
+    """
+    
+    valueChanged = Signal(int)  # Emits automation track ID
+    
+    def __init__(self, current_track_id: int, state, parent: QWidget = None):
+        super().__init__(parent)
+        self.state = state
+        self._current_track_id = current_track_id
+        
+        from PySide6.QtWidgets import QComboBox
+        
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        
+        # Dropdown for automation tracks
+        self.combo = QComboBox()
+        self.combo.setStyleSheet(
+            "background: #0d1117; color: #ccc; border: 1px solid #2a3a5c;"
+        )
+        self.combo.setMinimumWidth(150)
+        
+        # Populate with automation tracks
+        self._populate_tracks()
+        
+        # Connect signal
+        self.combo.currentIndexChanged.connect(self._on_selection_changed)
+        
+        layout.addWidget(self.combo)
+        layout.addStretch()
+    
+    def _populate_tracks(self):
+        """Populate combo box with available automation tracks."""
+        self.combo.blockSignals(True)
+        self.combo.clear()
+        
+        # Add "None" option
+        self.combo.addItem('(No automation track)', 0)
+        
+        # Add all automation tracks
+        for track in self.state.automation_tracks:
+            self.combo.addItem(track.name, track.id)
+        
+        # Select current track
+        for i in range(self.combo.count()):
+            if self.combo.itemData(i) == self._current_track_id:
+                self.combo.setCurrentIndex(i)
+                break
+        
+        self.combo.blockSignals(False)
+    
+    def _on_selection_changed(self, index):
+        """Handle track selection change."""
+        track_id = self.combo.itemData(index)
+        if track_id is not None:
+            self._current_track_id = track_id
+            self.valueChanged.emit(track_id)
+    
+    def value(self) -> int:
+        """Get current automation track ID."""
+        return self._current_track_id
+    
+    def setValue(self, track_id: int):
+        """Set current automation track ID."""
+        self._current_track_id = track_id
+        for i in range(self.combo.count()):
+            if self.combo.itemData(i) == track_id:
+                self.combo.blockSignals(True)
+                self.combo.setCurrentIndex(i)
+                self.combo.blockSignals(False)
+                break
+    
+    def refresh(self):
+        """Refresh the list of automation tracks (call when tracks are added/removed)."""
+        self._populate_tracks()
+
+
+def create_config_param_widget(param_id: str, param_value, state, parent: QWidget = None):
+    """Factory function to create the appropriate widget for a config parameter.
+    
+    Special handling for known parameter types:
+    - automation_track_id: AutomationTrackSelectorWidget (dropdown of tracks by name)
+    - _pattern_id: Pattern selector (if implemented)
+    
+    Args:
+        param_id: Parameter identifier
+        param_value: Current value (as float or int)
+        state: AppState (for looking up tracks, patterns, etc.)
+        parent: Parent widget
+        
+    Returns:
+        Widget with valueChanged signal that emits the new value
+    """
+    from PySide6.QtWidgets import QSpinBox
+    
+    # Special case: automation track selection
+    if param_id == 'automation_track_id':
+        track_id = int(param_value) if param_value else 0
+        return AutomationTrackSelectorWidget(track_id, state, parent)
+    
+    # Default: integer spinbox for integer config params
+    # (You can extend this for other types as needed)
+    widget = QSpinBox(parent)
+    widget.setRange(0, 999999)
+    widget.setValue(int(param_value) if param_value else 0)
+    widget.setStyleSheet(
+        "background: #0d1117; color: #ccc; border: 1px solid #2a3a5c;"
+    )
+    return widget

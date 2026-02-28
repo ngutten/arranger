@@ -112,6 +112,38 @@ class PatternList(QFrame):
         self.beat_scroll.setWidget(self.beat_container)
         layout.addWidget(self.beat_scroll, stretch=1)
 
+        # Separator
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.HLine)
+        sep2.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(sep2)
+
+        # Automation patterns section
+        ahdr = QFrame()
+        ahdr_layout = QHBoxLayout(ahdr)
+        ahdr_layout.setContentsMargins(0, 0, 0, 0)
+        atitle_label = QLabel('Automation')
+        atitle_label.setFont(font)
+        ahdr_layout.addWidget(atitle_label)
+        ahdr_layout.addStretch()
+        anew_btn = QPushButton('+ New')
+        anew_btn.setMaximumWidth(48)
+        anew_btn.clicked.connect(self._new_automation_pattern)
+        ahdr_layout.addWidget(anew_btn)
+        layout.addWidget(ahdr)
+
+        # Automation pattern scroll area
+        self.auto_scroll = QScrollArea()
+        self.auto_scroll.setWidgetResizable(True)
+        self.auto_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.auto_container = QWidget()
+        self.auto_layout = QVBoxLayout(self.auto_container)
+        self.auto_layout.setContentsMargins(0, 0, 0, 0)
+        self.auto_layout.setSpacing(1)
+        self.auto_layout.addStretch()
+        self.auto_scroll.setWidget(self.auto_container)
+        layout.addWidget(self.auto_scroll, stretch=1)
+
     def _new_pattern(self):
         from ..ops.patterns import add_pattern
         add_pattern(self.state)
@@ -120,10 +152,22 @@ class PatternList(QFrame):
         from ..ops.patterns import add_beat_pattern
         add_beat_pattern(self.state)
 
+    def _new_automation_pattern(self):
+        """Create new automation pattern via dialog."""
+        from ..ui.automation_dialogs import AutomationPatternDialog
+        dlg = AutomationPatternDialog(self, self.state)
+        if dlg.exec() and dlg.result_pattern:
+            self.state.automation_patterns.append(dlg.result_pattern)
+            self.state.sel_auto_pat = dlg.result_pattern.id
+            self.state.sel_pat = None
+            self.state.sel_beat_pat = None
+            self.state.notify('automation_pattern_dialog')
+
     def refresh(self):
         """Rebuild pattern lists from state."""
         self._render_patterns()
         self._render_beat_patterns()
+        self._render_automation_patterns()
         # Key info
         pat = self.state.find_pattern(self.state.sel_pat)
         if pat:
@@ -165,9 +209,32 @@ class PatternList(QFrame):
             item = BeatPatternItem(self, pat, self.state.sel_beat_pat == pat.id)
             self.beat_layout.insertWidget(self.beat_layout.count() - 1, item)
 
+    def _render_automation_patterns(self):
+        # Clear existing widgets except stretch
+        while self.auto_layout.count() > 1:
+            item = self.auto_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        if not self.state.automation_patterns:
+            lbl = QLabel('No automation')
+            lbl.setStyleSheet('color: #666;')
+            font = QFont()
+            font.setPointSize(9)
+            lbl.setFont(font)
+            lbl.setAlignment(Qt.AlignCenter)
+            self.auto_layout.insertWidget(0, lbl)
+            return
+
+        for pat in self.state.automation_patterns:
+            item = AutomationPatternItem(self, pat, self.state.sel_auto_pat == pat.id)
+            self.auto_layout.insertWidget(self.auto_layout.count() - 1, item)
+
     def _select_pat(self, pid):
         self.state.sel_pat = pid
         self.state.sel_beat_pat = None
+        self.state.sel_auto_pat = None
         # Clear piano roll selection when selecting pattern
         self.app.piano_roll.clear_selection()
         # Clear arrangement selection when selecting pattern
@@ -178,12 +245,24 @@ class PatternList(QFrame):
     def _select_beat_pat(self, pid):
         self.state.sel_beat_pat = pid
         self.state.sel_pat = None
+        self.state.sel_auto_pat = None
         # Clear piano roll selection when selecting beat pattern
         self.app.piano_roll.clear_selection()
         # Clear arrangement selection when selecting pattern
         self.app.arrangement.selected_placements = []
         self.app.arrangement.selected_beat_placements = []
         self.state.notify('sel_beat_pat')
+
+    def _select_auto_pat(self, pid):
+        self.state.sel_auto_pat = pid
+        self.state.sel_pat = None
+        self.state.sel_beat_pat = None
+        # Clear piano roll selection when selecting automation pattern
+        self.app.piano_roll.clear_selection()
+        # Clear arrangement selection when selecting pattern
+        self.app.arrangement.selected_placements = []
+        self.app.arrangement.selected_beat_placements = []
+        self.state.notify('sel_auto_pat')
 
     def _del_pat(self, pid):
         from ..ops.patterns import delete_pattern
@@ -200,6 +279,48 @@ class PatternList(QFrame):
     def _dup_beat_pat(self, pid):
         from ..ops.patterns import duplicate_beat_pattern
         duplicate_beat_pattern(self.state, pid)
+
+    def _del_auto_pat(self, pid):
+        """Delete automation pattern."""
+        pat = self.state.find_automation_pattern(pid)
+        if not pat:
+            return
+        self.state.automation_patterns = [p for p in self.state.automation_patterns if p.id != pid]
+        if self.state.sel_auto_pat == pid:
+            self.state.sel_auto_pat = None
+        self.state.notify('del_auto_pat')
+
+    def _dup_auto_pat(self, pid):
+        """Duplicate automation pattern."""
+        pat = self.state.find_automation_pattern(pid)
+        if not pat:
+            return
+        from ..state import AutomationPattern, AutomationPoint
+        new_id = self.state.new_id()
+        new_pat = AutomationPattern(
+            id=new_id,
+            name=f'{pat.name} copy',
+            length=pat.length,
+            color=pat.color,
+            points=[AutomationPoint(p.time, p.value, p.curve) for p in pat.points],
+            min_value=pat.min_value,
+            max_value=pat.max_value
+        )
+        self.state.automation_patterns.append(new_pat)
+        self.state.sel_auto_pat = new_id
+        self.state.sel_pat = None
+        self.state.sel_beat_pat = None
+        self.state.notify('dup_auto_pat')
+
+    def _edit_auto_pat(self, pid):
+        """Edit automation pattern via dialog."""
+        pat = self.state.find_automation_pattern(pid)
+        if not pat:
+            return
+        from ..ui.automation_dialogs import AutomationPatternDialog
+        dlg = AutomationPatternDialog(self, self.state, pattern=pat)
+        if dlg.exec():
+            self.state.notify('automation_pattern_dialog')
 
     # ---- Pattern import / export ----
 
@@ -498,6 +619,117 @@ class BeatPatternItem(QFrame):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.parent_list._select_beat_pat(self.pattern.id)
+
+
+class AutomationPatternItem(QFrame):
+    """Single automation pattern item in the list."""
+
+    def __init__(self, parent_list, pattern, selected):
+        super().__init__(parent_list)
+        self.parent_list = parent_list
+        self.pattern = pattern
+        self.setFrameStyle(QFrame.Box if selected else QFrame.NoFrame)
+        self.setCursor(Qt.PointingHandCursor)
+        self.drag_start_pos = None  # For drag tracking
+        
+        bg_color = '#1e2a4a' if selected else '#16213e'
+        border_color = '#4a90e2' if selected else '#16213e'  # Blue for automation
+        self.setStyleSheet(f'background-color: {bg_color}; border: 1px solid {border_color};')
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 4, 4, 4)
+        layout.setSpacing(4)
+
+        # Color dot
+        dot_widget = ColorDot(pattern.color)
+        dot_widget.setAttribute(Qt.WA_TransparentForMouseEvents)
+        layout.addWidget(dot_widget)
+
+        # Text container with two lines
+        text_container = QWidget()
+        text_container.setStyleSheet('background-color: transparent; border: none;')
+        text_container.setAttribute(Qt.WA_TransparentForMouseEvents)
+        text_layout = QVBoxLayout(text_container)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(0)
+        
+        # Name on first line
+        name_label = QLabel(pattern.name)
+        name_label.setStyleSheet('color: #eee; background-color: transparent; border: none;')
+        name_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        name_label.setWordWrap(False)
+        from PySide6.QtWidgets import QSizePolicy
+        name_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        name_font = QFont()
+        name_font.setPointSize(9)
+        name_label.setFont(name_font)
+        text_layout.addWidget(name_label)
+        
+        # Details on second line (smaller font)
+        info = f'{pattern.length}b · {pattern.min_value:.1f}–{pattern.max_value:.1f}'
+        info_label = QLabel(info)
+        info_label.setStyleSheet('color: #888; background-color: transparent; border: none;')
+        info_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        info_font = QFont()
+        info_font.setPointSize(7)
+        info_label.setFont(info_font)
+        text_layout.addWidget(info_label)
+        
+        layout.addWidget(text_container, stretch=1)
+
+        # Action buttons
+        btn_frame = QFrame()
+        btn_frame.setStyleSheet('background-color: transparent; border: none;')
+        btn_frame.setFixedWidth(84)
+        btn_layout = QHBoxLayout(btn_frame)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(2)
+
+        # Edit button
+        edit_btn = QPushButton('✎')
+        edit_btn.setStyleSheet('background-color: transparent; color: #aaa; border: 1px solid #555; font-size: 16px; padding: 2px;')
+        edit_btn.setFixedWidth(26)
+        edit_btn.setToolTip('Edit pattern properties')
+        edit_btn.clicked.connect(lambda: parent_list._edit_auto_pat(pattern.id))
+        btn_layout.addWidget(edit_btn)
+
+        # Duplicate button
+        dup_btn = QPushButton('⧉')
+        dup_btn.setStyleSheet('background-color: transparent; color: #aaa; border: 1px solid #555; font-size: 16px; padding: 2px;')
+        dup_btn.setFixedWidth(26)
+        dup_btn.setToolTip('Duplicate pattern')
+        dup_btn.clicked.connect(lambda: parent_list._dup_auto_pat(pattern.id))
+        btn_layout.addWidget(dup_btn)
+
+        # Delete button
+        del_btn = QPushButton('×')
+        del_btn.setStyleSheet('background-color: transparent; color: #e94560; border: 1px solid #555; font-size: 18px; padding: 2px;')
+        del_btn.setFixedWidth(26)
+        del_btn.setToolTip('Delete pattern')
+        del_btn.clicked.connect(lambda: parent_list._del_auto_pat(pattern.id))
+        btn_layout.addWidget(del_btn)
+
+        layout.addWidget(btn_frame)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.drag_start_pos = event.pos()
+            self.parent_list._select_auto_pat(self.pattern.id)
+
+    def mouseMoveEvent(self, event):
+        if not (event.buttons() & Qt.LeftButton):
+            return
+        if not self.drag_start_pos:
+            return
+        # Start drag if moved far enough
+        if (event.pos() - self.drag_start_pos).manhattanLength() < 10:
+            return
+        
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setText(f'automation_pattern:{self.pattern.id}')
+        drag.setMimeData(mime)
+        drag.exec(Qt.CopyAction)
 
 
 class ColorDot(QWidget):

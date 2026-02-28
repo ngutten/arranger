@@ -29,6 +29,8 @@ class ArrangementView(QFrame):
         self._resize_pl = None
         self._drag_beat_pl = None
         self._resize_beat_pl = None
+        self._drag_auto_pl = None
+        self._resize_auto_pl = None
 
         # Dynamic extent tracking
         self._max_scroll_beats = self.MIN_BEATS
@@ -41,10 +43,12 @@ class ArrangementView(QFrame):
         self.clipboard = ArrangementClipboard()
         self.selected_placements = []
         self.selected_beat_placements = []
+        self.selected_automation_placements = []
         
         # Ghost placement state (for paste preview)
         self._ghost_placements = []  # List of dicts with placement data
         self._ghost_beat_placements = []
+        self._ghost_automation_placements = []
         self._ghost_offset = 0.0  # Time offset from clipboard min_time
 
         self._build()
@@ -152,6 +156,13 @@ class ArrangementView(QFrame):
                 end_beat = bp.time + pat.length * (bp.repeats or 1)
                 max_beat = max(max_beat, end_beat)
         
+        # Check automation placements
+        for ap in self.state.automation_placements:
+            pat = self.state.find_automation_pattern(ap.pattern_id)
+            if pat:
+                end_beat = ap.time + pat.length * (ap.repeats or 1)
+                max_beat = max(max_beat, end_beat)
+        
         return max_beat
         
     def _hit_placement(self, x, y):
@@ -192,6 +203,25 @@ class ArrangementView(QFrame):
                 return bp, is_resize
         return None, False
 
+    def _hit_automation_placement(self, x, y):
+        """Hit test for automation placements."""
+        ti = int(y // self.TH) - len(self.state.tracks) - len(self.state.beat_tracks)
+        beat = x / self.BW
+        if ti < 0 or ti >= len(self.state.automation_tracks):
+            return None, False
+        tid = self.state.automation_tracks[ti].id
+        for ap in reversed(self.state.automation_placements):
+            if ap.track_id != tid:
+                continue
+            pat = self.state.find_automation_pattern(ap.pattern_id)
+            if not pat:
+                continue
+            tl = pat.length * (ap.repeats or 1)
+            if ap.time <= beat < ap.time + tl:
+                is_resize = beat > ap.time + tl - 0.5
+                return ap, is_resize
+        return None, False
+
     def refresh(self):
         """Redraw all components."""
         # Calculate dynamic extent based on content and scroll position
@@ -204,7 +234,7 @@ class ArrangementView(QFrame):
             content_extent * self.LOOKAHEAD_FACTOR
         )
         
-        total_tracks = len(self.state.tracks) + len(self.state.beat_tracks)
+        total_tracks = len(self.state.tracks) + len(self.state.beat_tracks) + len(self.state.automation_tracks)
         ch = max(total_tracks * self.TH, 400)
         cw = int(self._max_scroll_beats * self.BW)
                 
@@ -217,23 +247,28 @@ class ArrangementView(QFrame):
     
     def copy_selection(self):
         """Copy selected placements to clipboard."""
-        if not self.selected_placements and not self.selected_beat_placements:
+        if not self.selected_placements and not self.selected_beat_placements and not self.selected_automation_placements:
             return
         self.clipboard.copy(self.selected_placements, 
-                           self.selected_beat_placements, self.state)
+                           self.selected_beat_placements,
+                           self.selected_automation_placements, 
+                           self.state)
         # Don't activate ghost mode yet - wait for paste
     
     def cut_selection(self):
         """Cut selected placements to clipboard."""
-        if not self.selected_placements and not self.selected_beat_placements:
+        if not self.selected_placements and not self.selected_beat_placements and not self.selected_automation_placements:
             return
         self.copy_selection()
         for pl in self.selected_placements:
             self.state.placements.remove(pl)
         for bp in self.selected_beat_placements:
             self.state.beat_placements.remove(bp)
+        for ap in self.selected_automation_placements:
+            self.state.automation_placements.remove(ap)
         self.selected_placements = []
         self.selected_beat_placements = []
+        self.selected_automation_placements = []
         self.state.notify('cut_placements')
         self.refresh()
         # Activate ghost mode immediately after cut for quick repositioning
@@ -254,6 +289,7 @@ class ArrangementView(QFrame):
         # Store ghost data from clipboard
         self._ghost_placements = list(self.clipboard.data.placements)
         self._ghost_beat_placements = list(self.clipboard.data.beat_placements)
+        self._ghost_automation_placements = list(self.clipboard.data.automation_placements)
         self._ghost_offset = 0.0
         
         # Update display
@@ -261,22 +297,25 @@ class ArrangementView(QFrame):
     
     def _commit_ghost_placements(self, paste_time: float):
         """Commit ghost placements to actual state."""
-        if not self._ghost_placements and not self._ghost_beat_placements:
+        if not self._ghost_placements and not self._ghost_beat_placements and not self._ghost_automation_placements:
             return
         
-        new_pls, new_bps = self.clipboard.paste(paste_time, self.state)
+        new_pls, new_bps, new_aps = self.clipboard.paste(paste_time, self.state)
         
         # Add to state
         self.state.placements.extend(new_pls)
         self.state.beat_placements.extend(new_bps)
+        self.state.automation_placements.extend(new_aps)
         
         # Select the pasted items
         self.selected_placements = new_pls
         self.selected_beat_placements = new_bps
+        self.selected_automation_placements = new_aps
         
         # Clear ghost mode
         self._ghost_placements = []
         self._ghost_beat_placements = []
+        self._ghost_automation_placements = []
         self._ghost_offset = 0.0
         
         self.state.notify('paste_placements')
@@ -286,12 +325,13 @@ class ArrangementView(QFrame):
         """Cancel ghost placement mode without pasting."""
         self._ghost_placements = []
         self._ghost_beat_placements = []
+        self._ghost_automation_placements = []
         self._ghost_offset = 0.0
         self.canvas_widget.update()
     
     def delete_selection(self):
         """Delete selected placements."""
-        if not self.selected_placements and not self.selected_beat_placements:
+        if not self.selected_placements and not self.selected_beat_placements and not self.selected_automation_placements:
             return
         for pl in self.selected_placements:
             if pl in self.state.placements:
@@ -299,8 +339,12 @@ class ArrangementView(QFrame):
         for bp in self.selected_beat_placements:
             if bp in self.state.beat_placements:
                 self.state.beat_placements.remove(bp)
+        for ap in self.selected_automation_placements:
+            if ap in self.state.automation_placements:
+                self.state.automation_placements.remove(ap)
         self.selected_placements = []
         self.selected_beat_placements = []
+        self.selected_automation_placements = []
         self.state.notify('delete_placements')
         self.refresh()
     
@@ -308,6 +352,7 @@ class ArrangementView(QFrame):
         """Select all placements."""
         self.selected_placements = list(self.state.placements)
         self.selected_beat_placements = list(self.state.beat_placements)
+        self.selected_automation_placements = list(self.state.automation_placements)
         self.state.notify('selection_changed')
         self.canvas_widget.update()
 
@@ -560,6 +605,47 @@ class TrackLabelsWidget(QWidget):
             painter.setFont(QFont('TkDefaultFont', 7))
             painter.drawText(8, y + 38, 'Beat Track')
 
+        # Draw automation tracks
+        for i, at in enumerate(s.automation_tracks):
+            y = (len(s.tracks) + len(s.beat_tracks) + i) * self.parent_arr.TH
+            sel = s.sel_auto_trk == at.id
+            
+            if sel:
+                painter.fillRect(0, y, 150, self.parent_arr.TH, QColor('#1e2040'))
+                painter.setPen(QPen(QColor('#4a90e2'), 3))  # Blue for automation
+                painter.drawLine(0, y, 0, y + self.parent_arr.TH)
+            else:
+                # Blue accent bar for automation tracks
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor('#4a90e2'))
+                painter.drawRect(0, y, 3, self.parent_arr.TH)
+            
+            painter.setPen(QColor('#222244'))
+            painter.drawLine(0, y + self.parent_arr.TH - 1, 150, y + self.parent_arr.TH - 1)
+            
+            painter.setPen(QColor('#eee'))
+            painter.setFont(QFont('TkDefaultFont', 9, QFont.Bold))
+            painter.drawText(8, y + 21, at.name)
+            
+            painter.setPen(QColor('#4a90e2'))  # Blue for automation
+            painter.setFont(QFont('TkDefaultFont', 7))
+            painter.drawText(8, y + 33, 'Automation')
+            
+            # Show connection status (count control source nodes referencing this track)
+            connected_count = 0
+            if s.signal_graph:
+                for node in s.signal_graph.nodes:
+                    if node.node_type == 'control_source':
+                        if node.params.get('automation_track_id') == at.id:
+                            connected_count += 1
+            
+            painter.setPen(QColor('#888'))
+            if connected_count > 0:
+                target_text = f'→ {connected_count} node{"s" if connected_count != 1 else ""}'
+            else:
+                target_text = '(not connected)'
+            painter.drawText(8, y + 45, target_text)
+
 
 class ArrangementCanvas(QWidget):
     """Main arrangement canvas with placements."""
@@ -576,7 +662,7 @@ class ArrangementCanvas(QWidget):
         """Handle keyboard events."""
         if event.key() == Qt.Key_Escape:
             # Cancel ghost mode
-            if self.parent_arr._ghost_placements or self.parent_arr._ghost_beat_placements:
+            if self.parent_arr._ghost_placements or self.parent_arr._ghost_beat_placements or self.parent_arr._ghost_automation_placements:
                 self.parent_arr._cancel_ghost_mode()
                 event.accept()
                 return
@@ -589,12 +675,12 @@ class ArrangementCanvas(QWidget):
         
         if event.button() == Qt.LeftButton:
             # If in ghost mode, commit the paste
-            if self.parent_arr._ghost_placements or self.parent_arr._ghost_beat_placements:
+            if self.parent_arr._ghost_placements or self.parent_arr._ghost_beat_placements or self.parent_arr._ghost_automation_placements:
                 beat_pos = max(0, self.parent_arr._snap(x / self.parent_arr.BW))
                 self.parent_arr._commit_ghost_placements(beat_pos)
                 return
             
-            # Check existing placement click
+            # Check existing placement click - MELODIC
             pl, is_resize = self.parent_arr._hit_placement(x, y)
             if pl:
                 # Clear piano roll selection when selecting placement
@@ -612,10 +698,11 @@ class ArrangementCanvas(QWidget):
                 # Regular click - select this placement only
                 self.parent_arr.selected_placements = [pl]
                 self.parent_arr.selected_beat_placements = []
+                self.parent_arr.selected_automation_placements = []
                 self.parent_arr._on_click(event)
                 return
             
-            # Check beat placement
+            # Check existing placement click - BEAT
             bp, is_resize = self.parent_arr._hit_beat_placement(x, y)
             if bp:
                 # Clear piano roll selection when selecting beat placement
@@ -632,6 +719,28 @@ class ArrangementCanvas(QWidget):
                 # Regular click - select this placement only
                 self.parent_arr.selected_placements = []
                 self.parent_arr.selected_beat_placements = [bp]
+                self.parent_arr.selected_automation_placements = []
+                self.parent_arr._on_click(event)
+                return
+            
+            # Check existing placement click - AUTOMATION
+            ap, is_resize = self.parent_arr._hit_automation_placement(x, y)
+            if ap:
+                # Clear piano roll selection when selecting automation placement
+                self.parent_arr.app.piano_roll.clear_selection()
+                
+                # Shift or Ctrl for multi-select
+                if shift_held or ctrl_held:
+                    if ap in self.parent_arr.selected_automation_placements:
+                        self.parent_arr.selected_automation_placements.remove(ap)
+                    else:
+                        self.parent_arr.selected_automation_placements.append(ap)
+                    self.update()
+                    return
+                # Regular click - select this placement only
+                self.parent_arr.selected_placements = []
+                self.parent_arr.selected_beat_placements = []
+                self.parent_arr.selected_automation_placements = [ap]
                 self.parent_arr._on_click(event)
                 return
             
@@ -646,6 +755,7 @@ class ArrangementCanvas(QWidget):
             if not ctrl_held and not shift_held:
                 self.parent_arr.selected_placements = []
                 self.parent_arr.selected_beat_placements = []
+                self.parent_arr.selected_automation_placements = []
             
             # No existing placement clicked - place selected pattern
             state = self.parent_arr.state
@@ -726,20 +836,60 @@ class ArrangementCanvas(QWidget):
                 state.sel_beat_pl = bp.id
                 state.notify('beat_placement_added')
                 self.parent_arr.refresh()
+                
+            # Place selected automation pattern
+            elif state.sel_auto_pat and not state.sel_pat and not state.sel_beat_pat:
+                from ..state import AutomationPlacement, AutomationTrack
+                
+                # Adjust for automation tracks (they come after melodic and beat tracks)
+                auto_track_idx = track_idx - len(state.tracks) - len(state.beat_tracks)
+                
+                # Get or create automation track
+                if auto_track_idx >= len(state.automation_tracks):
+                    new_track = AutomationTrack(
+                        id=state.new_id(),
+                        name=f'Automation {len(state.automation_tracks) + 1}'
+                    )
+                    state.automation_tracks.append(new_track)
+                    track = new_track
+                else:
+                    if auto_track_idx < 0:
+                        # Clicked on melodic/beat track - create new automation track
+                        new_track = AutomationTrack(
+                            id=state.new_id(),
+                            name=f'Automation {len(state.automation_tracks) + 1}'
+                        )
+                        state.automation_tracks.append(new_track)
+                        track = new_track
+                    else:
+                        track = state.automation_tracks[auto_track_idx]
+                
+                # Create automation placement
+                ap = AutomationPlacement(
+                    id=state.new_id(),
+                    track_id=track.id,
+                    pattern_id=state.sel_auto_pat,
+                    time=beat_pos,
+                    repeats=1
+                )
+                state.automation_placements.append(ap)
+                state.sel_auto_pl = ap.id
+                state.notify('automation_placement_added')
+                self.parent_arr.refresh()
             else:
-                # Nothing selected or both selected - just deselect
+                # Nothing selected or multiple selected - just deselect
                 self.parent_arr._on_click(event)
                 
         elif event.button() == Qt.RightButton:
             # Right click cancels ghost mode
-            if self.parent_arr._ghost_placements or self.parent_arr._ghost_beat_placements:
+            if self.parent_arr._ghost_placements or self.parent_arr._ghost_beat_placements or self.parent_arr._ghost_automation_placements:
                 self.parent_arr._cancel_ghost_mode()
                 return
             self.parent_arr._on_right_click(event)
 
     def mouseMoveEvent(self, event):
         # Update ghost placement position if in ghost mode
-        if self.parent_arr._ghost_placements or self.parent_arr._ghost_beat_placements:
+        if self.parent_arr._ghost_placements or self.parent_arr._ghost_beat_placements or self.parent_arr._ghost_automation_placements:
             x = event.pos().x()
             beat_pos = max(0, self.parent_arr._snap(x / self.parent_arr.BW))
             self.parent_arr._ghost_offset = beat_pos - self.parent_arr.clipboard.data.min_time
@@ -756,12 +906,13 @@ class ArrangementCanvas(QWidget):
     def mouseReleaseEvent(self, event):
         if self.parent_arr.marquee.is_active:
             rect = self.parent_arr.marquee.finish()
-            pls, bps = select_placements_in_rect(
+            pls, bps, aps = select_placements_in_rect(
                 rect, self.parent_arr.state,
                 self.parent_arr.BW, self.parent_arr.TH
             )
             self.parent_arr.selected_placements = pls
             self.parent_arr.selected_beat_placements = bps
+            self.parent_arr.selected_automation_placements = aps
             self.update()
             return
         self.parent_arr._on_release(event)
@@ -772,7 +923,7 @@ class ArrangementCanvas(QWidget):
         
         s = self.parent_arr.state
         bpm_beats = s.ts_num * (4 / s.ts_den)
-        total_tracks = len(s.tracks) + len(s.beat_tracks)
+        total_tracks = len(s.tracks) + len(s.beat_tracks) + len(s.automation_tracks)
         cw = self.width()
         ch = self.height()
 
@@ -892,6 +1043,45 @@ class ArrangementCanvas(QWidget):
             painter.setBrush(QColor(255, 255, 255, 68))
             painter.drawRect(int(x + w - 5), y + 2, 4, self.parent_arr.TH - 4)
 
+        # Automation placements
+        for ap in s.automation_placements:
+            ti = next((i for i, t in enumerate(s.automation_tracks) if t.id == ap.track_id), -1)
+            pat = s.find_automation_pattern(ap.pattern_id)
+            if ti < 0 or not pat:
+                continue
+            y = (len(s.tracks) + len(s.beat_tracks) + ti) * self.parent_arr.TH
+            x = ap.time * self.parent_arr.BW
+            tl = pat.length * (ap.repeats or 1)
+            w = tl * self.parent_arr.BW
+            sel = s.sel_auto_pl == ap.id
+
+            if sel:
+                painter.setPen(QPen(QColor('#4a90e2'), 2))  # Blue border when selected
+                painter.setBrush(QColor(pat.color))
+            else:
+                painter.setPen(QPen(QColor('#4a90e2'), 1))  # Blue outline
+                fill_color = QColor(pat.color)
+                fill_color.setAlpha(136)
+                painter.setBrush(fill_color)
+            
+            painter.drawRect(int(x), y + 2, int(w - 1), self.parent_arr.TH - 4)
+
+            # Repeat dividers
+            for r in range(1, ap.repeats or 1):
+                rx = x + r * pat.length * self.parent_arr.BW
+                painter.setPen(QPen(QColor(255, 255, 255, 68), 1, Qt.DashLine))
+                painter.drawLine(int(rx), y + 4, int(rx), y + self.parent_arr.TH - 4)
+
+            # Label
+            painter.setPen(QColor('#fff'))
+            painter.setFont(QFont('TkDefaultFont', 8))
+            painter.drawText(int(x + 4), y + 20, pat.name)
+
+            # Resize handle
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(255, 255, 255, 68))
+            painter.drawRect(int(x + w - 5), y + 2, 4, self.parent_arr.TH - 4)
+
         # Loop region shading on canvas
         if s.looping and s.loop_end is not None:
             ls = s.loop_start if s.loop_start is not None else 0.0
@@ -920,7 +1110,7 @@ class ArrangementCanvas(QWidget):
             painter.drawLine(int(px), 0, int(px), ch)
         
         # Draw ghost placements (paste preview)
-        if self.parent_arr._ghost_placements or self.parent_arr._ghost_beat_placements:
+        if self.parent_arr._ghost_placements or self.parent_arr._ghost_beat_placements or self.parent_arr._ghost_automation_placements:
             time_offset = self.parent_arr._ghost_offset
             
             # Draw ghost melodic placements
@@ -969,6 +1159,29 @@ class ArrangementCanvas(QWidget):
                 painter.setPen(QColor(255, 255, 255, 120))
                 painter.setFont(QFont('TkDefaultFont', 8))
                 painter.drawText(int(x + 4), y + 20, pat.name)
+            
+            # Draw ghost automation placements
+            for ap_dict in self.parent_arr._ghost_automation_placements:
+                ti = next((i for i, t in enumerate(s.automation_tracks) if t.id == ap_dict['trackId']), -1)
+                pat = s.find_automation_pattern(ap_dict['patternId'])
+                if ti < 0 or not pat:
+                    continue
+                
+                y = (len(s.tracks) + len(s.beat_tracks) + ti) * self.parent_arr.TH
+                ghost_time = ap_dict['time'] + time_offset
+                x = ghost_time * self.parent_arr.BW
+                w = pat.length * ap_dict.get('repeats', 1) * self.parent_arr.BW
+                
+                # Semi-transparent ghost appearance
+                ghost_color = QColor(pat.color)
+                ghost_color.setAlpha(80)
+                painter.setPen(QPen(QColor('#fff'), 1, Qt.DashLine))
+                painter.setBrush(ghost_color)
+                painter.drawRect(int(x), y + 2, int(w - 1), self.parent_arr.TH - 4)
+                
+                painter.setPen(QColor(255, 255, 255, 120))
+                painter.setFont(QFont('TkDefaultFont', 8))
+                painter.drawText(int(x + 4), y + 20, pat.name)
         
         # Draw selection highlights
         for pl in self.parent_arr.selected_placements:
@@ -993,6 +1206,17 @@ class ArrangementCanvas(QWidget):
                 painter.setBrush(Qt.NoBrush)
                 painter.drawRect(int(x), y + 2, int(w - 1), self.parent_arr.TH - 4)
         
+        for ap in self.parent_arr.selected_automation_placements:
+            ti = next((i for i, t in enumerate(s.automation_tracks) if t.id == ap.track_id), -1)
+            pat = s.find_automation_pattern(ap.pattern_id)
+            if ti >= 0 and pat:
+                y = (len(s.tracks) + len(s.beat_tracks) + ti) * self.parent_arr.TH
+                x = ap.time * self.parent_arr.BW
+                w = pat.length * (ap.repeats or 1) * self.parent_arr.BW
+                painter.setPen(QPen(QColor('#00ff88'), 2))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(int(x), y + 2, int(w - 1), self.parent_arr.TH - 4)
+        
         # Draw marquee rectangle
         if self.parent_arr.marquee.is_active:
             rect = self.parent_arr.marquee.get_rect()
@@ -1006,36 +1230,110 @@ class ArrangementCanvas(QWidget):
 # Add missing methods to ArrangementView
 def _on_click(self, event):
     x, y = event.pos().x(), event.pos().y()
+    
+    # Check for modifier keys
+    shift_held = event.modifiers() & Qt.ShiftModifier
+    ctrl_held = event.modifiers() & Qt.ControlModifier
+    
     # Check melodic placements
     pl, is_resize = self._hit_placement(x, y)
     if pl:
+        # Clear piano roll selection
+        self.app.piano_roll.clear_selection()
+        
+        # Handle multi-selection with Shift/Ctrl
+        if shift_held or ctrl_held:
+            if pl in self.selected_placements:
+                self.selected_placements.remove(pl)
+            else:
+                self.selected_placements.append(pl)
+            self.canvas_widget.update()
+            return
+        
+        # Single selection
+        self.selected_placements = [pl]
+        self.selected_beat_placements = []
+        self.selected_automation_placements = []
         self.state.sel_pl = pl.id
         self.state.sel_beat_pl = None
+        self.state.sel_auto_pl = None
+        
         if is_resize:
             self._resize_pl = pl
         else:
             self._drag_pl = pl
             self._drag_offset = x / self.BW - pl.time
         self.state.notify('sel_pl')
+        self.canvas_widget.update()
         return
 
     # Check beat placements
     bp, is_resize = self._hit_beat_placement(x, y)
     if bp:
+        self.app.piano_roll.clear_selection()
+        
+        if shift_held or ctrl_held:
+            if bp in self.selected_beat_placements:
+                self.selected_beat_placements.remove(bp)
+            else:
+                self.selected_beat_placements.append(bp)
+            self.canvas_widget.update()
+            return
+        
+        self.selected_placements = []
+        self.selected_beat_placements = [bp]
+        self.selected_automation_placements = []
         self.state.sel_beat_pl = bp.id
         self.state.sel_pl = None
+        self.state.sel_auto_pl = None
+        
         if is_resize:
             self._resize_beat_pl = bp
         else:
             self._drag_beat_pl = bp
             self._drag_offset = x / self.BW - bp.time
         self.state.notify('sel_beat_pl')
+        self.canvas_widget.update()
+        return
+
+    # Check automation placements
+    ap, is_resize = self._hit_automation_placement(x, y)
+    if ap:
+        self.app.piano_roll.clear_selection()
+        
+        if shift_held or ctrl_held:
+            if ap in self.selected_automation_placements:
+                self.selected_automation_placements.remove(ap)
+            else:
+                self.selected_automation_placements.append(ap)
+            self.canvas_widget.update()
+            return
+        
+        self.selected_placements = []
+        self.selected_beat_placements = []
+        self.selected_automation_placements = [ap]
+        self.state.sel_auto_pl = ap.id
+        self.state.sel_pl = None
+        self.state.sel_beat_pl = None
+        
+        if is_resize:
+            self._resize_auto_pl = ap
+        else:
+            self._drag_auto_pl = ap
+            self._drag_offset = x / self.BW - ap.time
+        self.state.notify('sel_auto_pl')
+        self.canvas_widget.update()
         return
 
     # Clicked empty space - deselect
+    self.selected_placements = []
+    self.selected_beat_placements = []
+    self.selected_automation_placements = []
     self.state.sel_pl = None
     self.state.sel_beat_pl = None
+    self.state.sel_auto_pl = None
     self.state.notify('sel_pl')
+    self.canvas_widget.update()
 
 def _on_right_click(self, event):
     x, y = event.pos().x(), event.pos().y()
@@ -1043,15 +1341,28 @@ def _on_right_click(self, event):
     pl, _ = self._hit_placement(x, y)
     if pl:
         self.state.placements = [p for p in self.state.placements if p.id != pl.id]
+        self.selected_placements = []
         self.state.sel_pl = None
         self.state.notify('del_pl')
+        self.canvas_widget.update()
         return
     # Delete beat placement
     bp, _ = self._hit_beat_placement(x, y)
     if bp:
         self.state.beat_placements = [p for p in self.state.beat_placements if p.id != bp.id]
+        self.selected_beat_placements = []
         self.state.sel_beat_pl = None
         self.state.notify('del_beat_pl')
+        self.canvas_widget.update()
+        return
+    # Delete automation placement
+    ap, _ = self._hit_automation_placement(x, y)
+    if ap:
+        self.state.automation_placements = [p for p in self.state.automation_placements if p.id != ap.id]
+        self.selected_automation_placements = []
+        self.state.sel_auto_pl = None
+        self.state.notify('del_auto_pl')
+        self.canvas_widget.update()
         return
 
 def _on_drag(self, event):
@@ -1063,35 +1374,51 @@ def _on_drag(self, event):
         ti = int(y // self.TH)
         if 0 <= ti < len(self.state.tracks):
             self._drag_pl.track_id = self.state.tracks[ti].id
-        self.refresh()
+        self.canvas_widget.update()
     elif self._resize_pl:
         new_len = max(self.state.snap, self._snap(beat - self._resize_pl.time))
         pat = self.state.find_pattern(self._resize_pl.pattern_id)
         if pat:
             self._resize_pl.repeats = max(1, round(new_len / pat.length))
-        self.refresh()
+        self.canvas_widget.update()
     elif self._drag_beat_pl:
         self._drag_beat_pl.time = max(0, self._snap(beat - self._drag_offset))
         ti = int(y // self.TH) - len(self.state.tracks)
         if 0 <= ti < len(self.state.beat_tracks):
             self._drag_beat_pl.track_id = self.state.beat_tracks[ti].id
-        self.refresh()
+        self.canvas_widget.update()
     elif self._resize_beat_pl:
         new_len = max(self.state.snap, self._snap(beat - self._resize_beat_pl.time))
         pat = self.state.find_beat_pattern(self._resize_beat_pl.pattern_id)
         if pat:
             self._resize_beat_pl.repeats = max(1, round(new_len / pat.length))
-        self.refresh()
+        self.canvas_widget.update()
+    elif self._drag_auto_pl:
+        self._drag_auto_pl.time = max(0, self._snap(beat - self._drag_offset))
+        ti = int(y // self.TH) - len(self.state.tracks) - len(self.state.beat_tracks)
+        if 0 <= ti < len(self.state.automation_tracks):
+            self._drag_auto_pl.track_id = self.state.automation_tracks[ti].id
+        self.canvas_widget.update()
+    elif self._resize_auto_pl:
+        new_len = max(self.state.snap, self._snap(beat - self._resize_auto_pl.time))
+        pat = self.state.find_automation_pattern(self._resize_auto_pl.pattern_id)
+        if pat:
+            self._resize_auto_pl.repeats = max(1, round(new_len / pat.length))
+        self.canvas_widget.update()
 
 def _on_release(self, event):
     if self._drag_pl or self._resize_pl:
         self.state.notify('placement_edit')
     if self._drag_beat_pl or self._resize_beat_pl:
         self.state.notify('beat_placement_edit')
+    if self._drag_auto_pl or self._resize_auto_pl:
+        self.state.notify('automation_placement_edit')
     self._drag_pl = None
     self._resize_pl = None
     self._drag_beat_pl = None
     self._resize_beat_pl = None
+    self._drag_auto_pl = None
+    self._resize_auto_pl = None
 
 def _select_track(self, tid):
     self.state.sel_trk = tid

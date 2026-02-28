@@ -450,27 +450,23 @@ class AutomationPattern:
 class AutomationTrack:
     """Track containing automation pattern placements.
     
-    target_node and target_param reference a ControlSource node in the signal graph.
-    User must manually create the ControlSource node and connect it to the desired
-    parameter, then configure this track to reference that node.
+    ControlSource nodes in the signal graph reference automation tracks by ID.
+    This is the inverse of the old design where tracks referenced nodes.
     """
     id: int
     name: str
-    target_node: str = ""    # Node ID in signal graph (e.g., "control_source_1")
-    target_param: str = ""   # Parameter/port ID (typically "control_out")
 
     def to_dict(self):
         return {
-            'id': self.id, 'name': self.name,
-            'targetNode': self.target_node, 'targetParam': self.target_param,
+            'id': self.id, 
+            'name': self.name,
         }
 
     @staticmethod
     def from_dict(d):
         return AutomationTrack(
-            id=d['id'], name=d['name'],
-            target_node=d.get('targetNode', ''),
-            target_param=d.get('targetParam', ''),
+            id=d['id'], 
+            name=d['name'],
         )
 
 

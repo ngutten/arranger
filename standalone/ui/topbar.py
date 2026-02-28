@@ -109,6 +109,10 @@ class TopBar(QFrame):
         add_beat_track_btn.clicked.connect(self.app.add_beat_track)
         layout.addWidget(add_beat_track_btn)
 
+        add_auto_track_btn = QPushButton('+ Auto Track')
+        add_auto_track_btn.clicked.connect(self.app.add_automation_track)
+        layout.addWidget(add_auto_track_btn)
+
         # Separator
         sep1 = QFrame()
         sep1.setFrameShape(QFrame.VLine)

@@ -19,9 +19,11 @@ class ClipboardData:
     """Data structure for clipboard contents."""
     placements: List[dict]  # Serialized Placement objects
     beat_placements: List[dict]  # Serialized BeatPlacement objects
+    automation_placements: List[dict]  # Serialized AutomationPlacement objects
     min_time: float  # For relative positioning on paste
     track_count: int  # How many unique tracks
     beat_track_count: int
+    automation_track_count: int
 
 
 class ArrangementClipboard:
@@ -30,14 +32,15 @@ class ArrangementClipboard:
     def __init__(self):
         self.data: Optional[ClipboardData] = None
         
-    def copy(self, placements, beat_placements, state):
+    def copy(self, placements, beat_placements, automation_placements, state):
         """Copy placements to clipboard."""
-        if not placements and not beat_placements:
+        if not placements and not beat_placements and not automation_placements:
             return
             
         # Serialize the placements
         pl_dicts = [p.to_dict() for p in placements]
         bp_dicts = [bp.to_dict() for bp in beat_placements]
+        ap_dicts = [ap.to_dict() for ap in automation_placements]
         
         # Find min time for relative positioning
         min_time = float('inf')
@@ -45,34 +48,39 @@ class ArrangementClipboard:
             min_time = min(min_time, min(p.time for p in placements))
         if beat_placements:
             min_time = min(min_time, min(bp.time for bp in beat_placements))
+        if automation_placements:
+            min_time = min(min_time, min(ap.time for ap in automation_placements))
         if min_time == float('inf'):
             min_time = 0
             
         # Count unique tracks
         track_ids = set(p.track_id for p in placements)
         beat_track_ids = set(bp.track_id for bp in beat_placements)
+        auto_track_ids = set(ap.track_id for ap in automation_placements)
         
         self.data = ClipboardData(
             placements=pl_dicts,
             beat_placements=bp_dicts,
+            automation_placements=ap_dicts,
             min_time=min_time,
             track_count=len(track_ids),
             beat_track_count=len(beat_track_ids),
+            automation_track_count=len(auto_track_ids),
         )
         
-        print(f"[CLIPBOARD] Copied {len(placements)} placements, {len(beat_placements)} beat placements")
+        print(f"[CLIPBOARD] Copied {len(placements)} placements, {len(beat_placements)} beat placements, {len(automation_placements)} automation placements")
         
     def paste(self, at_time: float, state):
         """Paste clipboard contents at specified time.
         
-        Returns (new_placements, new_beat_placements).
+        Returns (new_placements, new_beat_placements, new_automation_placements).
         """
         if not self.data:
             print("[CLIPBOARD] Nothing to paste")
-            return [], []
+            return [], [], []
             
         # Import here to avoid circular imports
-        from .state import Placement, BeatPlacement
+        from .state import Placement, BeatPlacement, AutomationPlacement
         
         # Calculate time offset
         time_offset = at_time - self.data.min_time
@@ -99,9 +107,20 @@ class ArrangementClipboard:
                 new_beat_placements.append(bp)
             else:
                 print(f"[CLIPBOARD] Skipping beat placement - track {bp.track_id} not found")
+        
+        new_automation_placements = []
+        for ap_dict in self.data.automation_placements:
+            ap = AutomationPlacement.from_dict(ap_dict)
+            ap.id = state.new_id()
+            ap.time += time_offset
+            # Ensure track still exists
+            if state.find_automation_track(ap.track_id):
+                new_automation_placements.append(ap)
+            else:
+                print(f"[CLIPBOARD] Skipping automation placement - track {ap.track_id} not found")
                 
-        print(f"[CLIPBOARD] Pasted {len(new_placements)} placements, {len(new_beat_placements)} beat placements at time {at_time}")
-        return new_placements, new_beat_placements
+        print(f"[CLIPBOARD] Pasted {len(new_placements)} placements, {len(new_beat_placements)} beat placements, {len(new_automation_placements)} automation placements at time {at_time}")
+        return new_placements, new_beat_placements, new_automation_placements
         
     def has_data(self) -> bool:
         """Check if clipboard has data."""
@@ -164,7 +183,7 @@ class MarqueeSelection:
         return QRectF(x1, y1, x2 - x1, y2 - y1)
 
 
-def select_placements_in_rect(rect: QRectF, state, bw: float, th: float) -> Tuple[List, List]:
+def select_placements_in_rect(rect: QRectF, state, bw: float, th: float) -> Tuple[List, List, List]:
     """Find all placements that intersect with the selection rectangle.
     
     Args:
@@ -174,10 +193,11 @@ def select_placements_in_rect(rect: QRectF, state, bw: float, th: float) -> Tupl
         th: Track height in pixels
         
     Returns:
-        (selected_placements, selected_beat_placements)
+        (selected_placements, selected_beat_placements, selected_automation_placements)
     """
     selected_pls = []
     selected_bps = []
+    selected_aps = []
     
     # Convert rect to beat coordinates
     t1 = rect.left() / bw
@@ -225,8 +245,29 @@ def select_placements_in_rect(rect: QRectF, state, bw: float, th: float) -> Tupl
             
             if bp_end > t1 and bp_start < t2:
                 selected_bps.append(bp)
+    
+    # Check automation placements
+    auto_track_offset = len(state.tracks) + len(state.beat_tracks)
+    for i, track in enumerate(state.automation_tracks):
+        track_idx = auto_track_offset + i
+        if track_idx < track1 or track_idx > track2:
+            continue
+            
+        for ap in state.automation_placements:
+            if ap.track_id != track.id:
+                continue
                 
-    return selected_pls, selected_bps
+            pat = state.find_automation_pattern(ap.pattern_id)
+            if not pat:
+                continue
+                
+            ap_start = ap.time
+            ap_end = ap.time + pat.length * (ap.repeats or 1)
+            
+            if ap_end > t1 and ap_start < t2:
+                selected_aps.append(ap)
+                
+    return selected_pls, selected_bps, selected_aps
 
 
 # ============================================================================

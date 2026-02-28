@@ -52,6 +52,10 @@ class TrackPanel(QFrame):
         self.kit_frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self.inner_layout.addWidget(self.kit_frame)
 
+        self.auto_frame = QGroupBox('Automation Tracks')
+        self.auto_frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self.inner_layout.addWidget(self.auto_frame)
+
         self.inner_layout.addStretch()
 
         self.scroll_area.setWidget(self.inner)
@@ -63,6 +67,7 @@ class TrackPanel(QFrame):
         self._render_sf2_info()
         self._render_placement_settings()
         self._render_beat_kit()
+        self._render_automation_tracks()
 
     def _clear_frame(self, frame, keep_widget=None):
         if not frame.layout():
@@ -615,6 +620,94 @@ class TrackPanel(QFrame):
                 self.state.notify('track_settings')
                 # Refresh track settings section
                 self._render_track_settings()
+
+    def _render_automation_tracks(self):
+        """Render automation tracks section."""
+        self._clear_frame(self.auto_frame)
+        layout = self.auto_frame.layout()
+        
+        # List of tracks (no add button here - it's in the topbar)
+        if not self.state.automation_tracks:
+            lbl = QLabel('No automation tracks\n(Use + Auto Track button in toolbar)')
+            lbl.setStyleSheet('color: #666; font-size: 9px;')
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setWordWrap(True)
+            layout.addWidget(lbl)
+        else:
+            for track in self.state.automation_tracks:
+                item_frame = QFrame()
+                item_frame.setFrameStyle(QFrame.Box)
+                item_frame.setStyleSheet('border: 1px solid #2a2a4a; padding: 4px;')
+                item_layout = QVBoxLayout(item_frame)
+                item_layout.setContentsMargins(4, 4, 4, 4)
+                item_layout.setSpacing(2)
+                
+                # Track name
+                name_lbl = QLabel(track.name)
+                name_lbl.setStyleSheet('color: #eee; font-weight: bold;')
+                item_layout.addWidget(name_lbl)
+                
+                # Info about connected control sources
+                # Count how many control source nodes reference this track
+                connected_count = 0
+                if self.state.signal_graph:
+                    for node in self.state.signal_graph.nodes:
+                        if node.node_type == 'control_source':
+                            if node.params.get('automation_track_id') == track.id:
+                                connected_count += 1
+                
+                if connected_count > 0:
+                    info_text = f'Connected to {connected_count} Control Source node{"s" if connected_count != 1 else ""}'
+                    info_color = '#4a90e2'
+                else:
+                    info_text = 'Not connected (create Control Source node in graph editor)'
+                    info_color = '#888'
+                
+                info_lbl = QLabel(info_text)
+                info_lbl.setStyleSheet(f'color: {info_color}; font-size: 9px;')
+                info_lbl.setWordWrap(True)
+                item_layout.addWidget(info_lbl)
+                
+                # Buttons
+                btn_layout = QHBoxLayout()
+                btn_layout.setSpacing(2)
+                
+                edit_btn = QPushButton('Edit')
+                edit_btn.setMaximumWidth(60)
+                edit_btn.clicked.connect(lambda checked, tid=track.id: self._edit_automation_track(tid))
+                btn_layout.addWidget(edit_btn)
+                
+                del_btn = QPushButton('Delete')
+                del_btn.setMaximumWidth(60)
+                del_btn.clicked.connect(lambda checked, tid=track.id: self._del_automation_track(tid))
+                btn_layout.addWidget(del_btn)
+                
+                item_layout.addLayout(btn_layout)
+                layout.addWidget(item_frame)
+
+    def _edit_automation_track(self, track_id):
+        """Open dialog to edit automation track."""
+        track = self.state.find_automation_track(track_id)
+        if not track:
+            return
+        from ..ui.automation_dialogs import AutomationTrackDialog
+        dlg = AutomationTrackDialog(self, self.state, track=track)
+        if dlg.exec():
+            self.state.notify('automation_track_dialog')
+
+    def _del_automation_track(self, track_id):
+        """Delete automation track and its placements."""
+        # Remove placements on this track
+        self.state.automation_placements = [
+            p for p in self.state.automation_placements if p.track_id != track_id
+        ]
+        # Remove track
+        self.state.automation_tracks = [
+            t for t in self.state.automation_tracks if t.id != track_id
+        ]
+        if self.state.sel_auto_trk == track_id:
+            self.state.sel_auto_trk = None
+        self.state.notify('automation_track_deleted')
 
 
 class ColorDot(QWidget):

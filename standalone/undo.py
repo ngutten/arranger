@@ -63,6 +63,7 @@ def capture_state(state) -> dict:
     Only captures the parts we want to undo/redo:
     - patterns, tracks, placements
     - beat_kit, beat_patterns, beat_tracks, beat_placements
+    - automation_patterns, automation_tracks, automation_placements
     - bpm, snap, ts_num, ts_den
     
     Does NOT capture:
@@ -82,6 +83,9 @@ def capture_state(state) -> dict:
         'beat_patterns': copy.deepcopy([p.to_dict() for p in state.beat_patterns]),
         'beat_tracks': copy.deepcopy([t.to_dict() for t in state.beat_tracks]),
         'beat_placements': copy.deepcopy([p.to_dict() for p in state.beat_placements]),
+        'automation_patterns': copy.deepcopy([p.to_dict() for p in state.automation_patterns]),
+        'automation_tracks': copy.deepcopy([t.to_dict() for t in state.automation_tracks]),
+        'automation_placements': copy.deepcopy([p.to_dict() for p in state.automation_placements]),
         '_next_id': state._next_id,
     }
 
@@ -92,7 +96,8 @@ def restore_state(state, snapshot: dict):
     Preserves selection and playback state.
     """
     from .state import (Pattern, Track, Placement, BeatInstrument, 
-                       BeatPattern, BeatTrack, BeatPlacement)
+                       BeatPattern, BeatTrack, BeatPlacement,
+                       AutomationPattern, AutomationTrack, AutomationPlacement)
     
     state.bpm = snapshot['bpm']
     state.snap = snapshot['snap']
@@ -107,6 +112,10 @@ def restore_state(state, snapshot: dict):
     state.beat_patterns = [BeatPattern.from_dict(p) for p in snapshot['beat_patterns']]
     state.beat_tracks = [BeatTrack.from_dict(t) for t in snapshot['beat_tracks']]
     state.beat_placements = [BeatPlacement.from_dict(p) for p in snapshot['beat_placements']]
+    
+    state.automation_patterns = [AutomationPattern.from_dict(p) for p in snapshot.get('automation_patterns', [])]
+    state.automation_tracks = [AutomationTrack.from_dict(t) for t in snapshot.get('automation_tracks', [])]
+    state.automation_placements = [AutomationPlacement.from_dict(p) for p in snapshot.get('automation_placements', [])]
     
     state._next_id = snapshot['_next_id']
     
@@ -123,3 +132,9 @@ def restore_state(state, snapshot: dict):
         state.sel_beat_trk = None
     if state.sel_beat_pl and not state.find_beat_placement(state.sel_beat_pl):
         state.sel_beat_pl = None
+    if state.sel_auto_pat and not state.find_automation_pattern(state.sel_auto_pat):
+        state.sel_auto_pat = None
+    if state.sel_auto_trk and not state.find_automation_track(state.sel_auto_trk):
+        state.sel_auto_trk = None
+    if state.sel_auto_pl and not state.find_automation_placement(state.sel_auto_pl):
+        state.sel_auto_pl = None
