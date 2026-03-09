@@ -101,6 +101,7 @@ def build_pattern_preview(state):
         'name': t.name, 'channel': t.channel,
         'bank': t.bank, 'program': t.program,
         'volume': t.volume,
+        'node_id': f"track_{t.id}",
     }
 
     notes = [{'pitch': n.pitch, 'start': n.start, 'duration': n.duration,
@@ -128,6 +129,7 @@ def build_beat_pattern_preview(state):
     if not pat or not pat.grid:
         return None
 
+    bt = next(iter(state.beat_tracks), None)
     tracks = []
     for inst in state.beat_kit:
         grid = pat.grid.get(inst.id)
@@ -144,10 +146,13 @@ def build_beat_pattern_preview(state):
                     'velocity': vel,
                 })
         if notes:
+            node_id = (f"beat_inst_{inst.id}" if inst.split_routing
+                       else (f"track_{bt.id}" if bt else "preview_track"))
             tracks.append({
                 'name': inst.name, 'channel': inst.channel,
                 'bank': inst.bank, 'program': inst.program,
                 'volume': 100,
+                'node_id': node_id,
                 'placements': [{
                     'pattern': {'notes': notes, 'length': pat.length},
                     'time': 0, 'transpose': 0, 'repeats': 1,

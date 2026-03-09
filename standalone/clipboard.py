@@ -301,7 +301,9 @@ class NoteClipboard:
                 pitch=n.pitch,
                 start=n.start,
                 duration=n.duration,
-                velocity=n.velocity
+                velocity=n.velocity,
+                bend=[list(p) for p in n.bend] if n.bend else [],
+                lyric=n.lyric,
             ) for n in notes
         ]
         
@@ -326,7 +328,9 @@ class NoteClipboard:
                 pitch=n.pitch,
                 start=n.start,
                 duration=n.duration,
-                velocity=n.velocity
+                velocity=n.velocity,
+                bend=[list(p) for p in n.bend] if n.bend else [],
+                lyric=n.lyric,
             ) for n in self.notes
         ]
         

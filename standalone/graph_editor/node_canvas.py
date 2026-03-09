@@ -399,11 +399,15 @@ class NodeGraphCanvas(QWidget):
                 self.graph_changed.emit()
             else:
                 # Emit low-latency set_param for numeric values so the audio
-                # thread sees the change immediately (the debounced graph push
-                # still happens for consistency).
+                # thread sees the change immediately.  Skip graph_changed for
+                # numeric params to avoid a full graph rebuild that blocks the
+                # UI thread and interrupts slider drags.  The graph model
+                # already has the new value; mark_dirty() will pick it up the
+                # next time a structural change or playback triggers it.
                 if isinstance(value, (int, float)):
                     self.param_changed.emit(node_id, key, float(value))
-                self.graph_changed.emit()
+                else:
+                    self.graph_changed.emit()
             self.update()
 
     def _place_settings_widgets(self) -> None:

@@ -62,6 +62,7 @@ def duplicate_notes(pat, selected, clipboard_notes, offset_beats):
             duration=note.duration,
             velocity=note.velocity,
             bend=[list(p) for p in note.bend] if note.bend else [],
+            lyric=note.lyric,
         )
         pat.notes.append(new_note)
         new_indices.append(len(pat.notes) - 1)
@@ -99,6 +100,7 @@ def commit_ghost_notes(pat, ghost_notes, beat, pitch, snap_fn,
             duration=note.duration,
             velocity=note.velocity,
             bend=[list(p) for p in note.bend] if note.bend else [],
+            lyric=note.lyric,
         )
         pat.notes.append(new_note)
         new_indices.append(len(pat.notes) - 1)

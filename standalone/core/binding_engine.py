@@ -30,20 +30,27 @@ from .engine import _emit_note_tune_events, SchedEvent, EVT_NOTE_TUNE
 # Graph builder
 # ---------------------------------------------------------------------------
 
-def _build_schedule_from_arr(arr: dict, node_id: str) -> List[dict]:
+def _build_schedule_from_arr(arr: dict, fallback_node_id: str) -> List[dict]:
     """Convert an arrangement dict (from build_pattern_preview) to server events.
 
     Mirrors _build_server_schedule but operates on the arrangement dict format
     rather than AppState, so it can be used for preview renders without touching
-    live state.
+    live state.  Each track may carry a ``node_id`` key that overrides the
+    *fallback_node_id* so that preview events target the correct source node
+    in the user's real signal graph.
     """
     events: List[dict] = []
     for track in arr.get("tracks", []):
+        node_id = track.get("node_id", fallback_node_id)
         ch = track.get("channel", 0) & 0x0F
+        # GM convention: channel 9 drum kits live at bank 128 in most SF2
+        # files, matching FluidSynthInstrument.set_program's remap logic.
+        bank = track.get("bank", 0)
+        prog_bank = 128 if (ch == 9 and bank == 0) else bank
         events.append({
             "beat": -1, "type": "program", "node_id": node_id,
             "channel": ch, "pitch": track.get("program", 0),
-            "velocity": track.get("bank", 0), "value": 0.0,
+            "velocity": prog_bank, "value": 0.0,
         })
         events.append({
             "beat": -1, "type": "volume", "node_id": node_id,
@@ -605,47 +612,30 @@ class BindingEngine:
         (note_tune events / fluid_synth_tune_notes) instead of the MIDI
         pitch-bend approximation used by the offline FluidSynth subprocess.
 
+        Uses the real signal graph so previews route through the same synth
+        chain the user has configured (samplers, effects, etc.) rather than
+        falling back to a hardcoded FluidSynth-only graph.
+
         Thread-safe: uses _send_lock.  Marks graph dirty after rendering so
         the next play() or note preview restores the real graph and schedule.
         """
         import base64
 
-        preview_node_id = "preview_track"
         bpm = float(arr.get("bpm", 120.0))
 
-        synth_node: dict = {
-            "id": "synth",
-            "type": "fluidsynth" if self._sf2_path else "sine",
-        }
-        if self._sf2_path:
-            synth_node["sf2_path"] = self._sf2_path
+        # Ensure the real graph is loaded so previews use the user's synth
+        # chain (sampler plugins, effects, etc.).
+        self._ensure_graph()
 
-        preview_graph = {
-            "cmd": "set_graph",
-            "bpm": bpm,
-            "nodes": [
-                {"id": preview_node_id, "type": "track_source"},
-                synth_node,
-                {"id": "mixer", "type": "mixer", "channel_count": 1},
-            ],
-            "connections": [
-                {"from_node": preview_node_id, "from_port": "events_out",
-                 "to_node":   "synth",          "to_port":   "events_in"},
-                {"from_node": "synth", "from_port": "audio_out_L",
-                 "to_node":   "mixer", "to_port":   "audio_in_L_0"},
-                {"from_node": "synth", "from_port": "audio_out_R",
-                 "to_node":   "mixer", "to_port":   "audio_in_R_0"},
-            ],
-        }
-        events = _build_schedule_from_arr(arr, preview_node_id)
+        fallback_node_id = "preview_track"
+        events = _build_schedule_from_arr(arr, fallback_node_id)
 
-        self._send(preview_graph)
+        self._send({"cmd": "set_bpm", "bpm": bpm})
         self._send({"cmd": "set_schedule", "events": events})
         resp = self._send({"cmd": "render", "format": "wav"})
 
         # Mark graph dirty so the next play() / ensure_graph() rebuilds the
-        # real graph and schedule from AppState.
-        self._graph_loaded = False
+        # schedule from AppState.
         self._last_graph_hash = ""
 
         if resp is None or resp.get("status") != "ok":
