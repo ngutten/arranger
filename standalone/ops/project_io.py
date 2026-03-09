@@ -1,6 +1,9 @@
 """Project save/load operations, plus single-pattern import/export."""
 
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def save_project(state, path: str):
@@ -40,7 +43,8 @@ def load_project(state, path: str, sf2_loader=None):
         try:
             sf2_loader(state._sf2_path_hint)
         except Exception:
-            pass
+            logger.exception("Failed to reload SF2 from project hint: %s",
+                             state._sf2_path_hint)
 
 
 # ---- Single-pattern import / export ----

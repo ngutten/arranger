@@ -50,18 +50,25 @@ struct ScalaScale {
                 if (description.empty()) {
                     description = line;
                 } else {
-                    expected_count = std::stoi(line);
+                    try { expected_count = std::stoi(line); }
+                    catch (...) { return false; }
                     in_header = false;
                 }
             } else {
                 float cents_val;
-                if (line.find('/') != std::string::npos) {
-                    size_t slash = line.find('/');
-                    float num = std::stof(line.substr(0, slash));
-                    float den = std::stof(line.substr(slash + 1));
-                    cents_val = 1200.0f * std::log2f(num / den);
-                } else {
-                    cents_val = std::stof(line);
+                try {
+                    if (line.find('/') != std::string::npos) {
+                        size_t slash = line.find('/');
+                        float num = std::stof(line.substr(0, slash));
+                        float den = std::stof(line.substr(slash + 1));
+                        if (den == 0.0f) return false;
+                        cents_val = 1200.0f * std::log2f(num / den);
+                    } else {
+                        cents_val = std::stof(line);
+                    }
+                } catch (...) {
+                    fprintf(stderr, "[FluidSynth] malformed scale line: %s\n", line.c_str());
+                    return false;
                 }
                 cents.push_back(cents_val);
             }
@@ -100,18 +107,24 @@ struct KeyboardMapping {
 
             if (line.empty()) continue;
 
-            switch (line_num) {
-                case 0: map_size       = std::stoi(line); break;
-                case 1: reference_note = std::stoi(line); break;
-                case 2: reference_freq = std::stoi(line); break;
-                case 3: reference_hz   = std::stof(line); break;
-                case 4: formal_octave  = std::stoi(line); break;
-                case 5: break;  // first MIDI note of mapping
-                case 6: break;  // last MIDI note of mapping
-                default:
-                    if (line == "x") mapping.push_back(-1);
-                    else             mapping.push_back(std::stoi(line));
-                    break;
+            try {
+                switch (line_num) {
+                    case 0: map_size       = std::stoi(line); break;
+                    case 1: reference_note = std::stoi(line); break;
+                    case 2: reference_freq = std::stoi(line); break;
+                    case 3: reference_hz   = std::stof(line); break;
+                    case 4: formal_octave  = std::stoi(line); break;
+                    case 5: break;  // first MIDI note of mapping
+                    case 6: break;  // last MIDI note of mapping
+                    default:
+                        if (line == "x") mapping.push_back(-1);
+                        else             mapping.push_back(std::stoi(line));
+                        break;
+                }
+            } catch (...) {
+                fprintf(stderr, "[FluidSynth] malformed .kbm line %d: %s\n",
+                        line_num, line.c_str());
+                return false;
             }
             line_num++;
         }
@@ -179,7 +192,8 @@ public:
             reload_mapping();
             if (fs_) apply_tuning_to_channels();
         } else if (key == "reference_note") {
-            reference_note_ = std::max(0, std::min(127, std::stoi(value)));
+            try { reference_note_ = std::max(0, std::min(127, std::stoi(value))); }
+            catch (...) { fprintf(stderr, "[FluidSynth] invalid reference_note: %s\n", value.c_str()); return; }
             compute_base_pitches();
             if (fs_) apply_tuning_to_channels();
         } else if (key == "force_octave") {

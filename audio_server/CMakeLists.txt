@@ -255,6 +255,9 @@ endif()
 if(ENABLE_TESTS)
     add_executable(test_render test/test_render.cpp)
     target_link_libraries(test_render PRIVATE audio_server_lib)
+
+    add_executable(test_graph test/test_graph.cpp)
+    target_link_libraries(test_graph PRIVATE audio_server_lib)
 endif()
 
 # ---------------------------------------------------------------------------

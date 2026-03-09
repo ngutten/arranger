@@ -593,7 +593,8 @@ class App(QMainWindow):
         # Otherwise try piano roll
         elif self._current_editor == 'piano_roll':
             self.piano_roll._copy_to_clipboard()
-        # TODO: Add beat_grid copy support when implemented
+        elif self._current_editor == 'beat_grid':
+            self.beat_grid._copy_to_clipboard()
 
     def _on_cut(self):
         # Check if arranger has a selection
@@ -602,15 +603,20 @@ class App(QMainWindow):
         # Otherwise try piano roll
         elif self._current_editor == 'piano_roll':
             self.piano_roll._cut_to_clipboard()
-        # TODO: Add beat_grid cut support when implemented
+        elif self._current_editor == 'beat_grid':
+            self.beat_grid._cut_to_clipboard()
 
     def _on_paste(self):
         # Smart paste: check which clipboard has data and prioritize current context
         piano_has_data = self.piano_roll._note_clipboard.has_data()
         arrangement_has_data = self.arrangement.clipboard.has_data()
-        
+        beat_grid_has_data = self.beat_grid._clipboard.has_data()
+
+        # Beat grid paste takes priority when in beat grid editor
+        if self._current_editor == 'beat_grid' and beat_grid_has_data:
+            self.beat_grid._paste_from_clipboard()
         # If current editor is piano roll and it has clipboard data, paste there
-        if self._current_editor == 'piano_roll' and piano_has_data:
+        elif self._current_editor == 'piano_roll' and piano_has_data:
             self.piano_roll._paste_from_clipboard()
         # If current editor is piano roll but only arrangement has data, paste arrangement
         elif self._current_editor == 'piano_roll' and arrangement_has_data and not piano_has_data:
@@ -621,12 +627,12 @@ class App(QMainWindow):
         # Fallback to piano roll if it has data
         elif piano_has_data:
             self.piano_roll._paste_from_clipboard()
-        # TODO: Add beat_grid paste support when implemented
 
     def _on_duplicate(self):
         if self._current_editor == 'piano_roll':
             self.piano_roll._duplicate_selection()
-        # TODO: Add beat_grid duplicate support when implemented
+        elif self._current_editor == 'beat_grid':
+            self.beat_grid._duplicate_pattern()
 
     def _on_select_all(self):
         # Check which widget has focus or mouse position
@@ -643,7 +649,8 @@ class App(QMainWindow):
             if pat:
                 self.piano_roll._selected = set(range(len(pat.notes)))
                 self.piano_roll.refresh()
-        # TODO: Add beat_grid select all support when implemented
+        elif self._current_editor == 'beat_grid':
+            self.beat_grid._select_all()
 
     def _on_delete(self):
         # Check if arranger has a selection
@@ -652,7 +659,8 @@ class App(QMainWindow):
         # Otherwise try piano roll
         elif self._current_editor == 'piano_roll':
             self.piano_roll._delete_selected()
-        # TODO: Add beat_grid delete support when implemented
+        elif self._current_editor == 'beat_grid':
+            self.beat_grid._delete_selected()
 
     # ---- Pattern management ----
 

@@ -167,10 +167,29 @@ class AutomationCurve(QFrame):
         self.refresh()
 
     def _preview_pattern(self):
-        """Preview the automation pattern (TODO: implement preview playback)."""
-        # For now, just a placeholder
-        # Eventually this could trigger a test tone with the automation applied
-        pass
+        """Preview the automation pattern by playing the full arrangement.
+
+        Automation modulates graph node parameters and is only meaningful in
+        the context of the full arrangement, so we trigger normal playback
+        from the start of the pattern's first placement.
+        """
+        pat = self.state.find_automation_pattern(self.state.sel_auto_pat)
+        if not pat:
+            return
+
+        # Find the earliest placement of this pattern and seek there
+        earliest = None
+        for ap in self.state.automation_placements:
+            if ap.pattern_id == pat.id:
+                if earliest is None or ap.time < earliest:
+                    earliest = ap.time
+
+        if earliest is not None and hasattr(self.app, 'engine') and self.app.engine:
+            self.app.engine.seek(earliest)
+
+        # Start playback so the user hears the automation in context
+        if hasattr(self.app, '_on_play'):
+            self.app._on_play()
 
     def _snap(self, beat):
         """Snap beat position to grid."""

@@ -5,6 +5,7 @@ from PySide6.QtCore import Qt, QRect, QPoint
 from PySide6.QtGui import QPainter, QColor, QPen, QFont
 
 from ..state import PALETTE, vel_color
+from ..clipboard import BeatGridClipboard
 
 
 class BeatGrid(QFrame):
@@ -17,6 +18,8 @@ class BeatGrid(QFrame):
         super().__init__(parent)
         self.app = app
         self.state = app.state
+        self._clipboard = BeatGridClipboard()
+        self._selected_cells: set = set()  # set of (row, col) tuples
         self._build()
 
     def _build(self):
@@ -77,6 +80,114 @@ class BeatGrid(QFrame):
         self.lane_widget.update()
         self.grid_widget.update_size()
         self.grid_widget.update()
+
+    # ------------------------------------------------------------------
+    # Clipboard / selection operations (called from App keyboard handlers)
+    # ------------------------------------------------------------------
+
+    def _get_all_active_cells(self):
+        """Return set of (row, col) for every active cell in the pattern."""
+        pat = self.state.find_beat_pattern(self.state.sel_beat_pat)
+        if not pat:
+            return set()
+        cells = set()
+        for row, inst in enumerate(self.state.beat_kit):
+            grid = pat.grid.get(inst.id)
+            if not grid:
+                continue
+            for col, vel in enumerate(grid):
+                if vel > 0:
+                    cells.add((row, col))
+        return cells
+
+    def _copy_to_clipboard(self):
+        """Copy all active cells in the pattern to the beat-grid clipboard."""
+        pat = self.state.find_beat_pattern(self.state.sel_beat_pat)
+        if not pat:
+            return
+        data = {}
+        min_col = None
+        for row, inst in enumerate(self.state.beat_kit):
+            grid = pat.grid.get(inst.id)
+            if not grid:
+                continue
+            active = [(col, vel) for col, vel in enumerate(grid) if vel > 0]
+            if active:
+                data[inst.id] = active
+                c = min(c for c, _ in active)
+                min_col = c if min_col is None else min(min_col, c)
+        self._clipboard.copy(data, min_col or 0)
+
+    def _cut_to_clipboard(self):
+        """Copy all active cells then clear them."""
+        self._copy_to_clipboard()
+        pat = self.state.find_beat_pattern(self.state.sel_beat_pat)
+        if not pat:
+            return
+        for inst in self.state.beat_kit:
+            grid = pat.grid.get(inst.id)
+            if grid:
+                for col in range(len(grid)):
+                    grid[col] = 0
+        self.state.notify('beat_grid_edit')
+        self.refresh()
+
+    def _paste_from_clipboard(self):
+        """Paste clipboard cells at column 0 (or their original offset)."""
+        data, col_offset = self._clipboard.paste()
+        if not data:
+            return
+        pat = self.state.find_beat_pattern(self.state.sel_beat_pat)
+        if not pat:
+            return
+        for inst_id, cells in data.items():
+            grid = pat.grid.get(inst_id)
+            if grid is None:
+                num_steps = int(pat.length * pat.subdivision)
+                pat.grid[inst_id] = [0] * num_steps
+                grid = pat.grid[inst_id]
+            for col, vel in cells:
+                target = col - col_offset  # relative paste
+                if 0 <= target < len(grid):
+                    grid[target] = vel
+        self.state.notify('beat_grid_edit')
+        self.refresh()
+
+    def _duplicate_pattern(self):
+        """Duplicate the beat pattern content by repeating it once."""
+        pat = self.state.find_beat_pattern(self.state.sel_beat_pat)
+        if not pat:
+            return
+        num_cols = int(pat.length * pat.subdivision)
+        for inst in self.state.beat_kit:
+            grid = pat.grid.get(inst.id)
+            if not grid:
+                continue
+            # Double the grid and copy first half into second half
+            new_grid = grid[:num_cols] + grid[:num_cols]
+            pat.grid[inst.id] = new_grid
+        pat.length = pat.length * 2
+        self.state.notify('beat_grid_edit')
+        self.refresh()
+
+    def _select_all(self):
+        """Select all active cells in the pattern."""
+        self._selected_cells = self._get_all_active_cells()
+        self.grid_widget.update()
+
+    def _delete_selected(self):
+        """Delete (clear) all active cells in the pattern."""
+        pat = self.state.find_beat_pattern(self.state.sel_beat_pat)
+        if not pat:
+            return
+        for inst in self.state.beat_kit:
+            grid = pat.grid.get(inst.id)
+            if grid:
+                for col in range(len(grid)):
+                    grid[col] = 0
+        self._selected_cells.clear()
+        self.state.notify('beat_grid_edit')
+        self.refresh()
 
 
 class LaneWidget(QWidget):

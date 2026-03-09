@@ -345,3 +345,47 @@ class NoteClipboard:
         """Clear clipboard."""
         self.notes = []
 
+
+# ============================================================================
+# BEAT GRID CLIPBOARD
+# ============================================================================
+
+class BeatGridClipboard:
+    """Manages clipboard operations for beat grid patterns.
+
+    Stores a dict mapping instrument id to a list of (col_index, velocity) pairs,
+    representing the selected cells that were copied.
+    """
+
+    def __init__(self):
+        self.data: Optional[dict] = None  # {inst_id: [(col, vel), ...]}
+        self.col_offset: int = 0  # leftmost column in the copied region
+
+    def copy(self, grid_data: dict, col_offset: int):
+        """Copy beat grid cells.
+
+        Args:
+            grid_data: {inst_id: [(col, vel), ...]} for active cells
+            col_offset: the leftmost column index in the selection
+        """
+        if not grid_data:
+            return
+        self.data = {k: list(v) for k, v in grid_data.items()}
+        self.col_offset = col_offset
+
+    def paste(self):
+        """Return a copy of the clipboard data.
+
+        Returns:
+            (grid_data, col_offset) or (None, 0) if empty.
+        """
+        if not self.data:
+            return None, 0
+        return {k: list(v) for k, v in self.data.items()}, self.col_offset
+
+    def has_data(self) -> bool:
+        return self.data is not None and len(self.data) > 0
+
+    def clear(self):
+        self.data = None
+

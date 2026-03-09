@@ -12,7 +12,10 @@ Hard-coded values that are plausible candidates to move here in the future:
 """
 
 import json
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 CONFIG_PATH = Path.home() / '.config' / 'arranger' / 'settings.json'
 
@@ -56,7 +59,27 @@ class Settings:
             self.audio_backend = str(d.get('audio_backend', self.audio_backend))
             self.server_address = str(d.get('server_address', self.server_address))
         except Exception:
-            pass  # keep defaults on any parse error
+            logger.exception("Failed to load settings from %s, using defaults", self.path)
+        self._validate()
+
+    def _validate(self):
+        """Clamp settings to valid ranges, logging warnings for bad values."""
+        if self.sample_rate not in (22050, 44100, 48000, 88200, 96000):
+            logger.warning("Invalid sample_rate %s, falling back to %d",
+                           self.sample_rate, DEFAULTS['sample_rate'])
+            self.sample_rate = DEFAULTS['sample_rate']
+        if not (32 <= self.block_size <= 8192):
+            logger.warning("Invalid block_size %s, falling back to %d",
+                           self.block_size, DEFAULTS['audio_block_size'])
+            self.block_size = DEFAULTS['audio_block_size']
+        if self.audio_backend not in ('binding', 'server', 'fluidsynth'):
+            logger.warning("Invalid audio_backend '%s', falling back to '%s'",
+                           self.audio_backend, DEFAULTS['audio_backend'])
+            self.audio_backend = DEFAULTS['audio_backend']
+        if self.autosave_interval < 0:
+            self.autosave_interval = DEFAULTS['autosave_interval']
+        if self.sf2_path and not Path(self.sf2_path).exists():
+            logger.warning("SF2 path does not exist: %s", self.sf2_path)
 
     def save(self):
         """Persist current settings to the user config file."""
@@ -73,4 +96,4 @@ class Settings:
                     'server_address': self.server_address,
                 }, f, indent=2)
         except Exception:
-            pass  # non-fatal if we can't write
+            logger.exception("Failed to save settings to %s", self.path)

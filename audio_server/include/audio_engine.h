@@ -160,7 +160,7 @@ private:
     // Loop state (written by main, read by audio — via command queue)
     struct LoopState { double start = 0; double end = 0; bool enabled = false; };
     std::atomic<LoopState*>  pending_loop_ { nullptr };
-    LoopState*               active_loop_  { nullptr };
+    LoopState                active_loop_;  // audio-thread-only value copy
 
     // Simple command queue (same pattern as Python engine)
     enum class Cmd { Play, Stop, Seek, AllNotesOff, SetParam };

@@ -10,6 +10,7 @@ Key design constraints:
 
 from __future__ import annotations
 
+import logging
 import threading
 from dataclasses import dataclass
 from typing import Protocol, Optional
@@ -20,6 +21,8 @@ try:
     from .settings import Settings
 except ImportError:
     from settings import Settings
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +134,7 @@ class FluidSynthInstrument:
         try:
             self.fs.delete()
         except Exception:
-            pass
+            logger.debug("FluidSynth cleanup error (non-fatal)", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -918,7 +921,7 @@ class AudioEngine:
                 self._stream.stop()
                 self._stream.close()
             except Exception:
-                pass
+                logger.debug("Stream shutdown error (non-fatal)", exc_info=True)
             self._stream = None
             self._stream_active = False
         if self._instrument:

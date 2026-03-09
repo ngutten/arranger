@@ -132,23 +132,62 @@ def render_curve_samples(points: List[Tuple[float, float, str]],
 def simplify_curve(points: List[Tuple[float, float, str]],
                    tolerance: float = 0.01) -> List[Tuple[float, float, str]]:
     """Simplify a curve by removing redundant points.
-    
+
     Args:
         points: List of (time, value, curve_type) tuples
         tolerance: Maximum allowed deviation from original curve
-    
+
     Returns:
         Simplified list of points with redundant points removed
-    
+
     Uses Ramer-Douglas-Peucker algorithm for line simplification.
     Useful for cleaning up recorded automation or dense curves.
     """
     if len(points) <= 2:
         return points
-    
-    # TODO: Implement RDP algorithm if needed for curve simplification
-    # For now, just return the original points
-    return points
+
+    return _rdp(points, tolerance)
+
+
+def _rdp(points: List[Tuple[float, float, str]],
+         tolerance: float) -> List[Tuple[float, float, str]]:
+    """Ramer-Douglas-Peucker line simplification.
+
+    Operates on the (time, value) coordinates of the points, preserving
+    the curve_type attribute from the original point.
+    """
+    if len(points) <= 2:
+        return list(points)
+
+    # Find the point with maximum perpendicular distance from the line
+    # connecting the first and last points.
+    t0, v0, _ = points[0]
+    t1, v1, _ = points[-1]
+    dt = t1 - t0
+    dv = v1 - v0
+    line_len_sq = dt * dt + dv * dv
+
+    max_dist = 0.0
+    max_idx = 0
+
+    for i in range(1, len(points) - 1):
+        ti, vi, _ = points[i]
+        if line_len_sq < 1e-18:
+            # Start and end coincide — use Euclidean distance to the point
+            dist = ((ti - t0) ** 2 + (vi - v0) ** 2) ** 0.5
+        else:
+            # Perpendicular distance from point to line
+            dist = abs(dv * (t0 - ti) - dt * (v0 - vi)) / (line_len_sq ** 0.5)
+        if dist > max_dist:
+            max_dist = dist
+            max_idx = i
+
+    if max_dist > tolerance:
+        left = _rdp(points[:max_idx + 1], tolerance)
+        right = _rdp(points[max_idx:], tolerance)
+        return left[:-1] + right
+    else:
+        return [points[0], points[-1]]
 
 
 def resample_curve(points: List[Tuple[float, float, str]],

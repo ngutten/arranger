@@ -5,6 +5,7 @@
 #include "nlohmann/json.hpp"
 
 #include <portaudio.h>
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
 #include <cassert>
@@ -139,17 +140,28 @@ std::string AudioEngine::open() {
     scratch_L_.resize(MAX_BLOCK_SIZE);
     scratch_R_.resize(MAX_BLOCK_SIZE);
 
-    Pa_StartStream(static_cast<PaStream*>(stream_));
+    PaError start_err = Pa_StartStream(static_cast<PaStream*>(stream_));
+    if (start_err != paNoError) {
+        fprintf(stderr, "[AudioEngine] Pa_StartStream warning: %s\n",
+                Pa_GetErrorText(start_err));
+    }
     return {};
 }
 
 void AudioEngine::close() {
     stop();
     if (stream_) {
-        Pa_StopStream(static_cast<PaStream*>(stream_));
-        Pa_CloseStream(static_cast<PaStream*>(stream_));
+        PaError err;
+        err = Pa_StopStream(static_cast<PaStream*>(stream_));
+        if (err != paNoError)
+            fprintf(stderr, "[AudioEngine] Pa_StopStream: %s\n", Pa_GetErrorText(err));
+        err = Pa_CloseStream(static_cast<PaStream*>(stream_));
+        if (err != paNoError)
+            fprintf(stderr, "[AudioEngine] Pa_CloseStream: %s\n", Pa_GetErrorText(err));
         stream_ = nullptr;
     }
+    // Free any pending loop state
+    delete pending_loop_.exchange(nullptr, std::memory_order_relaxed);
     // Stop the audio thread from seeing either graph before we free them
     active_graph_.store(nullptr, std::memory_order_release);
     if (owned_graph_) {
@@ -326,14 +338,12 @@ void AudioEngine::seek(double beat) {
 
 void AudioEngine::set_loop(double start, double end) {
     auto* ls = new LoopState{start, end, true};
-    auto* old = pending_loop_.exchange(ls, std::memory_order_acq_rel);
-    delete old;
+    delete pending_loop_.exchange(ls, std::memory_order_acq_rel);
 }
 
 void AudioEngine::disable_loop() {
     auto* ls = new LoopState{0, 0, false};
-    auto* old = pending_loop_.exchange(ls, std::memory_order_acq_rel);
-    delete old;
+    delete pending_loop_.exchange(ls, std::memory_order_acq_rel);
 }
 
 void AudioEngine::set_param(const std::string& nid, const std::string& param, float val) {
@@ -570,12 +580,12 @@ void AudioEngine::process_block(float* L, float* R, int frames) {
         cmd_queue_.clear();
     }
 
-    // Check for pending loop state
+    // Check for pending loop state — copy by value to avoid use-after-free
     {
         LoopState* ls = pending_loop_.exchange(nullptr, std::memory_order_acq_rel);
         if (ls) {
-            delete active_loop_;
-            active_loop_ = ls;
+            active_loop_ = *ls;
+            delete ls;
         }
     }
 
@@ -667,10 +677,10 @@ void AudioEngine::process_block(float* L, float* R, int frames) {
 
     // Loop / end-of-arrangement
     double arr_len = dispatcher_.arrangement_length();
-    if (active_loop_ && active_loop_->enabled) {
-        if (end_beat >= active_loop_->end) {
-            dispatcher_.seek(active_loop_->start);
-            current_beat_.store(active_loop_->start, std::memory_order_relaxed);
+    if (active_loop_.enabled) {
+        if (end_beat >= active_loop_.end) {
+            dispatcher_.seek(active_loop_.start);
+            current_beat_.store(active_loop_.start, std::memory_order_relaxed);
         }
     } else if (arr_len > 0 && end_beat >= arr_len) {
         playing_.store(false, std::memory_order_relaxed);
@@ -713,8 +723,12 @@ std::vector<float> AudioEngine::render_offline(float tail_seconds, double durati
     // Pa_StopStream waits for the current callback to finish before returning.
     bool stream_was_running = stream_ != nullptr;
     double saved_beat = current_beat_.load(std::memory_order_relaxed);
-    if (stream_was_running)
-        Pa_StopStream(static_cast<PaStream*>(stream_));
+    if (stream_was_running) {
+        PaError stop_err = Pa_StopStream(static_cast<PaStream*>(stream_));
+        if (stop_err != paNoError)
+            fprintf(stderr, "[AudioEngine] render_offline Pa_StopStream: %s\n",
+                    Pa_GetErrorText(stop_err));
+    }
 
     std::vector<float> output;
     output.reserve(total_frames * 2);
@@ -764,7 +778,10 @@ std::vector<float> AudioEngine::render_offline(float tail_seconds, double durati
     if (stream_was_running) {
         dispatcher_.seek(saved_beat);
         current_beat_.store(saved_beat, std::memory_order_relaxed);
-        Pa_StartStream(static_cast<PaStream*>(stream_));
+        PaError resume_err = Pa_StartStream(static_cast<PaStream*>(stream_));
+        if (resume_err != paNoError)
+            fprintf(stderr, "[AudioEngine] render_offline Pa_StartStream: %s\n",
+                    Pa_GetErrorText(resume_err));
     }
 
     return output;

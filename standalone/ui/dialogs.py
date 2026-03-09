@@ -1,10 +1,14 @@
 """Modal dialogs for the standalone arranger."""
 
-from PySide6.QtWidgets import (QDialog, QLabel, QLineEdit, QSpinBox, QComboBox, 
+import logging
+
+from PySide6.QtWidgets import (QDialog, QLabel, QLineEdit, QSpinBox, QComboBox,
                                 QPushButton, QVBoxLayout, QHBoxLayout, QFormLayout)
 from PySide6.QtCore import Qt
 
 from ..state import NOTE_NAMES, SCALES, PALETTE
+
+logger = logging.getLogger(__name__)
 
 
 class PatternDialog(QDialog):
@@ -406,13 +410,13 @@ class ConfigDialog(QDialog):
                 try:
                     self.app.engine.load_sf2(self._sf2_path)
                 except Exception:
-                    pass
+                    logger.exception("Failed to load SF2: %s", self._sf2_path)
                 try:
                     from ..core.sf2 import SF2Info
                     self.app.state.sf2 = SF2Info(self._sf2_path)
                     self.app.state.notify('sf2_loaded')
                 except Exception:
-                    pass
+                    logger.exception("Failed to parse SF2 info: %s", self._sf2_path)
 
         # Notify app so Rec button can update its enabled state
         if hasattr(self.app, '_on_config_changed'):

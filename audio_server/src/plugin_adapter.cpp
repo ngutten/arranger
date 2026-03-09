@@ -3,6 +3,7 @@
 
 #include "plugin_adapter.h"
 #include "debug.h"
+#include <cassert>
 #include <cstring>
 #include <algorithm>
 
@@ -211,13 +212,16 @@ void PluginAdapterNode::process(
 
         switch (pd.type) {
         case PluginPortType::AudioMono: {
+            assert(audio_map_i < static_cast<int>(buffers_.audio.entries.size()));
             auto& ab = buffers_.audio.entries[audio_map_i].second;
             ab.frames = ctx.block_size;
             if (is_out) {
+                assert(out_i < static_cast<int>(outputs.size()));
                 ab.left = outputs[out_i++].audio;
                 ab.right = nullptr;
                 std::memset(ab.left, 0, ctx.block_size * sizeof(float));
             } else {
+                assert(in_i < static_cast<int>(inputs.size()));
                 ab.left = const_cast<float*>(inputs[in_i++].audio);
                 ab.right = nullptr;
             }
@@ -225,14 +229,17 @@ void PluginAdapterNode::process(
             break;
         }
         case PluginPortType::AudioStereo: {
+            assert(audio_map_i < static_cast<int>(buffers_.audio.entries.size()));
             auto& ab = buffers_.audio.entries[audio_map_i].second;
             ab.frames = ctx.block_size;
             if (is_out) {
+                assert(out_i + 1 < static_cast<int>(outputs.size()) + 1);
                 ab.left  = outputs[out_i++].audio;
                 ab.right = outputs[out_i++].audio;
                 std::memset(ab.left,  0, ctx.block_size * sizeof(float));
                 std::memset(ab.right, 0, ctx.block_size * sizeof(float));
             } else {
+                assert(in_i + 1 < static_cast<int>(inputs.size()) + 1);
                 ab.left  = const_cast<float*>(inputs[in_i++].audio);
                 ab.right = const_cast<float*>(inputs[in_i++].audio);
             }
@@ -240,11 +247,13 @@ void PluginAdapterNode::process(
             break;
         }
         case PluginPortType::Control: {
+            assert(ctrl_map_i < static_cast<int>(buffers_.control.entries.size()));
             auto& cb = buffers_.control.entries[ctrl_map_i].second;
             if (is_out) {
                 cb.value = 0.0f;
                 out_i++;
             } else {
+                assert(in_i < static_cast<int>(inputs.size()));
                 cb.value = inputs[in_i++].control;
                 if (control_map_[ctrl_map_i].has_pending &&
                     !control_map_[ctrl_map_i].is_connected) {
@@ -265,6 +274,7 @@ void PluginAdapterNode::process(
     // Wire event buffers
     int evt_out_i = 0;
     for (size_t i = 0; i < event_map_.size(); ++i) {
+        assert(i < buffers_.events.entries.size());
         auto& eb = buffers_.events.entries[i].second;
         if (event_map_[i].is_output) {
             event_output_storage_[evt_out_i].second.clear();
