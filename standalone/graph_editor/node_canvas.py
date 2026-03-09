@@ -1099,48 +1099,6 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable):
 
         return w
 
-    if t == "sampler":
-        w = QWidget(parent)
-        w.setStyleSheet("background: transparent; color: #ccc;")
-        lay = QFormLayout(w)
-        lay.setContentsMargins(4, 2, 4, 2)
-        lay.setSpacing(3)
-
-        # Sample file picker
-        smp_row = QWidget()
-        smp_lay = QHBoxLayout(smp_row)
-        smp_lay.setContentsMargins(0, 0, 0, 0)
-        smp_lay.setSpacing(3)
-        smp_edit = QLineEdit(node.params.get("sample_path", ""))
-        smp_edit.setPlaceholderText("Sample file…")
-        smp_edit.setReadOnly(True)
-        smp_edit.setStyleSheet("color: #aaa; background: #0d1117; border: 1px solid #2a3a5c;")
-        smp_lay.addWidget(smp_edit)
-        browse_btn = QPushButton("…")
-        browse_btn.setMaximumWidth(24)
-        browse_btn.setStyleSheet("background: #1a2236; color: #ccc;")
-
-        def _browse_smp():
-            from PySide6.QtWidgets import QFileDialog
-            import os
-            samples_dir = str(
-                __import__('pathlib').Path(__file__).parent.parent / 'samples'
-            )
-            path, _ = QFileDialog.getOpenFileName(
-                w, "Select Sample", samples_dir,
-                "Audio (*.wav *.ogg *.flac *.aif *.aiff)",
-                options=QFileDialog.Option.DontUseNativeDialog)
-            if path:
-                smp_edit.setText(path)
-                on_change(node.node_id, "sample_path", path)
-        browse_btn.clicked.connect(_browse_smp)
-        smp_lay.addWidget(browse_btn)
-        lay.addRow(QLabel("File:"), smp_row)
-
-        # ADSR and root_note are now control ports — visible as knobs on the node.
-        # No duplicate spinboxes needed here.
-        return w
-
     if t in ("mixer", "output"):
         w = QWidget(parent)
         w.setStyleSheet("background: transparent; color: #ccc;")

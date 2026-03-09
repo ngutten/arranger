@@ -2,7 +2,7 @@
 
 from PySide6.QtWidgets import (QFrame, QWidget, QScrollArea, QLabel, QPushButton,
                                 QLineEdit, QSpinBox, QComboBox, QSlider, QListWidget,
-                                QVBoxLayout, QHBoxLayout, QGroupBox)
+                                QCheckBox, QVBoxLayout, QHBoxLayout, QGroupBox)
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPainter, QColor, QFont
 
@@ -518,6 +518,14 @@ class TrackPanel(QFrame):
         vel_layout.addWidget(vel_num)
         det_layout.addLayout(vel_layout)
 
+        # Split routing
+        route_cb = QCheckBox('Route separately')
+        route_cb.setFont(QFont('TkDefaultFont', 7))
+        route_cb.setChecked(inst.split_routing)
+        route_cb.toggled.connect(
+            lambda v, inst=inst: self._toggle_split_routing(inst, v))
+        det_layout.addWidget(route_cb)
+
         widget_layout.addWidget(det_frame)
         
         # Store collapsed state on widget itself
@@ -586,6 +594,12 @@ class TrackPanel(QFrame):
     def _update_inst(self, inst, key, value):
         setattr(inst, key, value)
         self.state.notify('beat_kit')
+
+    def _toggle_split_routing(self, inst, value):
+        inst.split_routing = value
+        self.state.notify('beat_kit')
+        if hasattr(self.app, 'engine') and self.app.engine:
+            self.app.engine.mark_dirty()
 
     def _update_inst_bank_and_refresh(self, inst, bank):
         """Update bank and refresh to reload program dropdown."""

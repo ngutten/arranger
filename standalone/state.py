@@ -377,13 +377,17 @@ class BeatInstrument:
     program: int = 0
     pitch: int = 36
     velocity: int = 100
+    split_routing: bool = False
 
     def to_dict(self):
-        return {
+        d = {
             'id': self.id, 'name': self.name, 'channel': self.channel,
             'bank': self.bank, 'program': self.program,
             'pitch': self.pitch, 'velocity': self.velocity,
         }
+        if self.split_routing:
+            d['split_routing'] = True
+        return d
 
     @staticmethod
     def from_dict(d):
@@ -391,6 +395,7 @@ class BeatInstrument:
             id=d['id'], name=d['name'], channel=d.get('channel', 9),
             bank=d.get('bank', 0), program=d.get('program', 0),
             pitch=d.get('pitch', 36), velocity=d.get('velocity', 100),
+            split_routing=d.get('split_routing', False),
         )
 
 

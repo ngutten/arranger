@@ -111,6 +111,16 @@ def _build_graph(state, sf2_path: Optional[str]) -> dict:
             "to_node":   "synth",        "to_port":   "events_in",
         })
 
+    # Per-instrument source nodes for split-routed beat instruments
+    for inst in state.beat_kit:
+        if inst.split_routing:
+            nid = f"beat_inst_{inst.id}"
+            nodes.append({"id": nid, "type": "track_source"})
+            connections.append({
+                "from_node": nid, "from_port": "events_out",
+                "to_node":   "synth", "to_port": "events_in",
+            })
+
     synth_node = {"id": "synth", "type": "fluidsynth" if sf2_path else "sine"}
     if sf2_path:
         synth_node["sf2_path"] = sf2_path
@@ -211,7 +221,6 @@ def _build_server_schedule(state) -> list[dict]:
         if not bt or not bpat:
             continue
 
-        node_id = f"track_{bt.id}"
         reps = bp.repeats or 1
 
         for inst in state.beat_kit:
@@ -219,6 +228,7 @@ def _build_server_schedule(state) -> list[dict]:
             if not grid:
                 continue
             ch = inst.channel & 0x0F
+            node_id = f"beat_inst_{inst.id}" if inst.split_routing else f"track_{bt.id}"
 
             # GM convention: channel 9 drum kits live at bank 128 in most SF2
             # files, matching FluidSynthInstrument.set_program's remap logic.
@@ -407,10 +417,12 @@ class BindingEngine:
     # ------------------------------------------------------------------
 
     def _current_track_ids(self) -> frozenset:
-        return frozenset(
-            [t.id for t in self.state.tracks] +
-            [bt.id for bt in self.state.beat_tracks]
-        )
+        ids = ([t.id for t in self.state.tracks] +
+               [bt.id for bt in self.state.beat_tracks])
+        for inst in self.state.beat_kit:
+            if inst.split_routing:
+                ids.append(f"beat_inst_{inst.id}")
+        return frozenset(ids)
 
     def _graph_payload(self) -> dict:
         if self.state.signal_graph is not None:
@@ -539,6 +551,8 @@ class BindingEngine:
 
     def _source_node_for(self, track_id, channel: int) -> str:
         if track_id is not None:
+            if isinstance(track_id, str) and track_id.startswith("beat_inst_"):
+                return track_id
             return f"track_{track_id}"
         for t in self.state.tracks:
             if (t.channel & 0x0F) == channel:

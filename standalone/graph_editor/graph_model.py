@@ -759,6 +759,11 @@ class GraphModel:
             [f"track_{t.id}" for t in state.tracks] +
             [f"track_{bt.id}" for bt in state.beat_tracks]
         )
+        # Include split-routed beat instrument nodes
+        for inst in state.beat_kit:
+            if inst.split_routing:
+                current_ids.add(f"beat_inst_{inst.id}")
+
         existing_ids = {n.node_id for n in self.nodes if n.node_type == "track_source"}
         for nid in existing_ids - current_ids:
             self.remove_node(nid)
@@ -766,6 +771,25 @@ class GraphModel:
             self.add_track_source(t.id, t.name, sf2_path)
         for bt in state.beat_tracks:
             self.add_track_source(bt.id, bt.name, sf2_path)
+        # Add per-instrument source nodes
+        for inst in state.beat_kit:
+            if inst.split_routing:
+                nid = f"beat_inst_{inst.id}"
+                if not self.get_node(nid):
+                    existing = [n for n in self.nodes if n.node_type == "track_source"]
+                    node = GraphNode(
+                        node_type="track_source",
+                        node_id=nid,
+                        display_name=inst.name,
+                        x=40, y=40 + len(existing) * 70,
+                    )
+                    self.add_node(node)
+                    target = self.default_synth()
+                    if target:
+                        self.add_connection(GraphConnection(
+                            from_node=nid, from_port="events_out",
+                            to_node=target.node_id, to_port="events_in",
+                        ))
 
     def sync_pattern_sources(self, state) -> None:
         """Regenerate _pattern_data for all pattern source nodes from live state.

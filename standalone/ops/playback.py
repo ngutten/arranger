@@ -60,11 +60,12 @@ def play_beat_hit(state, engine, player, inst_id):
     if engine:
         bt = next(iter(state.beat_tracks), None)
         if bt is not None:
+            track_id = f"beat_inst_{inst.id}" if inst.split_routing else bt.id
             if inst.channel != 9:
                 engine.set_channel_program(inst.channel, inst.bank, inst.program)
             engine.play_single_note(inst.pitch, inst.velocity,
                                     inst.channel, duration=0.5,
-                                    track_id=bt.id)
+                                    track_id=track_id)
             return
         # No beat track yet (pattern being edited before placement) —
         # fall through to legacy path below.
