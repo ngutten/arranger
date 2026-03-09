@@ -344,6 +344,7 @@ std::unique_ptr<Node> make_node(const NodeDesc& desc, std::string& err) {
     // Translate legacy short type names to canonical plugin IDs
     std::string canonical_type = desc.type;
     if (canonical_type == "fluidsynth") canonical_type = "builtin.fluidsynth";
+    if (canonical_type == "ddsp") canonical_type = "builtin.ddsp";
     if (canonical_type == "control_source") canonical_type = "builtin.control_source";
 
     // --- Try plugin registry first ---

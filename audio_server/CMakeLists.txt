@@ -545,6 +545,43 @@ if(ENABLE_DIFFSINGER)
 endif()
 
 # ---------------------------------------------------------------------------
+# DDSP neural synthesizer plugin (ONNX Runtime) — optional
+# ---------------------------------------------------------------------------
+option(ENABLE_DDSP "Build DDSP neural synthesizer plugin (requires onnxruntime)" ON)
+if(ENABLE_DDSP)
+    # Reuse ONNXRUNTIME_FOUND from DiffSinger detection, or find it ourselves
+    if(NOT ONNXRUNTIME_FOUND)
+        pkg_check_modules(ONNXRUNTIME libonnxruntime QUIET)
+        if(NOT ONNXRUNTIME_FOUND)
+            find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h
+                HINTS ${ONNXRUNTIME_ROOT}/include /usr/include/onnxruntime
+                      /usr/local/include/onnxruntime
+                PATH_SUFFIXES onnxruntime/core/session core/session)
+            find_library(ONNXRUNTIME_LIBRARY NAMES onnxruntime
+                HINTS ${ONNXRUNTIME_ROOT}/lib /usr/lib /usr/local/lib)
+            if(ONNXRUNTIME_INCLUDE_DIR AND ONNXRUNTIME_LIBRARY)
+                set(ONNXRUNTIME_FOUND TRUE)
+                set(ONNXRUNTIME_LIBRARIES ${ONNXRUNTIME_LIBRARY})
+                set(ONNXRUNTIME_INCLUDE_DIRS ${ONNXRUNTIME_INCLUDE_DIR})
+            endif()
+        endif()
+    endif()
+
+    if(ONNXRUNTIME_FOUND)
+        message(STATUS "DDSP: enabled (onnxruntime)")
+        plugin_library(ddsp
+            SOURCES plugins/builtin/ddsp_plugin.cpp
+            LINK_LIBRARIES ${ONNXRUNTIME_LIBRARIES}
+            INCLUDE_DIRECTORIES ${ONNXRUNTIME_INCLUDE_DIRS}
+            LIBRARY_DIRECTORIES ${ONNXRUNTIME_LIBRARY_DIRS})
+        target_compile_definitions(arranger_plugin_ddsp PRIVATE AS_ENABLE_DDSP)
+        add_dependencies(audio_server_lib arranger_plugin_ddsp)
+    else()
+        message(STATUS "DDSP: DISABLED — onnxruntime not found")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
 install(DIRECTORY "${CMAKE_SOURCE_DIR}/../plugins/"
