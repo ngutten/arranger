@@ -400,6 +400,8 @@ plugin_library(midi_capture SOURCES plugins/builtin/midi_capture_plugin.cpp)
 
 plugin_library(microtonal_mapper SOURCES plugins/builtin/microtonal_mapper_plugin.cpp)
 
+plugin_library(note_invert SOURCES plugins/builtin/note_invert_plugin.cpp)
+
 # --- Sampler (libsndfile for audio I/O) ---
 if(ENABLE_SNDFILE)
     plugin_library(sampler
@@ -439,6 +441,7 @@ add_dependencies(audio_server_lib
     arranger_plugin_shepard_tone    
     arranger_plugin_midi_capture
     arranger_plugin_microtonal_mapper
+    arranger_plugin_note_invert
     arranger_plugin_pattern_stamper
 )
 
