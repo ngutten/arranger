@@ -82,26 +82,26 @@ public:
                                    static_cast<uint8_t>(c)});
                 }
             } else {
-                out.push_back({0, static_cast<uint8_t>(0xB0 | (ch - 1)), 123, 0,
-                              static_cast<uint8_t>(ch - 1)});
+                out.push_back({0, static_cast<uint8_t>(0xB0 | (ch & 0x0F)), 123, 0,
+                              static_cast<uint8_t>(ch)});
             }
             pending_all_notes_off_ = false;
         }
 
         // Note offs
         for (const auto& [ch, pitch] : pending_note_offs_) {
-            out.push_back({0, static_cast<uint8_t>(0x80 | (ch - 1)),
+            out.push_back({0, static_cast<uint8_t>(0x80 | (ch & 0x0F)),
                           static_cast<uint8_t>(pitch), 0,
-                          static_cast<uint8_t>(ch - 1)});
+                          static_cast<uint8_t>(ch)});
         }
         pending_note_offs_.clear();
 
         // Note ons
         for (const auto& [ch, pitch, vel] : pending_note_ons_) {
-            out.push_back({0, static_cast<uint8_t>(0x90 | (ch - 1)),
+            out.push_back({0, static_cast<uint8_t>(0x90 | (ch & 0x0F)),
                           static_cast<uint8_t>(pitch),
                           static_cast<uint8_t>(vel),
-                          static_cast<uint8_t>(ch - 1)});
+                          static_cast<uint8_t>(ch)});
         }
         pending_note_ons_.clear();
 

@@ -1526,6 +1526,9 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
 
     # --- Control input ports ---
     for p in ctrl_inputs:
+        # Skip ports hidden by default (user can still wire them in the graph)
+        if not p.get("show_port_default", True):
+            continue
         pid = p.get("id", "")
         display = p.get("display_name", pid)
         hint = p.get("hint", "continuous")

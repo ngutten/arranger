@@ -402,6 +402,8 @@ plugin_library(microtonal_mapper SOURCES plugins/builtin/microtonal_mapper_plugi
 
 plugin_library(note_invert SOURCES plugins/builtin/note_invert_plugin.cpp)
 
+plugin_library(event_gate SOURCES plugins/builtin/event_gate_plugin.cpp)
+
 # --- Sampler (libsndfile for audio I/O) ---
 if(ENABLE_SNDFILE)
     plugin_library(sampler
@@ -442,6 +444,7 @@ add_dependencies(audio_server_lib
     arranger_plugin_midi_capture
     arranger_plugin_microtonal_mapper
     arranger_plugin_note_invert
+    arranger_plugin_event_gate
     arranger_plugin_pattern_stamper
 )
 

@@ -1,20 +1,23 @@
 // sampler_plugin.cpp
-// Sample-based synthesizer with TD-PSOLA pitch shifting for pitched content.
+// Sample-based synthesizer with multiple pitch-shifting algorithms.
 //
-// Pitch shifting strategy:
-//   - At load time, YIN F0 detection runs on the sample.
-//   - If a clear fundamental is detected: PSOLA is used for pitch-independent
-//     time preservation. No chipmunk effect.
-//   - If unvoiced/unpitched (drums, noise, etc.): falls back to variable-rate
-//     playback (original behavior), which is appropriate for percussive content.
+// Pitch shifting modes (configurable via pitch_mode):
+//   Spectral (default) – STFT bin relocation + phase accumulation + OLA.
+//                         Works for all content, preserves duration.
+//   WSOLA              – Waveform Similarity Overlap-Add (time-stretch + resample).
+//                         Good general-purpose, preserves duration.
+//   PSOLA              – TD-PSOLA with skip-repeats fix. Requires pitched content
+//                         (falls back to varrate if F0 not detected).
+//   Varrate            – Simple variable-rate playback. Changes duration with pitch.
 //
 // Polyphony: up to MAX_VOICES simultaneous voices (oldest stolen if exceeded).
-// Envelope: simple linear ADSR per voice.
+// Envelope: simple linear ADSR per voice (applied per-sample for all modes).
 //
 // Supported formats (via libsndfile): WAV, AIFF, OGG, FLAC.
 //
 // Config params:
 //   sample_path  – path to the audio file (string)
+//   pitch_mode   – pitch shifting algorithm (spectral/wsola/psola/varrate)
 //
 // Runtime ports:
 //   audio_out    – stereo audio output
@@ -42,13 +45,84 @@
 static constexpr int MAX_VOICES = 32;
 
 // ---------------------------------------------------------------------------
+// Spectral pitch-shift constants
+// ---------------------------------------------------------------------------
+static constexpr int SPECT_FFT_SIZE = 2048;
+static constexpr int SPECT_N_BINS   = SPECT_FFT_SIZE / 2 + 1;  // 1025
+static constexpr int SPECT_HOP      = 512;  // 4x overlap
+
+// ---------------------------------------------------------------------------
+// WSOLA constants
+// ---------------------------------------------------------------------------
+static constexpr int WSOLA_GRAIN_MS     = 60;    // grain size in ms
+static constexpr int WSOLA_SEARCH_MS    = 5;     // cross-correlation search ±ms
+
+// ---------------------------------------------------------------------------
+// Minimal radix-2 Cooley-Tukey FFT (in-place, complex interleaved)
+// ---------------------------------------------------------------------------
+static void fft_complex_inplace(float* data, int N, bool inverse) {
+    // Bit-reversal permutation
+    for (int i = 1, j = 0; i < N; ++i) {
+        int bit = N >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) {
+            std::swap(data[2*i],   data[2*j]);
+            std::swap(data[2*i+1], data[2*j+1]);
+        }
+    }
+    float sign = inverse ? 1.0f : -1.0f;
+    for (int len = 2; len <= N; len <<= 1) {
+        float ang = sign * 2.0f * static_cast<float>(M_PI) / len;
+        float wR = std::cos(ang), wI = std::sin(ang);
+        for (int i = 0; i < N; i += len) {
+            float curR = 1.0f, curI = 0.0f;
+            for (int j = 0; j < len / 2; ++j) {
+                int u = i + j, v = u + len / 2;
+                float tR = curR * data[2*v] - curI * data[2*v+1];
+                float tI = curR * data[2*v+1] + curI * data[2*v];
+                data[2*v]   = data[2*u]   - tR;
+                data[2*v+1] = data[2*u+1] - tI;
+                data[2*u]   += tR;
+                data[2*u+1] += tI;
+                float nR = curR * wR - curI * wI;
+                curI = curR * wI + curI * wR;
+                curR = nR;
+            }
+        }
+    }
+    if (inverse) {
+        float inv = 1.0f / static_cast<float>(N);
+        for (int i = 0; i < 2 * N; ++i) data[i] *= inv;
+    }
+}
+
+// IRFFT: magnitude + phase arrays → real output.
+// scratch must be at least 2*N floats.
+static void irfft_mag_phase(const float* mag, const float* phase,
+                            float* output, float* scratch, int N) {
+    int n_bins = N / 2 + 1;
+    std::memset(scratch, 0, 2 * N * sizeof(float));
+    for (int k = 0; k < n_bins; ++k) {
+        scratch[2*k]   = mag[k] * std::cos(phase[k]);
+        scratch[2*k+1] = mag[k] * std::sin(phase[k]);
+    }
+    // Hermitian mirror for k > N/2
+    for (int k = 1; k < N / 2; ++k) {
+        scratch[2*(N-k)]   =  scratch[2*k];
+        scratch[2*(N-k)+1] = -scratch[2*k+1];
+    }
+    fft_complex_inplace(scratch, N, true);
+    for (int i = 0; i < N; ++i) output[i] = scratch[2*i];
+}
+
+// ---------------------------------------------------------------------------
 // YIN F0 detection (float version, for engine-rate samples)
 // ---------------------------------------------------------------------------
 
 static float yin_detect_f0_float(const float* pcm, int len, int sample_rate) {
     if (len < 256) return 0.0f;
 
-    // Skip leading/trailing silence
     constexpr float SILENCE_THRESH = 0.01f;
     int start = 0, end = len;
     while (start < len && std::abs(pcm[start]) < SILENCE_THRESH) ++start;
@@ -60,11 +134,10 @@ static float yin_detect_f0_float(const float* pcm, int len, int sample_rate) {
     int win_start = start + quarter;
     int win_len   = voiced_len - 2 * quarter;
 
-    int min_lag = std::max(1, sample_rate / 500);   // max F0 = 500 Hz
-    int max_lag = std::min(sample_rate / 60, win_len / 2);  // min F0 = 60 Hz
+    int min_lag = std::max(1, sample_rate / 500);
+    int max_lag = std::min(sample_rate / 60, win_len / 2);
     if (max_lag <= min_lag) return 0.0f;
 
-    // Difference function
     std::vector<float> d(max_lag + 1, 0.0f);
     int n = win_len - max_lag;
     for (int tau = 1; tau <= max_lag; ++tau) {
@@ -76,7 +149,6 @@ static float yin_detect_f0_float(const float* pcm, int len, int sample_rate) {
         d[tau] = sum;
     }
 
-    // Cumulative mean normalized difference
     std::vector<float> dn(max_lag + 1, 1.0f);
     float running = 0.0f;
     for (int tau = 1; tau <= max_lag; ++tau) {
@@ -84,7 +156,6 @@ static float yin_detect_f0_float(const float* pcm, int len, int sample_rate) {
         dn[tau] = (running > 0.0f) ? d[tau] * tau / running : 1.0f;
     }
 
-    // Absolute threshold
     constexpr float YIN_THRESHOLD = 0.15f;
     int best_tau = 0;
     for (int tau = min_lag; tau <= max_lag; ++tau) {
@@ -103,7 +174,6 @@ static float yin_detect_f0_float(const float* pcm, int len, int sample_rate) {
         if (best_val > 0.5f) return 0.0f;
     }
 
-    // Parabolic interpolation
     float refined_tau = static_cast<float>(best_tau);
     if (best_tau > 1 && best_tau < max_lag) {
         float a = dn[best_tau - 1];
@@ -129,7 +199,6 @@ static std::vector<int> find_pitch_marks_float(const float* pcm, int len,
     int period = static_cast<int>(std::round(static_cast<float>(sr) / f0));
     if (period < 2) return marks;
 
-    // Determine dominant polarity
     int check_len = std::min(len, period * 4);
     double pos_sum = 0, neg_sum = 0;
     for (int i = 0; i < check_len; ++i) {
@@ -138,7 +207,6 @@ static std::vector<int> find_pitch_marks_float(const float* pcm, int len,
     }
     float sign = (pos_sum >= neg_sum) ? 1.0f : -1.0f;
 
-    // Find first peak of chosen polarity
     int search_end = std::min(period, len);
     int best_pos = 0;
     float best_val = 0.0f;
@@ -148,7 +216,6 @@ static std::vector<int> find_pitch_marks_float(const float* pcm, int len,
     }
     marks.push_back(best_pos);
 
-    // Subsequent marks: ±15% search window, same polarity
     while (true) {
         int expected = marks.back() + period;
         if (expected >= len) break;
@@ -170,6 +237,26 @@ static std::vector<int> find_pitch_marks_float(const float* pcm, int len,
 }
 
 // ---------------------------------------------------------------------------
+// Pitch mode enum
+// ---------------------------------------------------------------------------
+
+enum class PitchMode { Spectral = 0, WSOLA = 1, PSOLA = 2, Varrate = 3 };
+
+// ---------------------------------------------------------------------------
+// Precomputed spectral bank (computed at sample load time)
+// ---------------------------------------------------------------------------
+
+struct SpectralBank {
+    int n_frames = 0;
+    // Frame-major: [frame * SPECT_N_BINS + bin]
+    std::vector<float> magnitudes;
+    std::vector<float> inst_freqs;
+    float bin_width  = 0.0f;
+    float ola_norm[SPECT_HOP] = {};
+    float window[SPECT_FFT_SIZE] = {};
+};
+
+// ---------------------------------------------------------------------------
 // Voice
 // ---------------------------------------------------------------------------
 
@@ -184,21 +271,46 @@ struct Voice {
     float    env      = 0.0f;
     float    env_rate = 0.0f;
 
-    // Variable-rate playback (unpitched fallback)
+    PitchMode mode = PitchMode::Spectral;
+
+    // Variable-rate playback
     double   pos      = 0.0;
     double   rate     = 1.0;
 
-    // PSOLA state (used when sample has detected F0)
-    bool     use_psola = false;
+    // PSOLA state
     double   synth_time     = 0.0;
     double   target_period  = 0.0;
-    double   analysis_time  = 0.0;   // position in source (sample-space)
-    double   analysis_period = 0.0;  // = sr / detected_f0
+    double   analysis_time  = 0.0;
+    double   analysis_period = 0.0;
     double   output_time    = 0.0;
+    int      last_mark_idx  = -1;   // for skip-repeats
 
     static constexpr int MAX_OVERLAP = 4096;
     float    overlap[MAX_OVERLAP] = {};
     int      overlap_len = 0;
+
+    // Spectral mode state
+    float    phase_acc[SPECT_N_BINS] = {};
+    float    ola_buf[SPECT_FFT_SIZE] = {};
+    float    spect_out_buf[SPECT_HOP] = {};
+    int      spect_out_avail = 0;
+    int      spect_out_read  = 0;
+    double   spect_frame_pos = 0.0;
+    float    irfft_scratch[2 * SPECT_FFT_SIZE] = {};
+
+    // WSOLA state
+    //   wsola_ts_buf: circular time-stretched output buffer
+    //   Source is read at rate 1.0 (preserving time), grains overlap-added.
+    //   Output is resampled from ts_buf at v.rate to shift pitch.
+    static constexpr int WSOLA_BUF_SIZE = 16384;
+    float    wsola_ts_buf[WSOLA_BUF_SIZE] = {};
+    int      wsola_ts_write = 0;     // write position in ts_buf
+    double   wsola_ts_read  = 0.0;   // fractional read position in ts_buf
+    double   wsola_src_pos  = 0.0;   // read position in source sample
+    int      wsola_grain_size = 0;
+    int      wsola_hop       = 0;
+    int      wsola_search    = 0;
+    int      wsola_produced  = 0;    // total samples produced into ts_buf
 };
 
 // ---------------------------------------------------------------------------
@@ -215,12 +327,13 @@ public:
         d.display_name = "Sampler";
         d.category     = "Synth";
         d.doc =
-            "Sample-based synthesizer with TD-PSOLA pitch shifting for pitched "
-            "samples (preserves duration independently of pitch). Falls back to "
-            "variable-rate playback for unpitched content (drums, noise). "
+            "Sample-based synthesizer with multiple pitch-shifting algorithms. "
+            "Spectral (default) works for all content and preserves duration. "
+            "WSOLA is a waveform-based alternative. PSOLA uses pitch detection. "
+            "Varrate is simple resampling (changes duration). "
             "Supports WAV, AIFF, OGG, FLAC (via libsndfile).";
         d.author  = "builtin";
-        d.version = 2;
+        d.version = 3;
 
         d.ports = {
             { "events_in", "Events In", "MIDI event input.",
@@ -231,9 +344,11 @@ public:
               PluginPortType::Control, PortRole::Input,
               ControlHint::Continuous, 1.0f, 0.0f, 2.0f },
             { "root_note", "Root Note",
-              "MIDI note number played at original pitch (0-127). Default 60 = C4.",
+              "MIDI note number played at original pitch (0-127). "
+              "Auto-detected from sample when possible.",
               PluginPortType::Control, PortRole::Input,
-              ControlHint::Integer, 60.0f, 0.0f, 127.0f, 1.0f },
+              ControlHint::Integer, 60.0f, 0.0f, 127.0f, 1.0f,
+              {}, "", false },
             { "attack",  "Attack (s)",  "Envelope attack time in seconds.",
               PluginPortType::Control, PortRole::Input,
               ControlHint::Continuous, 0.01f, 0.0f, 4.0f },
@@ -253,6 +368,14 @@ public:
               "Path to the audio file to load (WAV, AIFF, OGG, FLAC).",
               ConfigType::FilePath, "",
               "Audio Files (*.wav *.aiff *.aif *.ogg *.flac *.W64 *.w64);;All Files (*)" },
+            { "pitch_mode", "Pitch Mode",
+              "Algorithm for pitch shifting. Spectral works for all content and "
+              "preserves duration. "
+              "PSOLA uses pitch detection (falls back to Varrate for unpitched). "
+              "Varrate is simple resampling (changes duration with pitch).",
+              ConfigType::Categorical, "spectral", "",
+              false, false,
+              { "spectral", "psola", "varrate" } },
         };
 
         return d;
@@ -262,6 +385,11 @@ public:
         if (key == "sample_path") {
             pending_path_ = value;
             path_dirty_.store(true, std::memory_order_release);
+        } else if (key == "pitch_mode") {
+            if (value == "spectral")       pitch_mode_ = PitchMode::Spectral;
+            else if (value == "wsola")     pitch_mode_ = PitchMode::WSOLA;
+            else if (value == "psola")     pitch_mode_ = PitchMode::PSOLA;
+            else if (value == "varrate")   pitch_mode_ = PitchMode::Varrate;
         }
     }
 
@@ -280,6 +408,7 @@ public:
         sample_frames_ = 0;
         pitch_marks_.clear();
         detected_f0_ = 0.0f;
+        spectral_bank_ = SpectralBank{};
     }
 
     // -----------------------------------------------------------------------
@@ -300,8 +429,9 @@ public:
 
         int root = root_note_cached_.load();
         double semitones = static_cast<double>(pitch - root);
+        double freq_ratio = std::pow(2.0, semitones / 12.0);
 
-        *v = Voice{};  // reset all fields
+        *v = Voice{};
         v->active   = true;
         v->channel  = channel;
         v->pitch    = pitch;
@@ -311,21 +441,55 @@ public:
         float att = std::max(0.001f, att_cached_.load());
         v->env_rate = 1.0f / (att * sample_rate_);
 
-        if (detected_f0_ > 0.0f && pitch_marks_.size() >= 2) {
-            // PSOLA mode
-            v->use_psola = true;
-            float target_hz = 440.0f * std::pow(2.0f, (pitch - 69) / 12.0f);
-            v->target_period  = static_cast<double>(sample_rate_) / target_hz;
-            v->analysis_period = static_cast<double>(sample_rate_) / detected_f0_;
-            v->synth_time     = 0.0;
-            v->analysis_time  = 0.0;
-            v->output_time    = 0.0;
-            v->overlap_len    = 0;
-        } else {
-            // Variable-rate fallback
-            v->use_psola = false;
-            v->pos  = 0.0;
-            v->rate = std::pow(2.0, semitones / 12.0);
+        // Select mode with fallbacks
+        PitchMode mode = pitch_mode_;
+        if (mode == PitchMode::PSOLA &&
+                (detected_f0_ <= 0.0f || pitch_marks_.size() < 2))
+            mode = PitchMode::Varrate;
+        if (mode == PitchMode::Spectral && spectral_bank_.n_frames < 2)
+            mode = PitchMode::Varrate;
+
+        v->mode = mode;
+
+        switch (mode) {
+            case PitchMode::Spectral:
+                v->rate = freq_ratio;
+                v->spect_frame_pos = 0.0;
+                v->spect_out_avail = 0;
+                v->spect_out_read  = 0;
+                break;
+
+            case PitchMode::WSOLA: {
+                v->rate = freq_ratio;
+                v->wsola_src_pos   = 0.0;
+                v->wsola_ts_write  = 0;
+                v->wsola_ts_read   = 0.0;
+                v->wsola_produced  = 0;
+                int sr_i = static_cast<int>(sample_rate_);
+                v->wsola_grain_size = WSOLA_GRAIN_MS * sr_i / 1000;
+                v->wsola_hop        = v->wsola_grain_size / 2;
+                v->wsola_search     = WSOLA_SEARCH_MS * sr_i / 1000;
+                // Pre-fill some time-stretched content
+                _wsola_fill(v, v->wsola_grain_size * 4);
+                break;
+            }
+
+            case PitchMode::PSOLA: {
+                float target_hz = 440.0f * std::pow(2.0f, (pitch - 69) / 12.0f);
+                v->target_period   = static_cast<double>(sample_rate_) / target_hz;
+                v->analysis_period = static_cast<double>(sample_rate_) / detected_f0_;
+                v->synth_time      = 0.0;
+                v->analysis_time   = 0.0;
+                v->output_time     = 0.0;
+                v->overlap_len     = 0;
+                v->last_mark_idx   = -1;
+                break;
+            }
+
+            case PitchMode::Varrate:
+                v->pos  = 0.0;
+                v->rate = freq_ratio;
+                break;
         }
     }
 
@@ -377,7 +541,8 @@ public:
         };
 
         float gain     = std::max(0.0f, std::min(2.0f, ctrl("gain",    1.0f)));
-        int   root     = static_cast<int>(std::round(ctrl("root_note", 60.0f)));
+        float root_fallback = static_cast<float>(auto_root_note_.load(std::memory_order_relaxed));
+        int   root     = static_cast<int>(std::round(ctrl("root_note", root_fallback)));
         float att_s    = std::max(0.001f, ctrl("attack",  0.01f));
         float dec_s    = std::max(0.001f, ctrl("decay",   0.1f));
         float dec_lvl  = std::max(0.0f, std::min(1.0f, ctrl("sustain", 0.8f)));
@@ -392,11 +557,21 @@ public:
         for (auto& v : voices_) {
             if (!v.active) continue;
 
-            if (v.use_psola)
-                _process_voice_psola(v, ctx, L, R, gain, dec_s, dec_lvl, stereo);
-            else
-                _process_voice_varrate(v, ctx, L, R, gain, dec_s, dec_lvl,
-                                        stereo, out->right != nullptr);
+            switch (v.mode) {
+                case PitchMode::Spectral:
+                    _process_voice_spectral(v, ctx, L, R, gain, dec_s, dec_lvl);
+                    break;
+                case PitchMode::WSOLA:
+                    _process_voice_wsola(v, ctx, L, R, gain, dec_s, dec_lvl);
+                    break;
+                case PitchMode::PSOLA:
+                    _process_voice_psola(v, ctx, L, R, gain, dec_s, dec_lvl, stereo);
+                    break;
+                case PitchMode::Varrate:
+                    _process_voice_varrate(v, ctx, L, R, gain, dec_s, dec_lvl,
+                                            stereo, out->right != nullptr);
+                    break;
+            }
         }
 
         // Soft clip
@@ -408,8 +583,7 @@ public:
 
 private:
     // -----------------------------------------------------------------------
-    // Find the pitch mark index nearest to the given time (in samples).
-    // Returns n_marks if past end, -1 if empty.
+    // Pitch mark helpers
     // -----------------------------------------------------------------------
     static int _find_nearest_mark(const std::vector<int>& marks, int n_marks,
                                    double analysis_time) {
@@ -429,7 +603,7 @@ private:
     }
 
     // -----------------------------------------------------------------------
-    // Variable-rate playback (original method, for unpitched content)
+    // Variable-rate playback
     // -----------------------------------------------------------------------
     void _process_voice_varrate(Voice& v, const PluginProcessContext& ctx,
                                  float* L, float* R, float gain,
@@ -478,7 +652,7 @@ private:
     }
 
     // -----------------------------------------------------------------------
-    // PSOLA playback (for pitched content)
+    // PSOLA playback (with skip-repeats fix)
     // -----------------------------------------------------------------------
     void _process_voice_psola(Voice& v, const PluginProcessContext& ctx,
                                float* L, float* R, float gain,
@@ -486,10 +660,6 @@ private:
         int n_marks = static_cast<int>(pitch_marks_.size());
         int bs = ctx.block_size;
 
-        // Advance envelope for the block (simplified: compute per-sample in
-        // the grain placement loop would be more accurate, but envelope is
-        // slow-moving relative to grains)
-        // We compute an average envelope for this block.
         float env_start = v.env;
         for (int i = 0; i < bs; ++i)
             _advance_envelope(v, dec_s, dec_lvl);
@@ -497,24 +667,19 @@ private:
         float env_avg = (env_start + v.env) * 0.5f;
         float amp = env_avg * v.vel_gain * gain;
 
-        // Add leftover overlap from previous block
+        // Add leftover overlap
         int overlap_add = std::min(v.overlap_len, bs);
         for (int i = 0; i < overlap_add; ++i) {
             L[i] += v.overlap[i] * amp;
-            R[i] += v.overlap[i] * amp;  // mono overlap, applied to both
+            R[i] += v.overlap[i] * amp;
         }
         if (overlap_add < v.overlap_len) {
             int rem = v.overlap_len - overlap_add;
-            for (int i = 0; i < rem; ++i)
-                v.overlap[i] = v.overlap[i + overlap_add];
-            // Zero vacated tail to prevent stale data accumulation
-            for (int i = rem; i < v.overlap_len; ++i)
-                v.overlap[i] = 0.0f;
+            std::memmove(v.overlap, v.overlap + overlap_add, rem * sizeof(float));
+            std::memset(v.overlap + rem, 0, (v.overlap_len - rem) * sizeof(float));
             v.overlap_len = rem;
         } else {
-            // Zero ALL consumed slots
-            for (int i = 0; i < v.overlap_len; ++i)
-                v.overlap[i] = 0.0f;
+            std::memset(v.overlap, 0, v.overlap_len * sizeof(float));
             v.overlap_len = 0;
         }
 
@@ -526,19 +691,20 @@ private:
         while (v.synth_time < block_end && safety < 4096) {
             ++safety;
 
-            // Find nearest pitch mark to current analysis_time
             int ai = _find_nearest_mark(pitch_marks_, n_marks, v.analysis_time);
             if (ai < 0 || ai >= n_marks) {
                 v.active = false;
                 break;
             }
 
-            int center = pitch_marks_[ai];
+            // Skip-repeats: if same mark as last grain, advance to next
+            if (ai == v.last_mark_idx && ai + 1 < n_marks)
+                ai += 1;
+            v.last_mark_idx = ai;
 
+            int center = pitch_marks_[ai];
             double host_center = v.synth_time - v.output_time;
 
-            // Hann window sized to 2 × target_period so adjacent grains
-            // overlap at ~50% and window sum ≈ 1.0.
             int host_start = static_cast<int>(std::floor(host_center)) - half_host;
             int host_end   = static_cast<int>(std::ceil(host_center))  + half_host;
             int grain_host_len = host_end - host_start;
@@ -550,7 +716,6 @@ private:
                 float w = 0.5f * (1.0f - std::cos(
                     2.0f * static_cast<float>(M_PI) * t_win));
 
-                // Scale source offset by period ratio for pitch shifting
                 double src_pos = center + (hi - host_center) * period_ratio;
                 int si = static_cast<int>(std::floor(src_pos));
                 float frac = static_cast<float>(src_pos - si);
@@ -572,8 +737,8 @@ private:
                 } else if (hi >= bs && hi < bs + Voice::MAX_OVERLAP) {
                     int oi = hi - bs;
                     if (oi >= v.overlap_len) {
-                        for (int z = v.overlap_len; z < oi; ++z)
-                            v.overlap[z] = 0.0f;
+                        std::memset(v.overlap + v.overlap_len, 0,
+                                    (oi - v.overlap_len) * sizeof(float));
                         v.overlap_len = oi + 1;
                     }
                     v.overlap[oi] += (sl + sr_samp) * 0.5f;
@@ -584,9 +749,7 @@ private:
             v.analysis_time += v.target_period;
         }
 
-        // Look-ahead: render grains just past block_end whose backward
-        // tails reach into this block. Only write to [0, bs), not overlap.
-        // These grains will be re-processed by the next block's main loop.
+        // Look-ahead
         {
             double la_synth = v.synth_time;
             double la_analysis = v.analysis_time;
@@ -631,7 +794,262 @@ private:
     }
 
     // -----------------------------------------------------------------------
-    // Envelope helper (returns current env value, advances state)
+    // Spectral pitch-shift playback
+    // -----------------------------------------------------------------------
+    void _process_voice_spectral(Voice& v, const PluginProcessContext& ctx,
+                                  float* L, float* R, float gain,
+                                  float dec_s, float dec_lvl) {
+        float shift = static_cast<float>(v.rate);
+        int remaining = ctx.block_size;
+        int out_pos = 0;
+
+        while (remaining > 0) {
+            // Drain output buffer first (with per-sample envelope)
+            while (v.spect_out_avail > 0 && remaining > 0) {
+                float env = _advance_envelope(v, dec_s, dec_lvl);
+                if (!v.active) return;
+
+                float s = v.spect_out_buf[v.spect_out_read++] * env * v.vel_gain * gain;
+                L[out_pos] += s;
+                R[out_pos] += s;
+                ++out_pos;
+                --remaining;
+                --v.spect_out_avail;
+            }
+            v.spect_out_read = 0;
+
+            if (remaining == 0) break;
+
+            // Generate next hop
+            double fi = v.spect_frame_pos;
+            if (fi >= spectral_bank_.n_frames - 1) {
+                v.active = false;
+                v.stage  = Voice::Stage::Off;
+                break;
+            }
+
+            int i0 = static_cast<int>(fi);
+            int i1 = std::min(i0 + 1, spectral_bank_.n_frames - 1);
+            float frac = static_cast<float>(fi - i0);
+
+            const float* mag0  = &spectral_bank_.magnitudes[i0 * SPECT_N_BINS];
+            const float* mag1  = &spectral_bank_.magnitudes[i1 * SPECT_N_BINS];
+            const float* freq0 = &spectral_bank_.inst_freqs[i0 * SPECT_N_BINS];
+            const float* freq1 = &spectral_bank_.inst_freqs[i1 * SPECT_N_BINS];
+
+            float new_mag[SPECT_N_BINS] = {};
+            float new_ifreq_num[SPECT_N_BINS] = {};
+            float new_weight[SPECT_N_BINS] = {};
+
+            float bw = spectral_bank_.bin_width;
+
+            // Bin relocation
+            for (int k = 0; k < SPECT_N_BINS; ++k) {
+                float m   = (1.0f - frac) * mag0[k]  + frac * mag1[k];
+                float ifr = (1.0f - frac) * freq0[k] + frac * freq1[k];
+                float target_freq = ifr * shift;
+                float tb = target_freq / bw;
+                int tb_lo = static_cast<int>(std::floor(tb));
+                float f2 = tb - tb_lo;
+
+                float w0 = m * (1.0f - f2);
+                float w1 = m * f2;
+                if (tb_lo >= 0 && tb_lo < SPECT_N_BINS) {
+                    new_mag[tb_lo]       += w0;
+                    new_ifreq_num[tb_lo] += target_freq * w0;
+                    new_weight[tb_lo]    += w0;
+                }
+                if (tb_lo + 1 >= 0 && tb_lo + 1 < SPECT_N_BINS) {
+                    new_mag[tb_lo + 1]       += w1;
+                    new_ifreq_num[tb_lo + 1] += target_freq * w1;
+                    new_weight[tb_lo + 1]    += w1;
+                }
+            }
+
+            // Phase accumulation
+            float hop_time = static_cast<float>(SPECT_HOP) / sample_rate_;
+            for (int k = 0; k < SPECT_N_BINS; ++k) {
+                float ifreq;
+                if (new_weight[k] > 0)
+                    ifreq = new_ifreq_num[k] / new_weight[k];
+                else
+                    ifreq = k * bw;
+
+                v.phase_acc[k] += 2.0f * static_cast<float>(M_PI) * ifreq * hop_time;
+                // Wrap to prevent float precision loss
+                if (v.phase_acc[k] > 1e6f || v.phase_acc[k] < -1e6f)
+                    v.phase_acc[k] = std::fmod(v.phase_acc[k],
+                        2.0f * static_cast<float>(M_PI));
+            }
+
+            // IRFFT
+            float frame_out[SPECT_FFT_SIZE];
+            irfft_mag_phase(new_mag, v.phase_acc, frame_out,
+                            v.irfft_scratch, SPECT_FFT_SIZE);
+
+            // Synthesis window
+            for (int i = 0; i < SPECT_FFT_SIZE; ++i)
+                frame_out[i] *= spectral_bank_.window[i];
+
+            // Overlap-add
+            for (int i = 0; i < SPECT_FFT_SIZE; ++i)
+                v.ola_buf[i] += frame_out[i];
+
+            // Extract hop, normalize by OLA norm
+            for (int i = 0; i < SPECT_HOP; ++i)
+                v.spect_out_buf[i] = v.ola_buf[i] / spectral_bank_.ola_norm[i];
+            v.spect_out_avail = SPECT_HOP;
+            v.spect_out_read  = 0;
+
+            // Shift OLA buffer left by hop
+            std::memmove(v.ola_buf, v.ola_buf + SPECT_HOP,
+                         (SPECT_FFT_SIZE - SPECT_HOP) * sizeof(float));
+            std::memset(v.ola_buf + SPECT_FFT_SIZE - SPECT_HOP, 0,
+                        SPECT_HOP * sizeof(float));
+
+            v.spect_frame_pos += 1.0;  // advance one frame
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // WSOLA pitch-shift playback
+    //
+    // Strategy: time-stretch source by factor 1.0 (identity) into ts_buf
+    // using WSOLA overlap-add, then resample from ts_buf at v.rate.
+    // Actually: time-stretch by beta, resample by 1/beta.
+    // For pitch up (rate>1): stretch by rate (longer), resample at rate (faster).
+    // -----------------------------------------------------------------------
+
+    // Produce WSOLA time-stretched samples into v.wsola_ts_buf
+    void _wsola_fill(Voice* v, int needed) {
+        int grain_size = v->wsola_grain_size;
+        int hop = v->wsola_hop;
+        int search = v->wsola_search;
+        float beta = static_cast<float>(v->rate);
+        // Analysis hop: how far to advance in source per grain
+        // For time-stretch by beta: analysis_hop = hop / beta
+        // But we want to stretch by beta (make it longer), so
+        // we consume source slower: src_advance = hop / beta
+        float src_advance = static_cast<float>(hop) / beta;
+
+        while (v->wsola_produced < needed + grain_size) {
+            int src_center = static_cast<int>(std::round(v->wsola_src_pos));
+
+            // Cross-correlation search for best overlap
+            int best_offset = 0;
+            if (v->wsola_produced > 0) {
+                float best_corr = -1e30f;
+                int overlap_len = std::min(hop, grain_size / 2);
+
+                // Reference: what's already in the tail of ts_buf
+                int ref_start = v->wsola_ts_write - overlap_len;
+                if (ref_start < 0) ref_start += Voice::WSOLA_BUF_SIZE;
+
+                for (int offset = -search; offset <= search; ++offset) {
+                    int cand = src_center + offset;
+                    if (cand < 0 || cand + grain_size > sample_frames_) continue;
+
+                    float corr = 0.0f, norm_a = 0.0f, norm_b = 0.0f;
+                    for (int j = 0; j < overlap_len; ++j) {
+                        int ri = (ref_start + j) % Voice::WSOLA_BUF_SIZE;
+                        float a = v->wsola_ts_buf[ri];
+                        float b = sample_L_[cand + j];
+                        corr   += a * b;
+                        norm_a += a * a;
+                        norm_b += b * b;
+                    }
+                    float denom = std::sqrt(norm_a * norm_b);
+                    if (denom > 1e-12f) corr /= denom;
+                    else corr = 0.0f;
+
+                    if (corr > best_corr) {
+                        best_corr = corr;
+                        best_offset = offset;
+                    }
+                }
+            }
+
+            int actual_src = src_center + best_offset;
+            actual_src = std::max(0, std::min(actual_src,
+                static_cast<int>(sample_frames_) - grain_size));
+
+            if (actual_src + grain_size > sample_frames_) {
+                // Source exhausted
+                break;
+            }
+
+            // Hann window for this grain
+            float inv_gs = 1.0f / static_cast<float>(grain_size);
+
+            // If first grain, just copy; otherwise crossfade overlap region
+            if (v->wsola_produced == 0) {
+                for (int j = 0; j < grain_size; ++j) {
+                    float w = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI)
+                              * j * inv_gs));
+                    int wi = (v->wsola_ts_write + j) % Voice::WSOLA_BUF_SIZE;
+                    v->wsola_ts_buf[wi] = sample_L_[actual_src + j] * w;
+                }
+            } else {
+                // Overlap region: crossfade with existing content
+                int overlap_len = std::min(hop, grain_size);
+                for (int j = 0; j < grain_size; ++j) {
+                    float w = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI)
+                              * j * inv_gs));
+                    float s = sample_L_[actual_src + j] * w;
+                    int wi = (v->wsola_ts_write + j) % Voice::WSOLA_BUF_SIZE;
+                    if (j < overlap_len) {
+                        // Add to existing (overlap-add)
+                        v->wsola_ts_buf[wi] += s;
+                    } else {
+                        v->wsola_ts_buf[wi] = s;
+                    }
+                }
+            }
+
+            v->wsola_ts_write = (v->wsola_ts_write + hop) % Voice::WSOLA_BUF_SIZE;
+            v->wsola_produced += hop;
+            v->wsola_src_pos += src_advance;
+
+            if (v->wsola_src_pos + grain_size >= sample_frames_)
+                break;
+        }
+    }
+
+    void _process_voice_wsola(Voice& v, const PluginProcessContext& ctx,
+                               float* L, float* R, float gain,
+                               float dec_s, float dec_lvl) {
+        for (int i = 0; i < ctx.block_size; ++i) {
+            float env = _advance_envelope(v, dec_s, dec_lvl);
+            if (!v.active) break;
+
+            // Ensure we have enough time-stretched data ahead
+            int read_int = static_cast<int>(v.wsola_ts_read);
+            if (read_int + 4 >= v.wsola_produced) {
+                _wsola_fill(&v, read_int + v.wsola_grain_size * 4);
+                if (read_int + 2 >= v.wsola_produced) {
+                    v.active = false;
+                    v.stage  = Voice::Stage::Off;
+                    break;
+                }
+            }
+
+            // Linear interpolation from ts_buf (resampling at v.rate)
+            int ip = static_cast<int>(v.wsola_ts_read);
+            float frac = static_cast<float>(v.wsola_ts_read - ip);
+            int i0 = ip % Voice::WSOLA_BUF_SIZE;
+            int i1 = (ip + 1) % Voice::WSOLA_BUF_SIZE;
+            float s = v.wsola_ts_buf[i0] + frac * (v.wsola_ts_buf[i1] - v.wsola_ts_buf[i0]);
+
+            float amp = env * v.vel_gain * gain;
+            L[i] += s * amp;
+            R[i] += s * amp;
+
+            v.wsola_ts_read += v.rate;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Envelope helper
     // -----------------------------------------------------------------------
     float _advance_envelope(Voice& v, float dec_s, float dec_lvl) {
         float env = v.env;
@@ -672,6 +1090,79 @@ private:
     }
 
     // -----------------------------------------------------------------------
+    // Spectral bank computation (at load time)
+    // -----------------------------------------------------------------------
+    void _compute_spectral_bank() {
+        spectral_bank_ = SpectralBank{};
+
+        if (sample_frames_ < SPECT_FFT_SIZE) return;
+
+        // Periodic Hann window
+        for (int i = 0; i < SPECT_FFT_SIZE; ++i)
+            spectral_bank_.window[i] = 0.5f * (1.0f - std::cos(
+                2.0f * static_cast<float>(M_PI) * i / SPECT_FFT_SIZE));
+
+        // OLA normalization: sum of squared windows per hop position
+        std::memset(spectral_bank_.ola_norm, 0, sizeof(spectral_bank_.ola_norm));
+        for (int k = 0; k < SPECT_FFT_SIZE / SPECT_HOP; ++k) {
+            for (int i = 0; i < SPECT_HOP; ++i) {
+                float w = spectral_bank_.window[k * SPECT_HOP + i];
+                spectral_bank_.ola_norm[i] += w * w;
+            }
+        }
+
+        spectral_bank_.bin_width = sample_rate_ / SPECT_FFT_SIZE;
+        int n_frames = (static_cast<int>(sample_frames_) - SPECT_FFT_SIZE) / SPECT_HOP + 1;
+        if (n_frames < 2) return;
+
+        spectral_bank_.n_frames = n_frames;
+        spectral_bank_.magnitudes.resize(n_frames * SPECT_N_BINS);
+        spectral_bank_.inst_freqs.resize(n_frames * SPECT_N_BINS);
+
+        std::vector<float> cplx(2 * SPECT_FFT_SIZE);
+        std::vector<float> prev_phase(SPECT_N_BINS, 0.0f);
+        float expected_advance_base = 2.0f * static_cast<float>(M_PI) *
+            SPECT_HOP / SPECT_FFT_SIZE;
+
+        for (int f = 0; f < n_frames; ++f) {
+            int offset = f * SPECT_HOP;
+
+            // Window + pack for FFT
+            for (int i = 0; i < SPECT_FFT_SIZE; ++i) {
+                int si = offset + i;
+                float s = (si < sample_frames_) ? sample_L_[si] : 0.0f;
+                cplx[2*i]   = s * spectral_bank_.window[i];
+                cplx[2*i+1] = 0.0f;
+            }
+            fft_complex_inplace(cplx.data(), SPECT_FFT_SIZE, false);
+
+            float* mag_row  = &spectral_bank_.magnitudes[f * SPECT_N_BINS];
+            float* freq_row = &spectral_bank_.inst_freqs[f * SPECT_N_BINS];
+
+            for (int k = 0; k < SPECT_N_BINS; ++k) {
+                float re = cplx[2*k], im = cplx[2*k+1];
+                mag_row[k] = std::sqrt(re * re + im * im);
+
+                float phase = std::atan2(im, re);
+                float bin_freq = k * spectral_bank_.bin_width;
+
+                if (f == 0) {
+                    freq_row[k] = bin_freq;
+                } else {
+                    float expected = k * expected_advance_base;
+                    float diff = phase - prev_phase[k] - expected;
+                    // Wrap to [-pi, pi]
+                    diff = diff - 2.0f * static_cast<float>(M_PI) *
+                           std::round(diff / (2.0f * static_cast<float>(M_PI)));
+                    freq_row[k] = bin_freq + diff * sample_rate_ /
+                        (2.0f * static_cast<float>(M_PI) * SPECT_HOP);
+                }
+                prev_phase[k] = phase;
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Sample loading
     // -----------------------------------------------------------------------
     void _load_sample(const std::string& path) {
@@ -680,6 +1171,7 @@ private:
         sample_frames_ = 0;
         pitch_marks_.clear();
         detected_f0_ = 0.0f;
+        spectral_bank_ = SpectralBank{};
 
         if (path.empty()) return;
 
@@ -697,7 +1189,7 @@ private:
 
         frames = static_cast<long>(got);
 
-        // Resample to engine sample rate (linear interpolation)
+        // Resample to engine sample rate
         double ratio = static_cast<double>(info.samplerate) /
                        static_cast<double>(sample_rate_);
         long out_frames = static_cast<long>(std::ceil(frames / ratio));
@@ -727,8 +1219,7 @@ private:
 
         sample_frames_ = out_frames;
 
-        // F0 detection on the loaded (engine-rate) sample.
-        // Use left channel; for most musical content L and R have same pitch.
+        // F0 detection (for PSOLA mode + auto root note)
         detected_f0_ = yin_detect_f0_float(sample_L_.data(),
                                             static_cast<int>(out_frames),
                                             static_cast<int>(sample_rate_));
@@ -738,7 +1229,15 @@ private:
                                                    static_cast<int>(out_frames),
                                                    detected_f0_,
                                                    static_cast<int>(sample_rate_));
+
+            // Auto-detect root note from F0: MIDI note = 69 + 12*log2(f/440)
+            float midi_f = 69.0f + 12.0f * std::log2(detected_f0_ / 440.0f);
+            int auto_root = std::clamp(static_cast<int>(std::round(midi_f)), 0, 127);
+            auto_root_note_.store(auto_root, std::memory_order_release);
         }
+
+        // Spectral bank (for spectral mode)
+        _compute_spectral_bank();
 #else
         (void)path;
 #endif
@@ -766,13 +1265,20 @@ private:
     std::vector<float> sample_R_;
     long               sample_frames_ = 0;
 
-    // PSOLA analysis data (computed at load time)
-    float              detected_f0_  = 0.0f;   // 0 = unpitched → use varrate
+    // PSOLA analysis data
+    float              detected_f0_  = 0.0f;
     std::vector<int>   pitch_marks_;
+
+    // Spectral analysis data
+    SpectralBank       spectral_bank_;
+
+    // Mode selection
+    PitchMode          pitch_mode_ = PitchMode::Spectral;
 
     std::string              pending_path_;
     std::atomic<bool>        path_dirty_{false};
 
+    std::atomic<int>         auto_root_note_{60};   // from YIN F0 detection
     std::atomic<int>         root_note_cached_{60};
     std::atomic<float>       att_cached_{0.01f};
     std::atomic<float>       rel_cached_{0.2f};
