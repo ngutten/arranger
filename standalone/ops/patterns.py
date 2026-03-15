@@ -37,7 +37,7 @@ def duplicate_pattern(state, pid):
         notes=[Note(pitch=n.pitch, start=n.start, duration=n.duration,
                     velocity=n.velocity,
                     bend=[list(p) for p in n.bend] if n.bend else [],
-                    lyric=n.lyric) for n in pat.notes],
+                    lyric=n.lyric, note_id=state.new_id()) for n in pat.notes],
         color=pat.color,
         key=pat.key,
         scale=pat.scale,
@@ -50,13 +50,27 @@ def duplicate_pattern(state, pid):
 
 def delete_pattern(state, pid):
     """Delete a pattern and its placements.
-    
+
+    Also removes any child variations and their placements.
     Returns set of deleted placement IDs (caller should clean up
     any UI selection state referencing these).
     """
-    deleted_placement_ids = {p.id for p in state.placements if p.pattern_id == pid}
+    # Remove child variations and their placements
+    child_var_ids = {v.id for v in state.variations if v.parent_id == pid}
+    if child_var_ids:
+        state.placements = [
+            p for p in state.placements
+            if not (p.is_variation and p.pattern_id in child_var_ids)
+        ]
+        state.variations = [v for v in state.variations if v.parent_id != pid]
+        if state.sel_variation and state.sel_variation in child_var_ids:
+            state.sel_variation = None
+
+    deleted_placement_ids = {p.id for p in state.placements
+                             if p.pattern_id == pid and not p.is_variation}
     state.patterns = [p for p in state.patterns if p.id != pid]
-    state.placements = [p for p in state.placements if p.pattern_id != pid]
+    state.placements = [p for p in state.placements
+                        if not (p.pattern_id == pid and not p.is_variation)]
     if state.sel_pat == pid:
         state.sel_pat = state.patterns[0].id if state.patterns else None
     state.notify('delete_pattern')

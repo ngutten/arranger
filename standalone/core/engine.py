@@ -459,17 +459,21 @@ def build_schedule(state) -> list[SchedEvent]:
         events.append(SchedEvent(beat=-1, event_type=EVT_PROGRAM, channel=ch,
                                  pitch=inst.program, velocity=inst.bank))
 
+    from ..ops.variations import resolve_placement_notes
+
     for pl in state.placements:
         t = state.find_track(pl.track_id)
-        pat = state.find_pattern(pl.pattern_id)
-        if not t or not pat:
+        if not t:
+            continue
+        notes, pat_length, pat_key, pat_scale = resolve_placement_notes(state, pl)
+        if notes is None:
             continue
         ch = t.channel & 0x0F
         transpose = state.compute_transpose(pl)
         reps = pl.repeats or 1
         for rep in range(reps):
-            offset = pl.time + rep * pat.length
-            for n in pat.notes:
+            offset = pl.time + rep * pat_length
+            for n in notes:
                 p = max(0, min(127, n.pitch + transpose))
                 v = max(1, min(127, n.velocity))
                 on_beat = offset + n.start
@@ -520,7 +524,11 @@ def compute_arrangement_length(state) -> float:
     """Compute total arrangement length in beats."""
     max_beat = 0.0
     for pl in state.placements:
-        pat = state.find_pattern(pl.pattern_id)
+        if pl.is_variation:
+            var = state.find_variation(pl.pattern_id)
+            pat = state.find_pattern(var.parent_id) if var else None
+        else:
+            pat = state.find_pattern(pl.pattern_id)
         if pat:
             max_beat = max(max_beat, pl.time + pat.length * (pl.repeats or 1))
     for bp in state.beat_placements:

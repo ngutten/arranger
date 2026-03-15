@@ -144,9 +144,9 @@ class ArrangementView(QFrame):
         
         # Check melodic placements
         for pl in self.state.placements:
-            pat = self.state.find_pattern(pl.pattern_id)
-            if pat:
-                end_beat = pl.time + pat.length * (pl.repeats or 1)
+            pat_len = self._placement_length(pl)
+            if pat_len:
+                end_beat = pl.time + pat_len * (pl.repeats or 1)
                 max_beat = max(max_beat, end_beat)
         
         # Check beat placements
@@ -165,6 +165,15 @@ class ArrangementView(QFrame):
         
         return max_beat
         
+    def _placement_length(self, pl):
+        """Get the pattern length for a placement (handles variations)."""
+        if pl.is_variation:
+            var = self.state.find_variation(pl.pattern_id)
+            pat = self.state.find_pattern(var.parent_id) if var else None
+        else:
+            pat = self.state.find_pattern(pl.pattern_id)
+        return pat.length if pat else 0
+
     def _hit_placement(self, x, y):
         """Hit test for melodic placements. Returns (placement, is_resize_handle)."""
         ti = int(y // self.TH)
@@ -175,10 +184,10 @@ class ArrangementView(QFrame):
         for pl in reversed(self.state.placements):
             if pl.track_id != tid:
                 continue
-            pat = self.state.find_pattern(pl.pattern_id)
-            if not pat:
+            pat_len = self._placement_length(pl)
+            if not pat_len:
                 continue
-            tl = pat.length * (pl.repeats or 1)
+            tl = pat_len * (pl.repeats or 1)
             if pl.time <= beat < pl.time + tl:
                 is_resize = beat > pl.time + tl - 0.5
                 return pl, is_resize
@@ -355,6 +364,258 @@ class ArrangementView(QFrame):
         self.selected_automation_placements = list(self.state.automation_placements)
         self.state.notify('selection_changed')
         self.canvas_widget.update()
+
+    def _on_click(self, event):
+        x, y = event.pos().x(), event.pos().y()
+
+        # Check for modifier keys
+        shift_held = event.modifiers() & Qt.ShiftModifier
+        ctrl_held = event.modifiers() & Qt.ControlModifier
+
+        # Check melodic placements
+        pl, is_resize = self._hit_placement(x, y)
+        if pl:
+            # Clear piano roll selection
+            self.app.piano_roll.clear_selection()
+
+            # Handle multi-selection with Shift/Ctrl
+            if shift_held or ctrl_held:
+                if pl in self.selected_placements:
+                    self.selected_placements.remove(pl)
+                else:
+                    self.selected_placements.append(pl)
+                self.canvas_widget.update()
+                return
+
+            # Single selection
+            self.selected_placements = [pl]
+            self.selected_beat_placements = []
+            self.selected_automation_placements = []
+            self.state.sel_pl = pl.id
+            self.state.sel_beat_pl = None
+            self.state.sel_auto_pl = None
+
+            if is_resize:
+                self._resize_pl = pl
+            else:
+                self._drag_pl = pl
+                self._drag_offset = x / self.BW - pl.time
+            self.state.notify('sel_pl')
+            self.canvas_widget.update()
+            return
+
+        # Check beat placements
+        bp, is_resize = self._hit_beat_placement(x, y)
+        if bp:
+            self.app.piano_roll.clear_selection()
+
+            if shift_held or ctrl_held:
+                if bp in self.selected_beat_placements:
+                    self.selected_beat_placements.remove(bp)
+                else:
+                    self.selected_beat_placements.append(bp)
+                self.canvas_widget.update()
+                return
+
+            self.selected_placements = []
+            self.selected_beat_placements = [bp]
+            self.selected_automation_placements = []
+            self.state.sel_beat_pl = bp.id
+            self.state.sel_pl = None
+            self.state.sel_auto_pl = None
+
+            if is_resize:
+                self._resize_beat_pl = bp
+            else:
+                self._drag_beat_pl = bp
+                self._drag_offset = x / self.BW - bp.time
+            self.state.notify('sel_beat_pl')
+            self.canvas_widget.update()
+            return
+
+        # Check automation placements
+        ap, is_resize = self._hit_automation_placement(x, y)
+        if ap:
+            self.app.piano_roll.clear_selection()
+
+            if shift_held or ctrl_held:
+                if ap in self.selected_automation_placements:
+                    self.selected_automation_placements.remove(ap)
+                else:
+                    self.selected_automation_placements.append(ap)
+                self.canvas_widget.update()
+                return
+
+            self.selected_placements = []
+            self.selected_beat_placements = []
+            self.selected_automation_placements = [ap]
+            self.state.sel_auto_pl = ap.id
+            self.state.sel_pl = None
+            self.state.sel_beat_pl = None
+
+            if is_resize:
+                self._resize_auto_pl = ap
+            else:
+                self._drag_auto_pl = ap
+                self._drag_offset = x / self.BW - ap.time
+            self.state.notify('sel_auto_pl')
+            self.canvas_widget.update()
+            return
+
+        # Clicked empty space - deselect
+        self.selected_placements = []
+        self.selected_beat_placements = []
+        self.selected_automation_placements = []
+        self.state.sel_pl = None
+        self.state.sel_beat_pl = None
+        self.state.sel_auto_pl = None
+        self.state.notify('sel_pl')
+        self.canvas_widget.update()
+
+    def _on_right_click(self, event):
+        from PySide6.QtWidgets import QMenu
+        x, y = event.pos().x(), event.pos().y()
+        beat = x / self.BW
+
+        # Melodic placement
+        pl, _ = self._hit_placement(x, y)
+        if pl:
+            menu = QMenu(self.canvas_widget)
+            menu.addAction('Delete', lambda: self._delete_placement(pl))
+            menu.addAction('Duplicate', lambda: self._duplicate_placement(pl))
+            reps = pl.repeats or 1
+            if reps > 1 and not pl.is_variation:
+                pat_len = self._placement_length(pl)
+                if pat_len > 0:
+                    rep_idx = int((beat - pl.time) / pat_len)
+                    rep_idx = max(0, min(rep_idx, reps - 1))
+                    menu.addAction(f'Create Variation at repeat {rep_idx + 1}',
+                                   lambda ri=rep_idx: self._create_variation_from_repeat(pl, ri))
+            menu.exec(event.globalPos())
+            return
+
+        # Beat placement
+        bp, _ = self._hit_beat_placement(x, y)
+        if bp:
+            menu = QMenu(self.canvas_widget)
+            menu.addAction('Delete', lambda: self._delete_beat_placement(bp))
+            menu.exec(event.globalPos())
+            return
+
+        # Automation placement
+        ap, _ = self._hit_automation_placement(x, y)
+        if ap:
+            menu = QMenu(self.canvas_widget)
+            menu.addAction('Delete', lambda: self._delete_automation_placement(ap))
+            menu.exec(event.globalPos())
+            return
+
+    def _delete_placement(self, pl):
+        self.state.placements = [p for p in self.state.placements if p.id != pl.id]
+        self.selected_placements = []
+        self.state.sel_pl = None
+        self.state.notify('del_pl')
+        self.canvas_widget.update()
+
+    def _duplicate_placement(self, pl):
+        from ..state import Placement
+        new_pl = Placement(
+            id=self.state.new_id(), track_id=pl.track_id,
+            pattern_id=pl.pattern_id, time=pl.time + self._placement_length(pl) * (pl.repeats or 1),
+            transpose=pl.transpose, repeats=pl.repeats,
+            target_key=pl.target_key, target_scale=pl.target_scale,
+            is_variation=pl.is_variation,
+        )
+        self.state.placements.append(new_pl)
+        self.state.notify('dup_pl')
+        self.canvas_widget.update()
+
+    def _delete_beat_placement(self, bp):
+        self.state.beat_placements = [p for p in self.state.beat_placements if p.id != bp.id]
+        self.selected_beat_placements = []
+        self.state.sel_beat_pl = None
+        self.state.notify('del_beat_pl')
+        self.canvas_widget.update()
+
+    def _delete_automation_placement(self, ap):
+        self.state.automation_placements = [p for p in self.state.automation_placements if p.id != ap.id]
+        self.selected_automation_placements = []
+        self.state.sel_auto_pl = None
+        self.state.notify('del_auto_pl')
+        self.canvas_widget.update()
+
+    def _create_variation_from_repeat(self, pl, repeat_index):
+        from ..ops.variations import create_variation_from_repeat
+        var = create_variation_from_repeat(self.state, pl.id, repeat_index)
+        if var:
+            self.state.sel_variation = var.id
+            self.state.notify('create_variation')
+            self.canvas_widget.update()
+
+    def _on_drag(self, event):
+        x, y = event.pos().x(), event.pos().y()
+        beat = x / self.BW
+
+        if self._drag_pl:
+            self._drag_pl.time = max(0, self._snap(beat - self._drag_offset))
+            ti = int(y // self.TH)
+            if 0 <= ti < len(self.state.tracks):
+                self._drag_pl.track_id = self.state.tracks[ti].id
+            self.canvas_widget.update()
+        elif self._resize_pl:
+            new_len = max(self.state.snap, self._snap(beat - self._resize_pl.time))
+            pat_len = self._placement_length(self._resize_pl)
+            if pat_len > 0:
+                self._resize_pl.repeats = max(1, round(new_len / pat_len))
+            self.canvas_widget.update()
+        elif self._drag_beat_pl:
+            self._drag_beat_pl.time = max(0, self._snap(beat - self._drag_offset))
+            ti = int(y // self.TH) - len(self.state.tracks)
+            if 0 <= ti < len(self.state.beat_tracks):
+                self._drag_beat_pl.track_id = self.state.beat_tracks[ti].id
+            self.canvas_widget.update()
+        elif self._resize_beat_pl:
+            new_len = max(self.state.snap, self._snap(beat - self._resize_beat_pl.time))
+            pat = self.state.find_beat_pattern(self._resize_beat_pl.pattern_id)
+            if pat:
+                self._resize_beat_pl.repeats = max(1, round(new_len / pat.length))
+            self.canvas_widget.update()
+        elif self._drag_auto_pl:
+            self._drag_auto_pl.time = max(0, self._snap(beat - self._drag_offset))
+            ti = int(y // self.TH) - len(self.state.tracks) - len(self.state.beat_tracks)
+            if 0 <= ti < len(self.state.automation_tracks):
+                self._drag_auto_pl.track_id = self.state.automation_tracks[ti].id
+            self.canvas_widget.update()
+        elif self._resize_auto_pl:
+            new_len = max(self.state.snap, self._snap(beat - self._resize_auto_pl.time))
+            pat = self.state.find_automation_pattern(self._resize_auto_pl.pattern_id)
+            if pat:
+                self._resize_auto_pl.repeats = max(1, round(new_len / pat.length))
+            self.canvas_widget.update()
+
+    def _on_release(self, event):
+        if self._drag_pl or self._resize_pl:
+            self.state.notify('placement_edit')
+        if self._drag_beat_pl or self._resize_beat_pl:
+            self.state.notify('beat_placement_edit')
+        if self._drag_auto_pl or self._resize_auto_pl:
+            self.state.notify('automation_placement_edit')
+        self._drag_pl = None
+        self._resize_pl = None
+        self._drag_beat_pl = None
+        self._resize_beat_pl = None
+        self._drag_auto_pl = None
+        self._resize_auto_pl = None
+
+    def _select_track(self, tid):
+        self.state.sel_trk = tid
+        self.state.sel_beat_trk = None
+        self.state.notify('sel_trk')
+
+    def _select_beat_track(self, btid):
+        self.state.sel_beat_trk = btid
+        self.state.sel_trk = None
+        self.state.notify('sel_beat_trk')
 
 
 class TimelineWidget(QWidget):
@@ -764,10 +1025,10 @@ class ArrangementCanvas(QWidget):
             beat_pos = max(0, self.parent_arr._snap(x / self.parent_arr.BW))
             track_idx = int(y // self.parent_arr.TH)
             
-            # Place selected melodic pattern
-            if state.sel_pat and not state.sel_beat_pat:
+            # Place selected variation
+            if state.sel_variation and not state.sel_beat_pat:
                 from ..state import Placement, Track
-                
+
                 # Get or create track
                 if track_idx >= len(state.tracks):
                     new_track = Track(
@@ -782,7 +1043,41 @@ class ArrangementCanvas(QWidget):
                     track = new_track
                 else:
                     track = state.tracks[track_idx]
-                
+
+                # Create variation placement
+                pl = Placement(
+                    id=state.new_id(),
+                    track_id=track.id,
+                    pattern_id=state.sel_variation,
+                    time=beat_pos,
+                    transpose=0,
+                    repeats=1,
+                    is_variation=True,
+                )
+                state.placements.append(pl)
+                state.sel_pl = pl.id
+                state.notify('placement_added')
+                self.parent_arr.refresh()
+
+            # Place selected melodic pattern
+            elif state.sel_pat and not state.sel_beat_pat:
+                from ..state import Placement, Track
+
+                # Get or create track
+                if track_idx >= len(state.tracks):
+                    new_track = Track(
+                        id=state.new_id(),
+                        name=f'Track {len(state.tracks) + 1}',
+                        channel=len(state.tracks) % 16,
+                        bank=0,
+                        program=0,
+                        volume=100
+                    )
+                    state.tracks.append(new_track)
+                    track = new_track
+                else:
+                    track = state.tracks[track_idx]
+
                 # Create placement
                 pl = Placement(
                     id=state.new_id(),
@@ -951,7 +1246,16 @@ class ArrangementCanvas(QWidget):
         # Melodic placements
         for pl in s.placements:
             ti = next((i for i, t in enumerate(s.tracks) if t.id == pl.track_id), -1)
-            pat = s.find_pattern(pl.pattern_id)
+            if pl.is_variation:
+                var = s.find_variation(pl.pattern_id)
+                pat = s.find_pattern(var.parent_id) if var else None
+                color_str = var.color if var else '#888'
+                label_name = var.name if var else '?'
+            else:
+                pat = s.find_pattern(pl.pattern_id)
+                var = None
+                color_str = pat.color if pat else '#888'
+                label_name = pat.name if pat else '?'
             if ti < 0 or not pat:
                 continue
             y = ti * self.parent_arr.TH
@@ -963,13 +1267,19 @@ class ArrangementCanvas(QWidget):
             # Block with transparency
             if sel:
                 painter.setPen(QPen(QColor('#fff'), 2))
-                painter.setBrush(QColor(pat.color))
+                painter.setBrush(QColor(color_str))
+            elif pl.is_variation:
+                # Variation placements: dashed border
+                painter.setPen(QPen(QColor(color_str), 1, Qt.DashLine))
+                fill_color = QColor(color_str)
+                fill_color.setAlpha(100)
+                painter.setBrush(fill_color)
             else:
                 painter.setPen(Qt.NoPen)
-                fill_color = QColor(pat.color)
+                fill_color = QColor(color_str)
                 fill_color.setAlpha(136)  # 0x88
                 painter.setBrush(fill_color)
-            
+
             painter.drawRect(int(x), y + 2, int(w - 1), self.parent_arr.TH - 4)
 
             # Repeat dividers
@@ -979,11 +1289,18 @@ class ArrangementCanvas(QWidget):
                 painter.drawLine(int(rx), y + 4, int(rx), y + self.parent_arr.TH - 4)
 
             # Mini note preview
-            if pat.notes:
-                pitches = [n.pitch for n in pat.notes]
+            preview_notes = pat.notes
+            if pl.is_variation and var:
+                from ..ops.variations import resolve_variation
+                try:
+                    preview_notes = resolve_variation(s, var.id)
+                except Exception:
+                    preview_notes = pat.notes
+            if preview_notes:
+                pitches = [n.pitch for n in preview_notes]
                 mn, mx = min(pitches), max(pitches)
                 rg = max(1, mx - mn)
-                for n in pat.notes:
+                for n in preview_notes:
                     ny = y + self.parent_arr.TH - 6 - ((n.pitch - mn) / rg) * (self.parent_arr.TH - 12)
                     nx = x + n.start / pat.length * pat.length * self.parent_arr.BW
                     nw = max(2, n.duration / pat.length * pat.length * self.parent_arr.BW)
@@ -992,7 +1309,7 @@ class ArrangementCanvas(QWidget):
                     painter.drawRect(int(nx + 2), int(ny), int(nw - 1), 2)
 
             # Label
-            label = pat.name
+            label = label_name
             ts = s.compute_transpose(pl)
             if ts:
                 label += f' ({ts:+d})'
@@ -1186,11 +1503,11 @@ class ArrangementCanvas(QWidget):
         # Draw selection highlights
         for pl in self.parent_arr.selected_placements:
             ti = next((i for i, t in enumerate(s.tracks) if t.id == pl.track_id), -1)
-            pat = s.find_pattern(pl.pattern_id)
-            if ti >= 0 and pat:
+            pat_len = self.parent_arr._placement_length(pl)
+            if ti >= 0 and pat_len:
                 y = ti * self.parent_arr.TH
                 x = pl.time * self.parent_arr.BW
-                w = pat.length * (pl.repeats or 1) * self.parent_arr.BW
+                w = pat_len * (pl.repeats or 1) * self.parent_arr.BW
                 painter.setPen(QPen(QColor('#00ff88'), 2))
                 painter.setBrush(Qt.NoBrush)
                 painter.drawRect(int(x), y + 2, int(w - 1), self.parent_arr.TH - 4)
@@ -1226,214 +1543,3 @@ class ArrangementCanvas(QWidget):
             painter.setBrush(fill)
             painter.drawRect(rect)
 
-
-# Add missing methods to ArrangementView
-def _on_click(self, event):
-    x, y = event.pos().x(), event.pos().y()
-    
-    # Check for modifier keys
-    shift_held = event.modifiers() & Qt.ShiftModifier
-    ctrl_held = event.modifiers() & Qt.ControlModifier
-    
-    # Check melodic placements
-    pl, is_resize = self._hit_placement(x, y)
-    if pl:
-        # Clear piano roll selection
-        self.app.piano_roll.clear_selection()
-        
-        # Handle multi-selection with Shift/Ctrl
-        if shift_held or ctrl_held:
-            if pl in self.selected_placements:
-                self.selected_placements.remove(pl)
-            else:
-                self.selected_placements.append(pl)
-            self.canvas_widget.update()
-            return
-        
-        # Single selection
-        self.selected_placements = [pl]
-        self.selected_beat_placements = []
-        self.selected_automation_placements = []
-        self.state.sel_pl = pl.id
-        self.state.sel_beat_pl = None
-        self.state.sel_auto_pl = None
-        
-        if is_resize:
-            self._resize_pl = pl
-        else:
-            self._drag_pl = pl
-            self._drag_offset = x / self.BW - pl.time
-        self.state.notify('sel_pl')
-        self.canvas_widget.update()
-        return
-
-    # Check beat placements
-    bp, is_resize = self._hit_beat_placement(x, y)
-    if bp:
-        self.app.piano_roll.clear_selection()
-        
-        if shift_held or ctrl_held:
-            if bp in self.selected_beat_placements:
-                self.selected_beat_placements.remove(bp)
-            else:
-                self.selected_beat_placements.append(bp)
-            self.canvas_widget.update()
-            return
-        
-        self.selected_placements = []
-        self.selected_beat_placements = [bp]
-        self.selected_automation_placements = []
-        self.state.sel_beat_pl = bp.id
-        self.state.sel_pl = None
-        self.state.sel_auto_pl = None
-        
-        if is_resize:
-            self._resize_beat_pl = bp
-        else:
-            self._drag_beat_pl = bp
-            self._drag_offset = x / self.BW - bp.time
-        self.state.notify('sel_beat_pl')
-        self.canvas_widget.update()
-        return
-
-    # Check automation placements
-    ap, is_resize = self._hit_automation_placement(x, y)
-    if ap:
-        self.app.piano_roll.clear_selection()
-        
-        if shift_held or ctrl_held:
-            if ap in self.selected_automation_placements:
-                self.selected_automation_placements.remove(ap)
-            else:
-                self.selected_automation_placements.append(ap)
-            self.canvas_widget.update()
-            return
-        
-        self.selected_placements = []
-        self.selected_beat_placements = []
-        self.selected_automation_placements = [ap]
-        self.state.sel_auto_pl = ap.id
-        self.state.sel_pl = None
-        self.state.sel_beat_pl = None
-        
-        if is_resize:
-            self._resize_auto_pl = ap
-        else:
-            self._drag_auto_pl = ap
-            self._drag_offset = x / self.BW - ap.time
-        self.state.notify('sel_auto_pl')
-        self.canvas_widget.update()
-        return
-
-    # Clicked empty space - deselect
-    self.selected_placements = []
-    self.selected_beat_placements = []
-    self.selected_automation_placements = []
-    self.state.sel_pl = None
-    self.state.sel_beat_pl = None
-    self.state.sel_auto_pl = None
-    self.state.notify('sel_pl')
-    self.canvas_widget.update()
-
-def _on_right_click(self, event):
-    x, y = event.pos().x(), event.pos().y()
-    # Delete melodic placement
-    pl, _ = self._hit_placement(x, y)
-    if pl:
-        self.state.placements = [p for p in self.state.placements if p.id != pl.id]
-        self.selected_placements = []
-        self.state.sel_pl = None
-        self.state.notify('del_pl')
-        self.canvas_widget.update()
-        return
-    # Delete beat placement
-    bp, _ = self._hit_beat_placement(x, y)
-    if bp:
-        self.state.beat_placements = [p for p in self.state.beat_placements if p.id != bp.id]
-        self.selected_beat_placements = []
-        self.state.sel_beat_pl = None
-        self.state.notify('del_beat_pl')
-        self.canvas_widget.update()
-        return
-    # Delete automation placement
-    ap, _ = self._hit_automation_placement(x, y)
-    if ap:
-        self.state.automation_placements = [p for p in self.state.automation_placements if p.id != ap.id]
-        self.selected_automation_placements = []
-        self.state.sel_auto_pl = None
-        self.state.notify('del_auto_pl')
-        self.canvas_widget.update()
-        return
-
-def _on_drag(self, event):
-    x, y = event.pos().x(), event.pos().y()
-    beat = x / self.BW
-
-    if self._drag_pl:
-        self._drag_pl.time = max(0, self._snap(beat - self._drag_offset))
-        ti = int(y // self.TH)
-        if 0 <= ti < len(self.state.tracks):
-            self._drag_pl.track_id = self.state.tracks[ti].id
-        self.canvas_widget.update()
-    elif self._resize_pl:
-        new_len = max(self.state.snap, self._snap(beat - self._resize_pl.time))
-        pat = self.state.find_pattern(self._resize_pl.pattern_id)
-        if pat:
-            self._resize_pl.repeats = max(1, round(new_len / pat.length))
-        self.canvas_widget.update()
-    elif self._drag_beat_pl:
-        self._drag_beat_pl.time = max(0, self._snap(beat - self._drag_offset))
-        ti = int(y // self.TH) - len(self.state.tracks)
-        if 0 <= ti < len(self.state.beat_tracks):
-            self._drag_beat_pl.track_id = self.state.beat_tracks[ti].id
-        self.canvas_widget.update()
-    elif self._resize_beat_pl:
-        new_len = max(self.state.snap, self._snap(beat - self._resize_beat_pl.time))
-        pat = self.state.find_beat_pattern(self._resize_beat_pl.pattern_id)
-        if pat:
-            self._resize_beat_pl.repeats = max(1, round(new_len / pat.length))
-        self.canvas_widget.update()
-    elif self._drag_auto_pl:
-        self._drag_auto_pl.time = max(0, self._snap(beat - self._drag_offset))
-        ti = int(y // self.TH) - len(self.state.tracks) - len(self.state.beat_tracks)
-        if 0 <= ti < len(self.state.automation_tracks):
-            self._drag_auto_pl.track_id = self.state.automation_tracks[ti].id
-        self.canvas_widget.update()
-    elif self._resize_auto_pl:
-        new_len = max(self.state.snap, self._snap(beat - self._resize_auto_pl.time))
-        pat = self.state.find_automation_pattern(self._resize_auto_pl.pattern_id)
-        if pat:
-            self._resize_auto_pl.repeats = max(1, round(new_len / pat.length))
-        self.canvas_widget.update()
-
-def _on_release(self, event):
-    if self._drag_pl or self._resize_pl:
-        self.state.notify('placement_edit')
-    if self._drag_beat_pl or self._resize_beat_pl:
-        self.state.notify('beat_placement_edit')
-    if self._drag_auto_pl or self._resize_auto_pl:
-        self.state.notify('automation_placement_edit')
-    self._drag_pl = None
-    self._resize_pl = None
-    self._drag_beat_pl = None
-    self._resize_beat_pl = None
-    self._drag_auto_pl = None
-    self._resize_auto_pl = None
-
-def _select_track(self, tid):
-    self.state.sel_trk = tid
-    self.state.sel_beat_trk = None
-    self.state.notify('sel_trk')
-
-def _select_beat_track(self, btid):
-    self.state.sel_beat_trk = btid
-    self.state.sel_trk = None
-    self.state.notify('sel_beat_trk')
-
-# Attach methods to ArrangementView
-ArrangementView._on_click = _on_click
-ArrangementView._on_right_click = _on_right_click
-ArrangementView._on_drag = _on_drag
-ArrangementView._on_release = _on_release
-ArrangementView._select_track = _select_track
-ArrangementView._select_beat_track = _select_beat_track

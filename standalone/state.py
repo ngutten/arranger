@@ -200,6 +200,8 @@ class Note:
     bend: list = field(default_factory=list)
     # Lyric syllable associated with this note (for singing synthesis / export).
     lyric: str = ''
+    # Stable identity for variation diff tracking. 0 = unassigned.
+    note_id: int = 0
 
     def to_dict(self):
         d = {'pitch': self.pitch, 'start': self.start,
@@ -208,6 +210,8 @@ class Note:
             d['bend'] = self.bend
         if self.lyric:
             d['lyric'] = self.lyric
+        if self.note_id:
+            d['noteId'] = self.note_id
         return d
 
     @staticmethod
@@ -215,7 +219,8 @@ class Note:
         return Note(pitch=d['pitch'], start=d['start'],
                     duration=d['duration'], velocity=d.get('velocity', 100),
                     bend=d.get('bend', []),
-                    lyric=d.get('lyric', ''))
+                    lyric=d.get('lyric', ''),
+                    note_id=d.get('noteId', 0))
 
 
 @dataclass
@@ -238,6 +243,12 @@ class Pattern:
             'previewMode': self.preview_mode,
             'overlayMode': self.overlay_mode,
         }
+
+    def ensure_note_ids(self, id_fn):
+        """Assign IDs to any note with note_id == 0."""
+        for n in self.notes:
+            if n.note_id == 0:
+                n.note_id = id_fn()
 
     @staticmethod
     def from_dict(d):
@@ -326,14 +337,18 @@ class Placement:
     repeats: int = 1
     target_key: str = 'C'
     target_scale: str = 'major'
+    is_variation: bool = False  # if True, pattern_id refers to a Variation
 
     def to_dict(self):
-        return {
+        d = {
             'id': self.id, 'trackId': self.track_id,
             'patternId': self.pattern_id, 'time': self.time,
             'transpose': self.transpose, 'repeats': self.repeats,
             'targetKey': self.target_key, 'targetScale': self.target_scale,
         }
+        if self.is_variation:
+            d['isVariation'] = True
+        return d
 
     @staticmethod
     def from_dict(d):
@@ -342,6 +357,7 @@ class Placement:
             time=d.get('time', 0), transpose=d.get('transpose', 0),
             repeats=d.get('repeats', 1), target_key=d.get('targetKey', 'C'),
             target_scale=d.get('targetScale', 'major'),
+            is_variation=d.get('isVariation', False),
         )
 
 
@@ -504,6 +520,144 @@ class AutomationPlacement:
         )
 
 
+@dataclass
+class NoteDelta:
+    """Modification to a parent note in a variation."""
+    note_id: int           # references parent Note.note_id
+    d_start: float = 0.0   # additive offset to start
+    d_duration: float = 0.0
+    d_pitch: int = 0       # semitones
+    d_velocity: int = 0
+    bend: list = None      # None = inherit parent; list = override
+    lyric: str = None       # None = inherit parent; str = override
+
+    def to_dict(self):
+        d = {'noteId': self.note_id}
+        if self.d_start: d['dStart'] = self.d_start
+        if self.d_duration: d['dDuration'] = self.d_duration
+        if self.d_pitch: d['dPitch'] = self.d_pitch
+        if self.d_velocity: d['dVelocity'] = self.d_velocity
+        if self.bend is not None: d['bend'] = self.bend
+        if self.lyric is not None: d['lyric'] = self.lyric
+        return d
+
+    @staticmethod
+    def from_dict(d):
+        return NoteDelta(
+            note_id=d['noteId'],
+            d_start=d.get('dStart', 0.0),
+            d_duration=d.get('dDuration', 0.0),
+            d_pitch=d.get('dPitch', 0),
+            d_velocity=d.get('dVelocity', 0),
+            bend=d.get('bend'),
+            lyric=d.get('lyric'),
+        )
+
+
+@dataclass
+class AddedNote:
+    """A new note added in a variation."""
+    note_id: int           # own unique ID
+    pitch: int
+    start: float
+    duration: float
+    velocity: int = 100
+    bend: list = field(default_factory=list)
+    lyric: str = ''
+    ref_note_id: int = 0   # parent note this is bound to (0 = unbound)
+    ref_bind: str = 'pitch' # 'full' (transforms with parent) or 'pitch' (pitch-follows only)
+    # Offsets from reference note at binding time. None = legacy (compute on the fly).
+    ref_pitch_offset: int = None
+    ref_start_offset: float = None
+    ref_dur_offset: float = None
+
+    def to_dict(self):
+        d = {'noteId': self.note_id, 'pitch': self.pitch, 'start': self.start,
+             'duration': self.duration, 'velocity': self.velocity}
+        if self.bend: d['bend'] = self.bend
+        if self.lyric: d['lyric'] = self.lyric
+        if self.ref_note_id: d['refNoteId'] = self.ref_note_id
+        if self.ref_bind != 'pitch': d['refBind'] = self.ref_bind
+        if self.ref_pitch_offset is not None: d['refPitchOffset'] = self.ref_pitch_offset
+        if self.ref_start_offset is not None: d['refStartOffset'] = self.ref_start_offset
+        if self.ref_dur_offset is not None: d['refDurOffset'] = self.ref_dur_offset
+        return d
+
+    @staticmethod
+    def from_dict(d):
+        return AddedNote(
+            note_id=d['noteId'], pitch=d['pitch'], start=d['start'],
+            duration=d['duration'], velocity=d.get('velocity', 100),
+            bend=d.get('bend', []), lyric=d.get('lyric', ''),
+            ref_note_id=d.get('refNoteId', 0),
+            ref_bind=d.get('refBind', 'pitch'),
+            ref_pitch_offset=d.get('refPitchOffset'),
+            ref_start_offset=d.get('refStartOffset'),
+            ref_dur_offset=d.get('refDurOffset'),
+        )
+
+
+@dataclass
+class SplitOp:
+    """Records a split of a parent note in a variation."""
+    note_id: int           # parent note that was split
+    split_offset: float    # beat offset within the note where split occurs
+    left_delta: NoteDelta = None
+    right_delta: NoteDelta = None
+    right_note_id: int = 0
+
+    def to_dict(self):
+        d = {'noteId': self.note_id, 'splitOffset': self.split_offset}
+        if self.left_delta: d['leftDelta'] = self.left_delta.to_dict()
+        if self.right_delta: d['rightDelta'] = self.right_delta.to_dict()
+        if self.right_note_id: d['rightNoteId'] = self.right_note_id
+        return d
+
+    @staticmethod
+    def from_dict(d):
+        ld = NoteDelta.from_dict(d['leftDelta']) if d.get('leftDelta') else None
+        rd = NoteDelta.from_dict(d['rightDelta']) if d.get('rightDelta') else None
+        return SplitOp(
+            note_id=d['noteId'], split_offset=d['splitOffset'],
+            left_delta=ld, right_delta=rd,
+            right_note_id=d.get('rightNoteId', 0),
+        )
+
+
+@dataclass
+class Variation:
+    """A derived pattern that stores diffs against a parent pattern."""
+    id: int
+    name: str
+    parent_id: int         # references Pattern.id
+    color: str
+    modifications: list = field(default_factory=list)  # list[NoteDelta]
+    deletions: list = field(default_factory=list)       # list[int] — note_ids suppressed
+    additions: list = field(default_factory=list)       # list[AddedNote]
+    splits: list = field(default_factory=list)          # list[SplitOp]
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'name': self.name, 'parentId': self.parent_id,
+            'color': self.color,
+            'modifications': [m.to_dict() for m in self.modifications],
+            'deletions': list(self.deletions),
+            'additions': [a.to_dict() for a in self.additions],
+            'splits': [s.to_dict() for s in self.splits],
+        }
+
+    @staticmethod
+    def from_dict(d):
+        return Variation(
+            id=d['id'], name=d['name'], parent_id=d['parentId'],
+            color=d.get('color', PALETTE[0]),
+            modifications=[NoteDelta.from_dict(m) for m in d.get('modifications', [])],
+            deletions=d.get('deletions', []),
+            additions=[AddedNote.from_dict(a) for a in d.get('additions', [])],
+            splits=[SplitOp.from_dict(s) for s in d.get('splits', [])],
+        )
+
+
 class AppState:
     """Central application state with observer pattern for UI updates.
 
@@ -521,6 +675,7 @@ class AppState:
         'patterns', 'tracks', 'placements',
         'beat_kit', 'beat_patterns', 'beat_tracks', 'beat_placements',
         'automation_patterns', 'automation_tracks', 'automation_placements',
+        'variations',
     )
 
     def __init__(self):
@@ -542,10 +697,13 @@ class AppState:
         self._automation_tracks = IndexedList()
         self._automation_placements = IndexedList()
 
+        self._variations = IndexedList()
+
         self.sf2 = None  # SF2Info or dict with path/name/presets
 
         # Selection state
         self.sel_pat: Optional[int] = None
+        self.sel_variation: Optional[int] = None
         self.sel_trk: Optional[int] = None
         self.sel_pl: Optional[int] = None
         self.sel_beat_pat: Optional[int] = None
@@ -659,6 +817,14 @@ class AppState:
     def automation_placements(self, value):
         self._automation_placements = value if isinstance(value, IndexedList) else IndexedList(value)
 
+    @property
+    def variations(self) -> IndexedList:
+        return self._variations
+
+    @variations.setter
+    def variations(self, value):
+        self._variations = value if isinstance(value, IndexedList) else IndexedList(value)
+
     def new_id(self) -> int:
         nid = self._next_id
         self._next_id += 1
@@ -702,15 +868,27 @@ class AppState:
     def find_automation_placement(self, aplid) -> Optional[AutomationPlacement]:
         return self._automation_placements.get(aplid)
 
+    def find_variation(self, vid) -> Optional[Variation]:
+        return self._variations.get(vid)
+
+    def variations_of(self, pattern_id) -> list:
+        """Return all variations whose parent_id matches pattern_id."""
+        return [v for v in self._variations if v.parent_id == pattern_id]
+
     def compute_transpose(self, pl: Placement) -> int:
         """Compute total transposition for a placement (manual + key shift)."""
-        pat = self.find_pattern(pl.pattern_id)
+        if pl.is_variation:
+            var = self.find_variation(pl.pattern_id)
+            pat = self.find_pattern(var.parent_id) if var else None
+        else:
+            pat = self.find_pattern(pl.pattern_id)
         pk = pat.key if pat else 'C'
         tk = pl.target_key or pk
         return (pl.transpose or 0) + key_shift(pk, tk)
 
     def build_arrangement(self) -> dict:
         """Build arrangement dict for MIDI export / audio rendering."""
+        from .ops.variations import resolve_placement_notes
         melodic_tracks = []
         for t in self.tracks:
             trk = {
@@ -721,13 +899,13 @@ class AppState:
             for p in self.placements:
                 if p.track_id != t.id:
                     continue
-                pat = self.find_pattern(p.pattern_id)
-                if not pat:
+                notes, pat_length, pat_key, pat_scale = resolve_placement_notes(self, p)
+                if notes is None:
                     continue
                 trk['placements'].append({
                     'pattern': {
-                        'notes': [n.to_dict() for n in pat.notes],
-                        'length': pat.length,
+                        'notes': [n.to_dict() for n in notes],
+                        'length': pat_length,
                     },
                     'time': p.time,
                     'transpose': self.compute_transpose(p),
@@ -792,6 +970,7 @@ class AppState:
             'automationPatterns': [p.to_dict() for p in self.automation_patterns],
             'automationTracks': [t.to_dict() for t in self.automation_tracks],
             'automationPlacements': [p.to_dict() for p in self.automation_placements],
+            'variations': [v.to_dict() for v in self.variations],
             'sf2Path': self.sf2.path if self.sf2 else None,
             'nextId': self._next_id,
             'signalGraph': (self.signal_graph.to_dict()
@@ -815,8 +994,10 @@ class AppState:
         self.automation_patterns = [AutomationPattern.from_dict(p) for p in d.get('automationPatterns', [])]
         self.automation_tracks = [AutomationTrack.from_dict(t) for t in d.get('automationTracks', [])]
         self.automation_placements = [AutomationPlacement.from_dict(p) for p in d.get('automationPlacements', [])]
+        self.variations = [Variation.from_dict(v) for v in d.get('variations', [])]
         self._next_id = d.get('nextId', 1)
         self.sel_pat = None
+        self.sel_variation = None
         self.sel_trk = self.tracks[0].id if self.tracks else None
         self.sel_pl = None
         self.sel_beat_pat = None

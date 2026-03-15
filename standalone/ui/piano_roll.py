@@ -11,6 +11,7 @@ from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QKeyEvent
 from ..state import NOTE_NAMES, scale_set, vel_color, Note
 from ..clipboard import NoteClipboard
 from ..core.curve_utils import interpolate_curve
+from ..ops.variations import resolve_variation, compute_split_baselines
 
 class PianoRoll(QFrame):
     """Piano roll editor with piano keys, note grid, and velocity lane."""
@@ -49,8 +50,167 @@ class PianoRoll(QFrame):
         self._rec_start_time = None    # time.monotonic() when first note landed
         self._rec_armed = False        # True = waiting for first note-on
         self._rec_recording = False    # True = recording in progress
- 
+
+        # Variation editing cache
+        self._var_resolved_notes = None  # cached resolved notes for current variation
+        self._var_note_categories = {}   # note_id -> category string
+
         self._build()
+
+    # -- Variation editing helpers --
+
+    def _is_variation_mode(self):
+        """Check if we're editing a variation."""
+        return self.state.sel_variation is not None
+
+    def _get_edit_pattern(self):
+        """Get the pattern being edited (parent pattern for variations)."""
+        if self._is_variation_mode():
+            var = self.state.find_variation(self.state.sel_variation)
+            if var:
+                return self.state.find_pattern(var.parent_id)
+            return None
+        return self.state.find_pattern(self.state.sel_pat)
+
+    def _get_edit_notes(self):
+        """Get the notes to display/edit. For variations, returns resolved notes."""
+        if self._is_variation_mode():
+            # During drag/resize, return cached notes to avoid re-resolving
+            if (self._drag_note or self._resize_note) and self._var_resolved_notes:
+                return self._var_resolved_notes
+            var = self.state.find_variation(self.state.sel_variation)
+            if var:
+                self._var_resolved_notes = resolve_variation(self.state, var.id)
+                self._update_note_categories(var)
+                return self._var_resolved_notes
+            return []
+        pat = self.state.find_pattern(self.state.sel_pat)
+        return pat.notes if pat else []
+
+    def _update_note_categories(self, var):
+        """Categorize notes for color-coding in variation mode."""
+        self._var_note_categories = {}
+        mod_ids = {m.note_id for m in var.modifications}
+        split_ids = set()
+        for s in var.splits:
+            split_ids.add(s.note_id)
+            split_ids.add(s.right_note_id)
+        added_ids = {a.note_id for a in var.additions}
+        added_map = {a.note_id: a for a in var.additions}
+
+        pat = self.state.find_pattern(var.parent_id)
+        parent_ids = {n.note_id for n in pat.notes} if pat else set()
+
+        for nid in mod_ids | split_ids:
+            self._var_note_categories[nid] = 'modified'
+        for nid, added in added_map.items():
+            if added.ref_note_id:
+                self._var_note_categories[nid] = 'bound'
+            else:
+                self._var_note_categories[nid] = 'free'
+
+    def _note_border_color(self, note):
+        """Get border color for a note based on its variation category."""
+        if not self._is_variation_mode():
+            return None
+        cat = self._var_note_categories.get(note.note_id)
+        if cat == 'modified':
+            return QColor('#e6a817')  # amber
+        elif cat == 'bound':
+            return QColor('#00bcd4')  # teal
+        elif cat == 'free':
+            return QColor('#e040fb')  # magenta
+        return None
+
+    def _find_note_by_id(self, note_id):
+        """Find a note in the current resolved notes by note_id."""
+        if self._var_resolved_notes:
+            for n in self._var_resolved_notes:
+                if n.note_id == note_id:
+                    return n
+        return None
+
+    def _persist_variation_edits(self):
+        """After drag/resize, persist resolved note positions as NoteDelta.
+
+        Notes fall into four categories with different delta baselines:
+          - Added note: update AddedNote fields directly
+          - Split note: baseline from compute_split_baselines (handles chained splits)
+          - Regular parent note: baseline = parent note values → var.modifications
+        """
+        var = self.state.find_variation(self.state.sel_variation)
+        if not var:
+            return
+        pat = self.state.find_pattern(var.parent_id)
+        if not pat:
+            return
+
+        from ..ops.variations import variation_modify_note
+        parent_by_id = {n.note_id: n for n in pat.notes}
+        added_ids = {a.note_id for a in var.additions}
+
+        # Build split lookup: note_id → (SplitOp, 'left'|'right')
+        # Later splits overwrite earlier ones, so a chained note gets its
+        # most-direct owning split.
+        split_lookup = {}
+        for sp in var.splits:
+            split_lookup[sp.note_id] = (sp, 'left')
+            split_lookup[sp.right_note_id] = (sp, 'right')
+
+        # Compute baselines for all split notes (handles chained splits)
+        split_baselines = compute_split_baselines(var, pat)
+
+        notes = self._var_resolved_notes or []
+
+        for n in notes:
+            if n.note_id in added_ids:
+                # Update AddedNote directly
+                for a in var.additions:
+                    if a.note_id == n.note_id:
+                        a.pitch = n.pitch
+                        a.start = n.start
+                        a.duration = n.duration
+                        a.velocity = n.velocity
+                        # Update binding offsets relative to current resolved ref
+                        if a.ref_note_id:
+                            ref = next((rn for rn in notes if rn.note_id == a.ref_note_id), None)
+                            if ref:
+                                a.ref_pitch_offset = n.pitch - ref.pitch
+                                a.ref_start_offset = n.start - ref.start
+                                a.ref_dur_offset = n.duration - ref.duration
+                        break
+            elif n.note_id in split_baselines:
+                base_start, base_dur, base_pitch, base_vel = split_baselines[n.note_id]
+
+                d_start = n.start - base_start
+                d_duration = n.duration - base_dur
+                d_pitch = n.pitch - base_pitch
+                d_velocity = n.velocity - base_vel
+
+                if abs(d_start) > 1e-6 or abs(d_duration) > 1e-6 or d_pitch or d_velocity:
+                    # variation_modify_note routes to sp.left_delta/right_delta
+                    variation_modify_note(var, n.note_id,
+                                          d_start=d_start, d_duration=d_duration,
+                                          d_pitch=d_pitch, d_velocity=d_velocity)
+                else:
+                    # Clear delta if note matches baseline
+                    if n.note_id in split_lookup:
+                        sp, side = split_lookup[n.note_id]
+                        if side == 'left':
+                            sp.left_delta = None
+                        else:
+                            sp.right_delta = None
+            elif n.note_id in parent_by_id:
+                pn = parent_by_id[n.note_id]
+                d_start = n.start - pn.start
+                d_duration = n.duration - pn.duration
+                d_pitch = n.pitch - pn.pitch
+                d_velocity = n.velocity - pn.velocity
+                # Only create/update delta if something changed
+                if abs(d_start) > 1e-6 or abs(d_duration) > 1e-6 or d_pitch or d_velocity:
+                    variation_modify_note(var, n.note_id,
+                                          d_start=d_start, d_duration=d_duration,
+                                          d_pitch=d_pitch, d_velocity=d_velocity)
 
     def _build(self):
         layout = QVBoxLayout(self)
@@ -195,14 +355,16 @@ class PianoRoll(QFrame):
     def _on_vel_change(self, value):
         self.vel_label.setText(str(value))
         self.state.default_vel = value
-        
+
         # If notes are selected, update their velocities
         if self._selected:
-            pat = self.state.find_pattern(self.state.sel_pat)
-            if pat:
+            notes = self._get_edit_notes()
+            if notes:
                 for idx in self._selected:
-                    if 0 <= idx < len(pat.notes):
-                        pat.notes[idx].velocity = value
+                    if 0 <= idx < len(notes):
+                        notes[idx].velocity = value
+                if self._is_variation_mode():
+                    self._persist_variation_edits()
                 self.refresh()
 
     def _snap(self, beat):
@@ -210,10 +372,10 @@ class PianoRoll(QFrame):
 
     def _hit_bend_point(self, x, y, radius=6):
         """Hit-test bend control points. Returns (note, point_index) or (None, -1)."""
-        pat = self.state.find_pattern(self.state.sel_pat)
-        if not pat:
+        notes = self._get_edit_notes()
+        if not notes:
             return None, -1
-        for n in pat.notes:
+        for n in notes:
             if not n.bend:
                 continue
             note_y_top = (self.HI - n.pitch) * self.NH
@@ -228,13 +390,13 @@ class PianoRoll(QFrame):
 
     def _hit_note(self, x, y):
         """Hit test for notes. Returns (note, index, is_resize_handle)."""
-        pat = self.state.find_pattern(self.state.sel_pat)
-        if not pat:
+        notes = self._get_edit_notes()
+        if not notes:
             return None, -1, False
         pitch = self.HI - int(y / self.NH)
         beat = x / self.BW
-        for i in range(len(pat.notes) - 1, -1, -1):
-            n = pat.notes[i]
+        for i in range(len(notes) - 1, -1, -1):
+            n = notes[i]
             if n.pitch == pitch and n.start <= beat < n.start + n.duration:
                 is_resize = beat > n.start + n.duration - 0.15
                 return n, i, is_resize
@@ -248,10 +410,17 @@ class PianoRoll(QFrame):
 
     def refresh(self):
         """Redraw the piano roll."""
-        pat = self.state.find_pattern(self.state.sel_pat)
+        pat = self._get_edit_pattern()
 
         # Update header
-        if pat:
+        if self._is_variation_mode():
+            var = self.state.find_variation(self.state.sel_variation)
+            if var and pat:
+                self.name_label.setText(
+                    f'{var.name} (var of {pat.name}, {pat.length}b)')
+            else:
+                self.name_label.setText('No variation')
+        elif pat:
             self.name_label.setText(
                 f'{pat.name} ({pat.length}b, {pat.key} {pat.scale})')
         else:
@@ -278,29 +447,25 @@ class PianoRoll(QFrame):
     
     def _copy_to_clipboard(self):
         """Copy selected notes to clipboard."""
-        pat = self.state.find_pattern(self.state.sel_pat)
-        if not pat or not self._selected:
+        notes = self._get_edit_notes()
+        if not notes or not self._selected:
             return
-        notes_to_copy = [pat.notes[i] for i in sorted(self._selected)
-                         if 0 <= i < len(pat.notes)]
+        notes_to_copy = [notes[i] for i in sorted(self._selected)
+                         if 0 <= i < len(notes)]
         self._note_clipboard.copy(notes_to_copy)
-    
+
     def _cut_to_clipboard(self):
         """Cut selected notes (copy + delete), enter ghost mode."""
-        pat = self.state.find_pattern(self.state.sel_pat)
-        if not pat or not self._selected:
+        if not self._selected:
             return
-        
+
         self._copy_to_clipboard()
-        
-        from ..ops.note_edit import delete_selected
-        self._selected = delete_selected(pat, self._selected)
-        
+        self._delete_selected()
+
         # Enter ghost mode immediately with clipboard contents
         self._ghost_notes = self._note_clipboard.paste()
         self._ghost_offset = (0, 0)
-        
-        self.state.notify('note_edit')
+
         self.refresh()
     
     def _paste_from_clipboard(self):
@@ -313,36 +478,69 @@ class PianoRoll(QFrame):
     
     def _duplicate_selection(self):
         """Duplicate selected notes with smart offset."""
-        pat = self.state.find_pattern(self.state.sel_pat)
-        if not pat or not self._selected:
+        notes = self._get_edit_notes()
+        if not notes or not self._selected:
             return
-        
-        self._copy_to_clipboard()
-        offset_beats = max(self.state.snap, 1.0)
-        
-        from ..ops.note_edit import duplicate_notes
-        self._selected = duplicate_notes(
-            pat, self._selected, self._note_clipboard.notes, offset_beats)
-        
+
+        if self._is_variation_mode():
+            var = self.state.find_variation(self.state.sel_variation)
+            if not var:
+                return
+            from ..ops.variations import variation_add_note
+            offset_beats = max(self.state.snap, 1.0)
+            new_indices = set()
+            for idx in sorted(self._selected):
+                if 0 <= idx < len(notes):
+                    n = notes[idx]
+                    variation_add_note(self.state, var, n.pitch,
+                                       n.start + offset_beats, n.duration, n.velocity,
+                                       [list(p) for p in n.bend] if n.bend else None,
+                                       n.lyric)
+            self._selected = set()
+        else:
+            pat = self.state.find_pattern(self.state.sel_pat)
+            if not pat:
+                return
+            self._copy_to_clipboard()
+            offset_beats = max(self.state.snap, 1.0)
+            from ..ops.note_edit import duplicate_notes
+            self._selected = duplicate_notes(
+                pat, self._selected, self._note_clipboard.notes, offset_beats)
+
         self.state.notify('note_add')
         self.refresh()
-    
+
     def _commit_ghost_notes(self, mouse_x, mouse_y):
         """Commit ghost notes to the pattern at current mouse position."""
-        pat = self.state.find_pattern(self.state.sel_pat)
+        pat = self._get_edit_pattern()
         if not pat or not self._ghost_notes:
             return
-        
+
         beat, pitch = self._coords_to_beat_pitch(mouse_x, mouse_y)
-        
-        from ..ops.note_edit import commit_ghost_notes
-        self._selected = commit_ghost_notes(
-            pat, self._ghost_notes, beat, pitch,
-            self._snap, self.LO, self.HI)
-        
+
+        if self._is_variation_mode():
+            var = self.state.find_variation(self.state.sel_variation)
+            if var:
+                from ..ops.variations import variation_add_note
+                min_s = min(n.start for n in self._ghost_notes)
+                min_p = min(n.pitch for n in self._ghost_notes)
+                snap_beat = self._snap(beat)
+                for n in self._ghost_notes:
+                    new_start = max(0, snap_beat + (n.start - min_s))
+                    new_pitch = max(self.LO, min(self.HI, pitch + (n.pitch - min_p)))
+                    variation_add_note(self.state, var, new_pitch, new_start,
+                                       n.duration, n.velocity,
+                                       [list(p) for p in n.bend] if n.bend else None,
+                                       n.lyric)
+        else:
+            from ..ops.note_edit import commit_ghost_notes
+            self._selected = commit_ghost_notes(
+                pat, self._ghost_notes, beat, pitch,
+                self._snap, self.LO, self.HI)
+
         self._ghost_notes = []
         self._ghost_offset = None
-        
+
         self.state.notify('note_add')
         self.refresh()
     
@@ -354,17 +552,38 @@ class PianoRoll(QFrame):
     
     def _delete_selected(self):
         """Delete all selected notes."""
-        pat = self.state.find_pattern(self.state.sel_pat)
-        if not pat or not self._selected:
+        if not self._selected:
             return
-        
-        from ..ops.note_edit import delete_selected
-        self._selected = delete_selected(pat, self._selected)
+
+        if self._is_variation_mode():
+            var = self.state.find_variation(self.state.sel_variation)
+            if not var:
+                return
+            notes = self._get_edit_notes()
+            from ..ops.variations import variation_delete_note, variation_remove_added_note
+            added_ids = {a.note_id for a in var.additions}
+            for idx in sorted(self._selected, reverse=True):
+                if 0 <= idx < len(notes):
+                    nid = notes[idx].note_id
+                    if nid in added_ids:
+                        variation_remove_added_note(var, nid)
+                    else:
+                        variation_delete_note(var, nid)
+            self._selected = set()
+        else:
+            pat = self.state.find_pattern(self.state.sel_pat)
+            if not pat:
+                return
+            from ..ops.note_edit import delete_selected
+            self._selected = delete_selected(pat, self._selected)
+
         self.state.notify('note_edit')
         self.refresh()
     
     def _merge_selected_notes(self):
         """Merge two selected adjacent notes at the same pitch."""
+        if self._is_variation_mode():
+            return  # merge not supported in variation mode
         pat = self.state.find_pattern(self.state.sel_pat)
         if not pat or len(self._selected) != 2:
             return
@@ -399,7 +618,7 @@ class PianoRoll(QFrame):
 
     def _arm_recording(self):
         """Open the MIDI port and wait for the first note-on."""
-        pat = self.state.find_pattern(self.state.sel_pat)
+        pat = self._get_edit_pattern()
         if not pat:
             self.rec_btn.setChecked(False)
             return
@@ -500,7 +719,7 @@ class PianoRoll(QFrame):
         if not self._rec_events:
             return
 
-        pat = self.state.find_pattern(self.state.sel_pat)
+        pat = self._get_edit_pattern()
         if not pat:
             return
 
@@ -590,9 +809,9 @@ class PianoRoll(QFrame):
         
         # Ctrl/Cmd + A - Select all
         if (modifiers & Qt.ControlModifier) and key == Qt.Key_A:
-            pat = self.state.find_pattern(self.state.sel_pat)
-            if pat:
-                self._selected = set(range(len(pat.notes)))
+            notes = self._get_edit_notes()
+            if notes:
+                self._selected = set(range(len(notes)))
                 self.refresh()
             return
         
@@ -607,6 +826,336 @@ class PianoRoll(QFrame):
             return
         
         super().keyPressEvent(event)
+
+    def _on_click(self, event):
+        """Handle left mouse button press."""
+        pat = self._get_edit_pattern()
+        if not pat:
+            return
+
+        x, y = event.pos().x(), event.pos().y()
+        beat, pitch = self._coords_to_beat_pitch(x, y)
+        modifiers = event.modifiers()
+
+        # Store initial click position for deadzone check
+        self._drag_start_pos = QPoint(x, y)
+
+        # If in ghost mode, commit the paste
+        if self._ghost_notes:
+            self._commit_ghost_notes(x, y)
+            return
+
+        if self.state.tool == 'edit':
+            n, i, is_resize = self._hit_note(x, y)
+
+            # Clear arranger selection when interacting with piano roll
+            self.app.arrangement.selected_placements = []
+            self.app.arrangement.selected_beat_placements = []
+
+            # Shift modifier - marquee select or multi-select
+            if modifiers & Qt.ShiftModifier:
+                if n:
+                    # Multi-select toggle
+                    if i in self._selected:
+                        self._selected.discard(i)
+                    else:
+                        self._selected.add(i)
+                    self.refresh()
+                else:
+                    # Start marquee selection
+                    self._marquee_start = QPoint(x, y)
+            else:
+                # Regular click
+                if n and is_resize:
+                    # Resize existing note (but will check deadzone in drag)
+                    self._resize_note = n
+                elif n:
+                    # Select and prepare to drag
+                    if i not in self._selected:
+                        self._selected = {i}
+                    self._drag_note = n
+                    self._drag_offset_x = beat - n.start
+                    self.refresh()
+                else:
+                    # Create new note
+                    self._selected.clear()
+                    vel = self.vel_slider.value()
+                    dur = self.state.snap
+
+                    if self.state.note_len == 'snap':
+                        dur = self.state.snap
+                    elif self.state.note_len == 'last':
+                        dur = self.state.last_note_len
+                    else:
+                        text = self.state.note_len
+                        try:
+                            if '/' in text:
+                                parts = text.split('/')
+                                dur = float(parts[0]) / float(parts[1])
+                            else:
+                                dur = float(text)
+                        except ValueError:
+                            dur = self.state.snap
+
+                    snap_value = min(self.state.snap, dur)
+                    snap_beat = int(beat / snap_value) * snap_value
+
+                    if self._is_variation_mode():
+                        var = self.state.find_variation(self.state.sel_variation)
+                        if var:
+                            from ..ops.variations import variation_add_note
+                            variation_add_note(self.state, var, pitch, snap_beat, dur, vel)
+                    else:
+                        nn = Note(pitch=pitch, start=snap_beat, duration=dur, velocity=vel,
+                                  note_id=self.state.new_id())
+                        pat.notes.append(nn)
+                    self.state.last_note_len = dur
+                    self.app.play_note(pitch, vel, track_id=self.state.sel_trk)
+                    self.state.notify('note_add')
+                    self.refresh()
+
+        elif self.state.tool == 'slice':
+            n, i, _ = self._hit_note(x, y)
+            if n:
+                # Split the note at the current beat position
+                if n.start < beat < n.start + n.duration:
+                    if self._is_variation_mode():
+                        var = self.state.find_variation(self.state.sel_variation)
+                        if var and n.note_id:
+                            split_offset = beat - n.start
+                            added_ids = {a.note_id for a in var.additions}
+                            if n.note_id in added_ids:
+                                from ..ops.variations import variation_split_added_note
+                                variation_split_added_note(
+                                    self.state, var, n.note_id, split_offset)
+                            else:
+                                from ..ops.variations import variation_record_split
+                                variation_record_split(
+                                    self.state, var, n.note_id, split_offset)
+                    else:
+                        # Create new note for the right portion
+                        right_note = Note(
+                            pitch=n.pitch,
+                            start=beat,
+                            duration=(n.start + n.duration) - beat,
+                            velocity=n.velocity,
+                            note_id=self.state.new_id(),
+                        )
+                        # Shorten the left portion, strip its bend (can't cleanly split a curve)
+                        n.duration = beat - n.start
+                        n.bend = []
+                        # Add the right portion
+                        pat.notes.append(right_note)
+
+                    self.state.notify('note_edit')
+                    self.refresh()
+
+        elif self.state.tool == 'bend':
+            # Hit-test existing control points first
+            bn, bi = self._hit_bend_point(x, y)
+            if bn is not None:
+                # Start dragging this control point
+                self._bend_drag_note = bn
+                self._bend_drag_point_idx = bi
+            else:
+                # Click on a note body — add new control point
+                n, i, _ = self._hit_note(x, y)
+                if n:
+                    beat_off = max(0.0, min(n.duration, beat - n.start))
+                    note_y_center = (self.HI - n.pitch) * self.NH + self.NH // 2
+                    semitones = max(-2.0, min(2.0, -(y - note_y_center) / (self.NH * 2.0) * 2.0))
+                    n.bend.append([beat_off, round(semitones, 3)])
+                    n.bend.sort(key=lambda p: p[0])
+                    # Start dragging the new point
+                    self._bend_drag_note = n
+                    self._bend_drag_point_idx = next(
+                        k for k, p in enumerate(n.bend) if abs(p[0] - beat_off) < 1e-6)
+                    self.app.engine.mark_dirty()
+                    self.state.notify('note_edit')
+                    self.refresh()
+
+        elif self.state.tool == 'lyrics':
+            n, i, _ = self._hit_note(x, y)
+            if n:
+                self._edit_lyric_for_note(n, x, y)
+
+    def _on_drag(self, event):
+        """Handle mouse drag."""
+        pat = self._get_edit_pattern()
+        if not pat:
+            return
+
+        x, y = event.pos().x(), event.pos().y()
+        beat, pitch = self._coords_to_beat_pitch(x, y)
+
+        # Update ghost note preview
+        if self._ghost_notes:
+            self.grid_widget.update()
+            return
+
+        # Marquee selection
+        if self._marquee_start:
+            # Update marquee rectangle (drawing happens in paintEvent)
+            self.grid_widget.update()
+            return
+
+        if self.state.tool == 'edit':
+            # Check deadzone for resize operations (10 pixels)
+            if self._resize_note and self._drag_start_pos:
+                dist = (QPoint(x, y) - self._drag_start_pos).manhattanLength()
+                if dist < 10:
+                    # Still in deadzone, don't resize yet
+                    return
+                else:
+                    # Past deadzone, clear the start position so we don't check again
+                    self._drag_start_pos = None
+
+            if self._resize_note:
+                self._resize_note.duration = max(self.state.snap,
+                                                  self._snap(beat - self._resize_note.start))
+                self.refresh()
+            elif self._drag_note:
+                # Check deadzone for drag operations
+                if self._drag_start_pos:
+                    dist = (QPoint(x, y) - self._drag_start_pos).manhattanLength()
+                    if dist < 10:
+                        # Still in deadzone, don't move yet
+                        return
+                    else:
+                        # Past deadzone
+                        self._drag_start_pos = None
+
+                # Calculate delta from the note we're dragging
+                new_start = max(0, self._snap(beat - self._drag_offset_x))
+                new_pitch = max(self.LO, min(self.HI, pitch))
+
+                delta_start = new_start - self._drag_note.start
+                delta_pitch = new_pitch - self._drag_note.pitch
+
+                # Apply delta to all selected notes
+                notes = self._get_edit_notes() if self._is_variation_mode() else pat.notes
+                for idx in self._selected:
+                    if 0 <= idx < len(notes):
+                        notes[idx].start = max(0, notes[idx].start + delta_start)
+                        notes[idx].pitch = max(self.LO, min(self.HI,
+                                                            notes[idx].pitch + delta_pitch))
+
+                # Update the drag note position for next delta calculation
+                self._drag_note.start = new_start
+                self._drag_note.pitch = new_pitch
+
+                self.refresh()
+
+        elif self.state.tool == 'bend':
+            if self._bend_drag_note is not None and self._bend_drag_point_idx is not None:
+                n = self._bend_drag_note
+                idx = self._bend_drag_point_idx
+                if 0 <= idx < len(n.bend):
+                    new_beat_off = max(0.0, min(n.duration, beat - n.start))
+                    note_y_center = (self.HI - n.pitch) * self.NH + self.NH // 2
+                    new_semitones = max(-2.0, min(2.0, -(y - note_y_center) / (self.NH * 2.0) * 2.0))
+                    n.bend[idx] = [new_beat_off, round(new_semitones, 3)]
+                    n.bend.sort(key=lambda p: p[0])
+                    # Point may have shifted index after sort — find it by proximity
+                    self._bend_drag_point_idx = min(
+                        range(len(n.bend)),
+                        key=lambda k: abs(n.bend[k][0] - new_beat_off))
+                    self.app.engine.mark_dirty()
+                    self.grid_widget.update()
+
+    def _on_release(self, event):
+        """Handle mouse button release."""
+        # Finalize marquee selection
+        if self._marquee_start:
+            pat = self._get_edit_pattern()
+            if pat:
+                from PySide6.QtGui import QCursor
+                cursor_pos = self.grid_widget.mapFromGlobal(QCursor.pos())
+
+                from ..ops.note_edit import marquee_select
+                new_sel = marquee_select(
+                    pat,
+                    (self._marquee_start.x(), self._marquee_start.y()),
+                    (cursor_pos.x(), cursor_pos.y()),
+                    self.BW, self.NH, self.HI)
+                self._selected |= new_sel
+
+            self._marquee_start = None
+            self.refresh()
+            return
+
+        if self._resize_note:
+            self.state.last_note_len = self._resize_note.duration
+        if self._resize_note or self._drag_note:
+            # In variation mode, persist changes as NoteDelta
+            if self._is_variation_mode():
+                self._persist_variation_edits()
+            self.state.notify('note_edit')
+
+        self._drag_note = None
+        self._resize_note = None
+        self._drag_start_pos = None
+
+        # Finalise bend drag
+        if self._bend_drag_note is not None:
+            self.app.engine.mark_dirty()
+            self.state.notify('note_edit')
+            self._bend_drag_note = None
+            self._bend_drag_point_idx = None
+
+    def _on_right_click(self, event):
+        """Handle right-click."""
+        pat = self._get_edit_pattern()
+        if not pat:
+            return
+
+        x, y = event.pos().x(), event.pos().y()
+
+        if self.state.tool == 'bend':
+            # Delete bend control point under cursor
+            bn, bi = self._hit_bend_point(x, y)
+            if bn is not None and bi >= 0:
+                bn.bend.pop(bi)
+                self.app.engine.mark_dirty()
+                self.state.notify('note_edit')
+                self.refresh()
+            return
+
+        if self.state.tool == 'lyrics':
+            # Right-click in lyrics mode clears the lyric on the hit note
+            n, i, _ = self._hit_note(x, y)
+            if n and n.lyric:
+                if self._is_variation_mode():
+                    var = self.state.find_variation(self.state.sel_variation)
+                    if var:
+                        from ..ops.variations import variation_modify_note
+                        variation_modify_note(var, n.note_id, lyric='')
+                else:
+                    n.lyric = ''
+                self.state.notify('note_edit')
+                self.refresh()
+            return
+
+        n, i, _ = self._hit_note(x, y)
+
+        if n:
+            if self._is_variation_mode():
+                var = self.state.find_variation(self.state.sel_variation)
+                if var and n.note_id:
+                    # Check if it's an added note or a parent note
+                    added_ids = {a.note_id for a in var.additions}
+                    if n.note_id in added_ids:
+                        from ..ops.variations import variation_remove_added_note
+                        variation_remove_added_note(var, n.note_id)
+                    else:
+                        from ..ops.variations import variation_delete_note
+                        variation_delete_note(var, n.note_id)
+                self._selected.discard(i)
+            else:
+                from ..ops.note_edit import delete_note_at
+                self._selected = delete_note_at(pat, i, self._selected)
+            self.refresh()
+            self.state.notify('note_edit')
 
 
 class PianoKeysWidget(QWidget):
@@ -627,7 +1176,7 @@ class PianoKeysWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        pat = self.parent_roll.state.find_pattern(self.parent_roll.state.sel_pat)
+        pat = self.parent_roll._get_edit_pattern()
         in_key = scale_set(pat.key, pat.scale) if pat else set()
 
         for p in range(self.parent_roll.LO, self.parent_roll.HI + 1):
@@ -721,7 +1270,7 @@ class PianoGridWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        pat = self.parent_roll.state.find_pattern(self.parent_roll.state.sel_pat)
+        pat = self.parent_roll._get_edit_pattern()
         s = self.parent_roll.state
         
         pitch_range = self.parent_roll.HI - self.parent_roll.LO + 1
@@ -892,19 +1441,44 @@ class PianoGridWidget(QWidget):
             from PySide6.QtCore import QTimer
             QTimer.singleShot(33, self.update)
 
-        # Notes from current pattern
-        for i, n in enumerate(pat.notes):
+        # Ghost parent notes when editing a variation
+        var_mode = self.parent_roll._is_variation_mode()
+        if var_mode:
+            var = self.parent_roll.state.find_variation(self.parent_roll.state.sel_variation)
+            if var:
+                deleted_ids = set(var.deletions)
+                for n in pat.notes:
+                    x = n.start * self.parent_roll.BW
+                    y = (self.parent_roll.HI - n.pitch) * self.parent_roll.NH
+                    w = n.duration * self.parent_roll.BW
+                    ghost_color = QColor('#888888')
+                    ghost_color.setAlpha(40)
+                    painter.setPen(QPen(QColor('#666666'), 1, Qt.DotLine))
+                    painter.setBrush(ghost_color)
+                    painter.drawRect(int(x), y + 1, int(w - 1), self.parent_roll.NH - 2)
+                    # Strikethrough for deleted notes
+                    if n.note_id in deleted_ids:
+                        painter.setPen(QPen(QColor('#ff4444'), 1))
+                        mid_y = y + self.parent_roll.NH // 2
+                        painter.drawLine(int(x), mid_y, int(x + w - 1), mid_y)
+
+        # Notes from current pattern / resolved variation
+        notes = self.parent_roll._get_edit_notes() if var_mode else pat.notes
+        for i, n in enumerate(notes):
             x = n.start * self.parent_roll.BW
             y = (self.parent_roll.HI - n.pitch) * self.parent_roll.NH
             w = n.duration * self.parent_roll.BW
             sel = i in self.parent_roll._selected
             color = QColor(vel_color(n.velocity))
 
+            border_color = self.parent_roll._note_border_color(n)
             if sel:
                 painter.setPen(QPen(QColor('#fff'), 2))
+            elif border_color:
+                painter.setPen(QPen(border_color, 2))
             else:
                 painter.setPen(QPen(QColor(pat.color), 1))
-            
+
             painter.setBrush(color)
             painter.drawRect(int(x), y + 1, int(w - 1), self.parent_roll.NH - 2)
 
@@ -930,9 +1504,47 @@ class PianoGridWidget(QWidget):
                     Qt.AlignLeft | Qt.AlignVCenter, n.lyric)
                 painter.setClipping(False)
 
+        # Reference binding connectors — draw lines from bound added notes to their ref notes
+        if var_mode:
+            var = self.parent_roll.state.find_variation(self.parent_roll.state.sel_variation)
+            if var:
+                added_map = {a.note_id: a for a in var.additions}
+                # Build ref note position lookup from ghost parent notes + resolved notes
+                ref_positions = {}  # note_id → (x_center, y_center)
+                if pat:
+                    for n in pat.notes:
+                        cx = n.start * self.parent_roll.BW + n.duration * self.parent_roll.BW / 2
+                        cy = (self.parent_roll.HI - n.pitch) * self.parent_roll.NH + self.parent_roll.NH // 2
+                        ref_positions[n.note_id] = (cx, cy)
+                for n in notes:
+                    if n.note_id in added_map:
+                        added = added_map[n.note_id]
+                        if not added.ref_note_id:
+                            continue
+                        ref_pos = ref_positions.get(added.ref_note_id)
+                        if not ref_pos:
+                            continue
+                        # Added note center
+                        ax = n.start * self.parent_roll.BW + n.duration * self.parent_roll.BW / 2
+                        ay = (self.parent_roll.HI - n.pitch) * self.parent_roll.NH + self.parent_roll.NH // 2
+                        rx, ry = ref_pos
+                        # Draw connector line
+                        line_color = QColor('#00bcd4') if added.ref_bind == 'full' else QColor('#4dd0e1')
+                        line_color.setAlpha(160)
+                        painter.setPen(QPen(line_color, 1, Qt.DashLine))
+                        painter.drawLine(int(ax), int(ay), int(rx), int(ry))
+                        # Draw bind type label at midpoint
+                        mx, my = (ax + rx) / 2, (ay + ry) / 2
+                        label = 'F' if added.ref_bind == 'full' else 'P'
+                        painter.setPen(QColor('#ffffff'))
+                        painter.setFont(QFont('TkDefaultFont', 6))
+                        painter.setBrush(QColor(0, 0, 0, 140))
+                        painter.drawRect(int(mx) - 4, int(my) - 5, 9, 10)
+                        painter.drawText(int(mx) - 3, int(my) + 4, label)
+
         # Bend curves — drawn on top of all notes
         _in_bend_mode = s.tool == 'bend'
-        for i, n in enumerate(pat.notes):
+        for i, n in enumerate(notes):
             if not n.bend and not _in_bend_mode:
                 continue
 
@@ -985,8 +1597,8 @@ class PianoGridWidget(QWidget):
         # Draw slice preview line
         if self._slice_hover_pos and s.tool == 'slice':
             note_idx, beat = self._slice_hover_pos
-            if 0 <= note_idx < len(pat.notes):
-                n = pat.notes[note_idx]
+            if 0 <= note_idx < len(notes):
+                n = notes[note_idx]
                 x = beat * self.parent_roll.BW
                 y = (self.parent_roll.HI - n.pitch) * self.parent_roll.NH
                 
@@ -1067,45 +1679,49 @@ class VelocityWidget(QWidget):
         self._vel_dragging = False
 
     def _set_vel_at(self, event):
-        pat = self.parent_roll.state.find_pattern(self.parent_roll.state.sel_pat)
-        if not pat:
+        notes = self.parent_roll._get_edit_notes()
+        if not notes:
             return
-        
+
         x = event.pos().x()
         y = event.pos().y()
         vel = max(1, min(127, int((1 - y / 48) * 127)))
-        
+
         # If notes are selected, update all of them
         if self.parent_roll._selected:
             for idx in self.parent_roll._selected:
-                if 0 <= idx < len(pat.notes):
-                    pat.notes[idx].velocity = vel
+                if 0 <= idx < len(notes):
+                    notes[idx].velocity = vel
+            if self.parent_roll._is_variation_mode():
+                self.parent_roll._persist_variation_edits()
             self.parent_roll.vel_slider.setValue(vel)
             self.parent_roll.refresh()
             return
-        
+
         # Otherwise, find nearest note
         beat = x / self.parent_roll.BW
-        
+
         best = -1
         best_dist = float('inf')
-        for i, n in enumerate(pat.notes):
+        for i, n in enumerate(notes):
             d = abs(beat - n.start)
             if d < best_dist and d < 0.5:
                 best_dist = d
                 best = i
-        
+
         if best >= 0:
-            pat.notes[best].velocity = vel
+            notes[best].velocity = vel
+            if self.parent_roll._is_variation_mode():
+                self.parent_roll._persist_variation_edits()
             self.parent_roll.refresh()
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        
-        pat = self.parent_roll.state.find_pattern(self.parent_roll.state.sel_pat)
+
+        pat = self.parent_roll._get_edit_pattern()
         beats = pat.length if pat else 16
         total_w = self.width()
-        
+
         painter.fillRect(self.rect(), QColor('#12121f'))
         painter.setPen(QPen(QColor('#2a2a4a'), 0.5))
         painter.drawLine(0, 25, total_w, 25)
@@ -1113,8 +1729,9 @@ class VelocityWidget(QWidget):
         if not pat:
             return
 
+        notes = self.parent_roll._get_edit_notes()
         bw = max(3, self.parent_roll.state.snap * self.parent_roll.BW * 0.6)
-        for i, n in enumerate(pat.notes):
+        for i, n in enumerate(notes):
             x = n.start * self.parent_roll.BW + 2
             h = n.velocity / 127 * 46
             color = QColor('#fff') if i in self.parent_roll._selected else QColor(vel_color(n.velocity))
@@ -1124,296 +1741,3 @@ class VelocityWidget(QWidget):
             painter.drawRect(int(x), int(48 - h), int(bw), int(h))
 
 
-# Event handlers for PianoRoll
-def _on_click(self, event):
-    """Handle left mouse button press."""
-    pat = self.state.find_pattern(self.state.sel_pat)
-    if not pat:
-        return
-    
-    x, y = event.pos().x(), event.pos().y()
-    beat, pitch = self._coords_to_beat_pitch(x, y)
-    modifiers = event.modifiers()
-    
-    # Store initial click position for deadzone check
-    self._drag_start_pos = QPoint(x, y)
-    
-    # If in ghost mode, commit the paste
-    if self._ghost_notes:
-        self._commit_ghost_notes(x, y)
-        return
-    
-    if self.state.tool == 'edit':
-        n, i, is_resize = self._hit_note(x, y)
-        
-        # Clear arranger selection when interacting with piano roll
-        self.app.arrangement.selected_placements = []
-        self.app.arrangement.selected_beat_placements = []
-        
-        # Shift modifier - marquee select or multi-select
-        if modifiers & Qt.ShiftModifier:
-            if n:
-                # Multi-select toggle
-                if i in self._selected:
-                    self._selected.discard(i)
-                else:
-                    self._selected.add(i)
-                self.refresh()
-            else:
-                # Start marquee selection
-                self._marquee_start = QPoint(x, y)
-        else:
-            # Regular click
-            if n and is_resize:
-                # Resize existing note (but will check deadzone in drag)
-                self._resize_note = n
-            elif n:
-                # Select and prepare to drag
-                if i not in self._selected:
-                    self._selected = {i}
-                self._drag_note = n
-                self._drag_offset_x = beat - n.start
-                self.refresh()
-            else:
-                # Create new note
-                self._selected.clear()
-                vel = self.vel_slider.value()
-                dur = self.state.snap
-                
-                if self.state.note_len == 'snap':
-                    dur = self.state.snap
-                elif self.state.note_len == 'last':
-                    dur = self.state.last_note_len
-                else:
-                    text = self.state.note_len
-                    try:
-                        if '/' in text:
-                            parts = text.split('/')
-                            dur = float(parts[0]) / float(parts[1])
-                        else:
-                            dur = float(text)
-                    except ValueError:
-                        dur = self.state.snap
-                
-                snap_value = min(self.state.snap, dur)
-                snap_beat = int(beat / snap_value) * snap_value
-                
-                nn = Note(pitch=pitch, start=snap_beat, duration=dur, velocity=vel)
-                pat.notes.append(nn)
-                self.state.last_note_len = dur
-                self.app.play_note(pitch, vel, track_id=self.state.sel_trk)
-                self.state.notify('note_add')
-                self.refresh()
-    
-    elif self.state.tool == 'slice':
-        n, i, _ = self._hit_note(x, y)
-        if n:
-            # Split the note at the current beat position
-            if n.start < beat < n.start + n.duration:
-                # Create new note for the right portion
-                right_note = Note(
-                    pitch=n.pitch,
-                    start=beat,
-                    duration=(n.start + n.duration) - beat,
-                    velocity=n.velocity
-                )
-                # Shorten the left portion, strip its bend (can't cleanly split a curve)
-                n.duration = beat - n.start
-                n.bend = []
-                # Add the right portion
-                pat.notes.append(right_note)
-
-                self.state.notify('note_edit')
-                self.refresh()
-
-    elif self.state.tool == 'bend':
-        # Hit-test existing control points first
-        bn, bi = self._hit_bend_point(x, y)
-        if bn is not None:
-            # Start dragging this control point
-            self._bend_drag_note = bn
-            self._bend_drag_point_idx = bi
-        else:
-            # Click on a note body — add new control point
-            n, i, _ = self._hit_note(x, y)
-            if n:
-                beat_off = max(0.0, min(n.duration, beat - n.start))
-                note_y_center = (self.HI - n.pitch) * self.NH + self.NH // 2
-                semitones = max(-2.0, min(2.0, -(y - note_y_center) / (self.NH * 2.0) * 2.0))
-                n.bend.append([beat_off, round(semitones, 3)])
-                n.bend.sort(key=lambda p: p[0])
-                # Start dragging the new point
-                self._bend_drag_note = n
-                self._bend_drag_point_idx = next(
-                    k for k, p in enumerate(n.bend) if abs(p[0] - beat_off) < 1e-6)
-                self.app.engine.mark_dirty()
-                self.state.notify('note_edit')
-                self.refresh()
-
-    elif self.state.tool == 'lyrics':
-        n, i, _ = self._hit_note(x, y)
-        if n:
-            self._edit_lyric_for_note(n, x, y)
-
-def _on_drag(self, event):
-    """Handle mouse drag."""
-    pat = self.state.find_pattern(self.state.sel_pat)
-    if not pat:
-        return
-    
-    x, y = event.pos().x(), event.pos().y()
-    beat, pitch = self._coords_to_beat_pitch(x, y)
-    
-    # Update ghost note preview
-    if self._ghost_notes:
-        self.grid_widget.update()
-        return
-    
-    # Marquee selection
-    if self._marquee_start:
-        # Update marquee rectangle (drawing happens in paintEvent)
-        self.grid_widget.update()
-        return
-    
-    if self.state.tool == 'edit':
-        # Check deadzone for resize operations (10 pixels)
-        if self._resize_note and self._drag_start_pos:
-            dist = (QPoint(x, y) - self._drag_start_pos).manhattanLength()
-            if dist < 10:
-                # Still in deadzone, don't resize yet
-                return
-            else:
-                # Past deadzone, clear the start position so we don't check again
-                self._drag_start_pos = None
-        
-        if self._resize_note:
-            self._resize_note.duration = max(self.state.snap,
-                                              self._snap(beat - self._resize_note.start))
-            self.refresh()
-        elif self._drag_note:
-            # Check deadzone for drag operations
-            if self._drag_start_pos:
-                dist = (QPoint(x, y) - self._drag_start_pos).manhattanLength()
-                if dist < 10:
-                    # Still in deadzone, don't move yet
-                    return
-                else:
-                    # Past deadzone
-                    self._drag_start_pos = None
-            
-            # Calculate delta from the note we're dragging
-            new_start = max(0, self._snap(beat - self._drag_offset_x))
-            new_pitch = max(self.LO, min(self.HI, pitch))
-            
-            delta_start = new_start - self._drag_note.start
-            delta_pitch = new_pitch - self._drag_note.pitch
-            
-            # Apply delta to all selected notes
-            for idx in self._selected:
-                if 0 <= idx < len(pat.notes):
-                    pat.notes[idx].start = max(0, pat.notes[idx].start + delta_start)
-                    pat.notes[idx].pitch = max(self.LO, min(self.HI, 
-                                                            pat.notes[idx].pitch + delta_pitch))
-            
-            # Update the drag note position for next delta calculation
-            self._drag_note.start = new_start
-            self._drag_note.pitch = new_pitch
-
-            self.refresh()
-
-    elif self.state.tool == 'bend':
-        if self._bend_drag_note is not None and self._bend_drag_point_idx is not None:
-            n = self._bend_drag_note
-            idx = self._bend_drag_point_idx
-            if 0 <= idx < len(n.bend):
-                new_beat_off = max(0.0, min(n.duration, beat - n.start))
-                note_y_center = (self.HI - n.pitch) * self.NH + self.NH // 2
-                new_semitones = max(-2.0, min(2.0, -(y - note_y_center) / (self.NH * 2.0) * 2.0))
-                n.bend[idx] = [new_beat_off, round(new_semitones, 3)]
-                n.bend.sort(key=lambda p: p[0])
-                # Point may have shifted index after sort — find it by proximity
-                self._bend_drag_point_idx = min(
-                    range(len(n.bend)),
-                    key=lambda k: abs(n.bend[k][0] - new_beat_off))
-                self.app.engine.mark_dirty()
-                self.grid_widget.update()
-
-
-def _on_release(self, event):
-    """Handle mouse button release."""
-    # Finalize marquee selection
-    if self._marquee_start:
-        pat = self.state.find_pattern(self.state.sel_pat)
-        if pat:
-            from PySide6.QtGui import QCursor
-            cursor_pos = self.grid_widget.mapFromGlobal(QCursor.pos())
-
-            from ..ops.note_edit import marquee_select
-            new_sel = marquee_select(
-                pat,
-                (self._marquee_start.x(), self._marquee_start.y()),
-                (cursor_pos.x(), cursor_pos.y()),
-                self.BW, self.NH, self.HI)
-            self._selected |= new_sel
-
-        self._marquee_start = None
-        self.refresh()
-        return
-
-    if self._resize_note:
-        self.state.last_note_len = self._resize_note.duration
-    if self._resize_note or self._drag_note:
-        self.state.notify('note_edit')
-
-    self._drag_note = None
-    self._resize_note = None
-    self._drag_start_pos = None
-
-    # Finalise bend drag
-    if self._bend_drag_note is not None:
-        self.app.engine.mark_dirty()
-        self.state.notify('note_edit')
-        self._bend_drag_note = None
-        self._bend_drag_point_idx = None
-
-
-def _on_right_click(self, event):
-    """Handle right-click."""
-    pat = self.state.find_pattern(self.state.sel_pat)
-    if not pat:
-        return
-
-    x, y = event.pos().x(), event.pos().y()
-
-    if self.state.tool == 'bend':
-        # Delete bend control point under cursor
-        bn, bi = self._hit_bend_point(x, y)
-        if bn is not None and bi >= 0:
-            bn.bend.pop(bi)
-            self.app.engine.mark_dirty()
-            self.state.notify('note_edit')
-            self.refresh()
-        return
-
-    if self.state.tool == 'lyrics':
-        # Right-click in lyrics mode clears the lyric on the hit note
-        n, i, _ = self._hit_note(x, y)
-        if n and n.lyric:
-            n.lyric = ''
-            self.state.notify('note_edit')
-            self.refresh()
-        return
-
-    n, i, _ = self._hit_note(x, y)
-
-    if n:
-        from ..ops.note_edit import delete_note_at
-        self._selected = delete_note_at(pat, i, self._selected)
-        self.refresh()
-        self.state.notify('note_edit')
-
-# Attach methods
-PianoRoll._on_click = _on_click
-PianoRoll._on_drag = _on_drag
-PianoRoll._on_release = _on_release
-PianoRoll._on_right_click = _on_right_click

@@ -61,7 +61,7 @@ def capture_state(state) -> dict:
     """Capture a serializable snapshot of AppState.
     
     Only captures the parts we want to undo/redo:
-    - patterns, tracks, placements
+    - patterns, tracks, placements, variations
     - beat_kit, beat_patterns, beat_tracks, beat_placements
     - automation_patterns, automation_tracks, automation_placements
     - bpm, snap, ts_num, ts_den
@@ -86,6 +86,7 @@ def capture_state(state) -> dict:
         'automation_patterns': copy.deepcopy([p.to_dict() for p in state.automation_patterns]),
         'automation_tracks': copy.deepcopy([t.to_dict() for t in state.automation_tracks]),
         'automation_placements': copy.deepcopy([p.to_dict() for p in state.automation_placements]),
+        'variations': copy.deepcopy([v.to_dict() for v in state.variations]),
         '_next_id': state._next_id,
     }
 
@@ -95,9 +96,10 @@ def restore_state(state, snapshot: dict):
     
     Preserves selection and playback state.
     """
-    from .state import (Pattern, Track, Placement, BeatInstrument, 
+    from .state import (Pattern, Track, Placement, BeatInstrument,
                        BeatPattern, BeatTrack, BeatPlacement,
-                       AutomationPattern, AutomationTrack, AutomationPlacement)
+                       AutomationPattern, AutomationTrack, AutomationPlacement,
+                       Variation)
     
     state.bpm = snapshot['bpm']
     state.snap = snapshot['snap']
@@ -116,9 +118,11 @@ def restore_state(state, snapshot: dict):
     state.automation_patterns = [AutomationPattern.from_dict(p) for p in snapshot.get('automation_patterns', [])]
     state.automation_tracks = [AutomationTrack.from_dict(t) for t in snapshot.get('automation_tracks', [])]
     state.automation_placements = [AutomationPlacement.from_dict(p) for p in snapshot.get('automation_placements', [])]
-    
+
+    state.variations = [Variation.from_dict(v) for v in snapshot.get('variations', [])]
+
     state._next_id = snapshot['_next_id']
-    
+
     # Clear selections that reference deleted objects
     if state.sel_pat and not state.find_pattern(state.sel_pat):
         state.sel_pat = None
@@ -138,3 +142,5 @@ def restore_state(state, snapshot: dict):
         state.sel_auto_trk = None
     if state.sel_auto_pl and not state.find_automation_placement(state.sel_auto_pl):
         state.sel_auto_pl = None
+    if state.sel_variation and not state.find_variation(state.sel_variation):
+        state.sel_variation = None

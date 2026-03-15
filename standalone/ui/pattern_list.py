@@ -1,7 +1,7 @@
 """Left panel - pattern and beat pattern lists with drag support."""
 
-from PySide6.QtWidgets import (QFrame, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, 
-                                QScrollArea, QWidget)
+from PySide6.QtWidgets import (QFrame, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
+                                QScrollArea, QWidget, QLineEdit, QSizePolicy, QMenu)
 from PySide6.QtCore import Qt, QMimeData, Signal
 from PySide6.QtGui import QPainter, QColor, QDrag, QFont
 
@@ -17,6 +17,7 @@ class PatternList(QFrame):
         self.state = app.state
         self.setFixedWidth(260)
         self._drag_data = None
+        self._expanded_parents = set()  # parent pattern IDs with variations expanded
         self._build()
 
     def _build(self):
@@ -165,6 +166,11 @@ class PatternList(QFrame):
 
     def refresh(self):
         """Rebuild pattern lists from state."""
+        # Auto-expand parent of selected variation
+        if self.state.sel_variation:
+            var = self.state.find_variation(self.state.sel_variation)
+            if var:
+                self._expanded_parents.add(var.parent_id)
         self._render_patterns()
         self._render_beat_patterns()
         self._render_automation_patterns()
@@ -186,6 +192,16 @@ class PatternList(QFrame):
         for pat in self.state.patterns:
             item = PatternItem(self, pat, self.state.sel_pat == pat.id)
             self.pat_layout.insertWidget(self.pat_layout.count() - 1, item)
+            # Collapsible variation list
+            child_vars = self.state.variations_of(pat.id)
+            if child_vars:
+                expanded = pat.id in self._expanded_parents
+                toggle = VariationToggle(self, pat.id, len(child_vars), expanded)
+                self.pat_layout.insertWidget(self.pat_layout.count() - 1, toggle)
+                if expanded:
+                    for var in child_vars:
+                        vitem = VariationItem(self, var, pat, self.state.sel_variation == var.id)
+                        self.pat_layout.insertWidget(self.pat_layout.count() - 1, vitem)
 
     def _render_beat_patterns(self):
         # Clear existing widgets except stretch
@@ -235,6 +251,7 @@ class PatternList(QFrame):
         self.state.sel_pat = pid
         self.state.sel_beat_pat = None
         self.state.sel_auto_pat = None
+        self.state.sel_variation = None
         # Clear piano roll selection when selecting pattern
         self.app.piano_roll.clear_selection()
         # Clear arrangement selection when selecting pattern
@@ -264,7 +281,71 @@ class PatternList(QFrame):
         self.app.arrangement.selected_beat_placements = []
         self.state.notify('sel_auto_pat')
 
+    def _select_variation(self, vid):
+        if self.state.sel_variation == vid:
+            return
+        self.state.sel_variation = vid
+        self.state.sel_pat = None
+        self.state.sel_beat_pat = None
+        self.state.sel_auto_pat = None
+        # Auto-expand parent
+        var = self.state.find_variation(vid)
+        if var:
+            self._expanded_parents.add(var.parent_id)
+        self.app.piano_roll.clear_selection()
+        self.app.arrangement.selected_placements = []
+        self.app.arrangement.selected_beat_placements = []
+        self.state.notify('sel_variation')
+
+    def _new_variation(self, parent_id):
+        from ..ops.variations import create_variation
+        var = create_variation(self.state, parent_id)
+        if var:
+            self._expanded_parents.add(parent_id)
+            self._select_variation(var.id)
+            self.state.notify('new_variation')
+
+    def _toggle_variations(self, parent_id):
+        if parent_id in self._expanded_parents:
+            self._expanded_parents.discard(parent_id)
+        else:
+            self._expanded_parents.add(parent_id)
+        self.refresh()
+
+    def _flatten_variation(self, vid):
+        from ..ops.variations import flatten_variation
+        flatten_variation(self.state, vid)
+        self.state.sel_variation = None
+        self.state.notify('flatten_variation')
+
+    def _del_variation(self, vid):
+        from ..ops.variations import delete_variation
+        delete_variation(self.state, vid)
+        self.state.notify('delete_variation')
+
     def _del_pat(self, pid):
+        # Check for child variations
+        child_vars = self.state.variations_of(pid)
+        if child_vars:
+            from PySide6.QtWidgets import QMessageBox
+            msg = QMessageBox(self)
+            msg.setWindowTitle('Delete Pattern')
+            msg.setText(f'This pattern has {len(child_vars)} variation(s).')
+            msg.setInformativeText('What would you like to do?')
+            delete_all = msg.addButton('Delete All', QMessageBox.DestructiveRole)
+            make_unique = msg.addButton('Make Unique', QMessageBox.ActionRole)
+            msg.addButton(QMessageBox.Cancel)
+            msg.exec()
+            clicked = msg.clickedButton()
+            if clicked == delete_all:
+                from ..ops.variations import delete_pattern_with_variations
+                delete_pattern_with_variations(self.state, pid, 'delete_all')
+                self.state.notify('delete_pattern')
+            elif clicked == make_unique:
+                from ..ops.variations import delete_pattern_with_variations
+                delete_pattern_with_variations(self.state, pid, 'make_unique')
+                self.state.notify('delete_pattern')
+            return
         from ..ops.patterns import delete_pattern
         delete_pattern(self.state, pid)
 
@@ -420,7 +501,6 @@ class PatternItem(QFrame):
         name_label.setAttribute(Qt.WA_TransparentForMouseEvents)
         # Prevent text from expanding and enable elision
         name_label.setWordWrap(False)
-        from PySide6.QtWidgets import QSizePolicy
         name_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         name_font = QFont()
         name_font.setPointSize(9)
@@ -451,12 +531,20 @@ class PatternItem(QFrame):
         # Action buttons - fixed width container so buttons don't get pushed off
         btn_frame = QFrame()
         btn_frame.setStyleSheet('background-color: transparent; border: none;')
-        btn_frame.setFixedWidth(84)
+        btn_frame.setFixedWidth(110)
         btn_layout = QHBoxLayout(btn_frame)
         btn_layout.setContentsMargins(0, 0, 0, 0)
         btn_layout.setSpacing(2)
 
-        # Copy button (overlapping squares icon) - with visible border for debugging
+        # Variation button
+        var_btn = QPushButton('V')
+        var_btn.setStyleSheet('background-color: transparent; color: #4a90e2; border: 1px solid #555; font-size: 12px; padding: 2px;')
+        var_btn.setFixedWidth(26)
+        var_btn.setToolTip('Create variation')
+        var_btn.clicked.connect(lambda: parent_list._new_variation(pattern.id))
+        btn_layout.addWidget(var_btn)
+
+        # Copy button (overlapping squares icon)
         dup_btn = QPushButton('⧉')
         dup_btn.setStyleSheet('background-color: transparent; color: #aaa; border: 1px solid #555; font-size: 16px; padding: 2px;')
         dup_btn.setFixedWidth(26)
@@ -563,7 +651,6 @@ class BeatPatternItem(QFrame):
         name_label.setAttribute(Qt.WA_TransparentForMouseEvents)
         # Prevent text from expanding and enable elision
         name_label.setWordWrap(False)
-        from PySide6.QtWidgets import QSizePolicy
         name_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         name_font = QFont()
         name_font.setPointSize(9)
@@ -658,7 +745,6 @@ class AutomationPatternItem(QFrame):
         name_label.setStyleSheet('color: #eee; background-color: transparent; border: none;')
         name_label.setAttribute(Qt.WA_TransparentForMouseEvents)
         name_label.setWordWrap(False)
-        from PySide6.QtWidgets import QSizePolicy
         name_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         name_font = QFont()
         name_font.setPointSize(9)
@@ -730,6 +816,144 @@ class AutomationPatternItem(QFrame):
         mime.setText(f'automation_pattern:{self.pattern.id}')
         drag.setMimeData(mime)
         drag.exec(Qt.CopyAction)
+
+
+class VariationToggle(QFrame):
+    """Small clickable row to expand/collapse the variation list below a parent."""
+
+    def __init__(self, parent_list, parent_id, count, expanded):
+        super().__init__(parent_list)
+        self.parent_list = parent_list
+        self.parent_id = parent_id
+        self.setCursor(Qt.PointingHandCursor)
+        self.setStyleSheet('background-color: #16213e; border: none;')
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(22, 0, 4, 0)
+        layout.setSpacing(4)
+
+        symbol = '\u2212' if expanded else '+'  # minus sign or plus
+        suffix = 's' if count != 1 else ''
+        label = QLabel(f'[{symbol}] {count} variation{suffix}')
+        label.setStyleSheet('color: #4a90e2; background-color: transparent; border: none;')
+        label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        font = QFont()
+        font.setPointSize(7)
+        label.setFont(font)
+        layout.addWidget(label)
+        layout.addStretch()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.parent_list._toggle_variations(self.parent_id)
+
+
+class VariationItem(QFrame):
+    """Compact variation item displayed indented below its parent pattern."""
+
+    def __init__(self, parent_list, variation, parent_pat, selected):
+        super().__init__(parent_list)
+        self.parent_list = parent_list
+        self.variation = variation
+        self.setCursor(Qt.PointingHandCursor)
+        self._renaming = False
+
+        bg_color = '#1e2a4a' if selected else '#16213e'
+        border_color = '#4a90e2' if selected else '#16213e'
+        self.setStyleSheet(f'background-color: {bg_color}; border: 1px solid {border_color};')
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(28, 1, 4, 1)
+        layout.setSpacing(4)
+
+        # Color dot
+        dot_widget = ColorDot(variation.color)
+        dot_widget.setAttribute(Qt.WA_TransparentForMouseEvents)
+        layout.addWidget(dot_widget)
+
+        # Name label (single line, compact)
+        self.name_label = QLabel(variation.name)
+        self.name_label.setStyleSheet('color: #ccc; background-color: transparent; border: none; font-style: italic;')
+        self.name_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.name_label.setWordWrap(False)
+        self.name_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        name_font = QFont()
+        name_font.setPointSize(8)
+        name_font.setItalic(True)
+        self.name_label.setFont(name_font)
+        layout.addWidget(self.name_label, stretch=1)
+
+        # Inline rename editor (hidden)
+        self.name_edit = QLineEdit(variation.name)
+        self.name_edit.setStyleSheet('color: #eee; background-color: #0a1628; border: 1px solid #4a90e2; padding: 0px 2px;')
+        self.name_edit.setFont(name_font)
+        self.name_edit.hide()
+        self.name_edit.editingFinished.connect(self._finish_rename)
+        layout.addWidget(self.name_edit, stretch=1)
+
+        # Buttons (compact)
+        btn_frame = QFrame()
+        btn_frame.setStyleSheet('background-color: transparent; border: none;')
+        btn_frame.setFixedWidth(50)
+        btn_layout = QHBoxLayout(btn_frame)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(2)
+
+        flat_btn = QPushButton('F')
+        flat_btn.setStyleSheet('background-color: transparent; color: #aaa; border: 1px solid #555; font-size: 11px; padding: 1px;')
+        flat_btn.setFixedSize(22, 18)
+        flat_btn.setToolTip('Flatten to independent pattern')
+        flat_btn.clicked.connect(lambda: parent_list._flatten_variation(variation.id))
+        btn_layout.addWidget(flat_btn)
+
+        del_btn = QPushButton('\u2715')
+        del_btn.setStyleSheet('background-color: transparent; color: #aaa; border: 1px solid #555; font-size: 13px; padding: 1px;')
+        del_btn.setFixedSize(22, 18)
+        del_btn.setToolTip('Delete variation')
+        del_btn.clicked.connect(lambda: parent_list._del_variation(variation.id))
+        btn_layout.addWidget(del_btn)
+
+        layout.addWidget(btn_frame)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.parent_list._select_variation(self.variation.id)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._start_rename()
+
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        rename_act = menu.addAction('Rename')
+        flatten_act = menu.addAction('Flatten')
+        delete_act = menu.addAction('Delete')
+        action = menu.exec(event.globalPos())
+        if action == rename_act:
+            self._start_rename()
+        elif action == flatten_act:
+            self.parent_list._flatten_variation(self.variation.id)
+        elif action == delete_act:
+            self.parent_list._del_variation(self.variation.id)
+
+    def _start_rename(self):
+        self._renaming = True
+        self.name_label.hide()
+        self.name_edit.setText(self.variation.name)
+        self.name_edit.show()
+        self.name_edit.setFocus()
+        self.name_edit.selectAll()
+
+    def _finish_rename(self):
+        if not self._renaming:
+            return
+        self._renaming = False
+        new_name = self.name_edit.text().strip()
+        if new_name:
+            self.variation.name = new_name
+        self.name_edit.hide()
+        self.name_label.setText(self.variation.name)
+        self.name_label.show()
 
 
 class ColorDot(QWidget):

@@ -163,11 +163,15 @@ def _build_server_schedule(state) -> list[dict]:
     """Convert AppState to a flat list of server event dicts."""
     events = []
 
+    from ..ops.variations import resolve_placement_notes
+
     # --- Melodic tracks ---
     for pl in state.placements:
-        t   = state.find_track(pl.track_id)
-        pat = state.find_pattern(pl.pattern_id)
-        if not t or not pat:
+        t = state.find_track(pl.track_id)
+        if not t:
+            continue
+        notes, pat_length, pat_key, pat_scale = resolve_placement_notes(state, pl)
+        if notes is None:
             continue
 
         node_id = f"track_{t.id}"
@@ -188,8 +192,8 @@ def _build_server_schedule(state) -> list[dict]:
         transpose = state.compute_transpose(pl)
         reps = pl.repeats or 1
         for rep in range(reps):
-            offset = pl.time + rep * pat.length
-            for n in pat.notes:
+            offset = pl.time + rep * pat_length
+            for n in notes:
                 p = max(0, min(127, n.pitch + transpose))
                 v = max(1, min(127, n.velocity))
                 on_beat  = offset + n.start
