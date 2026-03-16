@@ -7,6 +7,7 @@
 //   1 — Velocity:  normalized velocity of most recent note-on in band
 //   2 — Pitch:     position of most recent note within [pitch_lo, pitch_hi] → [0,1]
 //   3 — NoteCount: simultaneous held notes / band width, clamped to [0,1]
+//   4 — Pulse:     1.0 for one block on each note-on, 0.0 otherwise
 
 #include "plugin_api.h"
 #include <algorithm>
@@ -20,7 +21,7 @@ public:
         d.display_name = "Event → Control";
         d.category     = "Converters";
         d.doc          = "Converts MIDI note events into a control signal. "
-                         "Modes: Gate, Velocity, Pitch, NoteCount.";
+                         "Modes: Gate, Velocity, Pitch, NoteCount, Pulse.";
         d.author       = "builtin";
         d.version      = 1;
 
@@ -32,8 +33,8 @@ public:
               ControlHint::Continuous, 0.0f, 0.0f, 1.0f },
             { "mode", "Mode", "Output mode",
               PluginPortType::Control, PortRole::Input,
-              ControlHint::Categorical, 0.0f, 0.0f, 3.0f, 1.0f,
-              {"Gate", "Velocity", "Pitch", "NoteCount"} },
+              ControlHint::Categorical, 0.0f, 0.0f, 4.0f, 1.0f,
+              {"Gate", "Velocity", "Pitch", "NoteCount", "Pulse"} },
             { "pitch_lo", "Pitch Low", "Lower bound of pitch band",
               PluginPortType::Control, PortRole::Input,
               ControlHint::Integer, 0.0f, 0.0f, 127.0f, 1.0f },
@@ -48,6 +49,7 @@ public:
     void note_on(int channel, int pitch, int velocity) override {
         if (!in_band(pitch)) return;
         active_[channel * 128 + pitch] = velocity;
+        pulse_pending_ = true;
         recompute();
     }
 
@@ -75,9 +77,17 @@ public:
         auto* lo_ctl   = buffers.control.get("pitch_lo");
         auto* hi_ctl   = buffers.control.get("pitch_hi");
 
-        if (mode_ctl) mode_     = std::max(0, std::min(3, static_cast<int>(mode_ctl->value)));
+        if (mode_ctl) mode_     = std::max(0, std::min(4, static_cast<int>(mode_ctl->value)));
         if (lo_ctl)   pitch_lo_ = std::max(0, std::min(127, static_cast<int>(lo_ctl->value)));
         if (hi_ctl)   pitch_hi_ = std::max(0, std::min(127, static_cast<int>(hi_ctl->value)));
+
+        // Pulse mode: output 1.0 for one block on note onset, then 0.0
+        if (mode_ == 4) {
+            auto* out = buffers.control.get("control_out");
+            if (out) out->value = pulse_pending_ ? 1.0f : 0.0f;
+            pulse_pending_ = false;
+            return;
+        }
 
         // Recompute in case band changed
         recompute();
@@ -91,6 +101,7 @@ private:
     int   pitch_lo_ = 0;
     int   pitch_hi_ = 127;
     float current_value_ = 0.0f;
+    bool  pulse_pending_ = false;
 
     // key = channel*128 + pitch, value = velocity
     std::unordered_map<int, int> active_;

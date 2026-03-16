@@ -387,6 +387,9 @@ plugin_library(control_to_note  SOURCES plugins/builtin/control_to_note_plugin.c
 plugin_library(control_lfo     SOURCES plugins/builtin/control_lfo_plugin.cpp)
 plugin_library(control_resonator  SOURCES plugins/builtin/control_resonator_plugin.cpp)
 plugin_library(control_delay_line  SOURCES plugins/builtin/control_delay_line_plugin.cpp)
+plugin_library(control_smooth     SOURCES plugins/builtin/control_smooth_plugin.cpp)
+plugin_library(control_diff       SOURCES plugins/builtin/control_diff_plugin.cpp)
+plugin_library(control_function   SOURCES plugins/builtin/control_function_plugin.cpp)
 
 # --- Audio effect plugins ---
 plugin_library(amp              SOURCES plugins/builtin/amp_plugin.cpp)
@@ -459,6 +462,9 @@ add_dependencies(audio_server_lib
     arranger_plugin_subtractive_synth
     arranger_plugin_fm_synth
     arranger_plugin_waveguide_string
+    arranger_plugin_control_smooth
+    arranger_plugin_control_diff
+    arranger_plugin_control_function
 )
 
 if(ENABLE_SF2)
