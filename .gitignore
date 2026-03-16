@@ -12,3 +12,4 @@ bin/
 *.so
 *.dll
 .claude/
+test_pitch_delta
