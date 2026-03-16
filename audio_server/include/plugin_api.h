@@ -232,7 +232,10 @@ struct AudioPortBuffer {
 };
 
 struct ControlPortBuffer {
-    float  value   = 0.0f;
+    float  value           = 0.0f;     // block-rate summary (always valid)
+    float* samples         = nullptr;  // per-sample buffer (block_size floats, valid when non-null)
+    int    frames          = 0;        // number of valid samples (== block_size when active)
+    bool   samples_written = false;    // set by producer after writing per-sample data
 };
 
 struct EventPortBuffer {

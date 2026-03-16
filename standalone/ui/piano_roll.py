@@ -329,12 +329,15 @@ class PianoRoll(QFrame):
         vel_layout_wrapper.addWidget(self.vel_widget)
         layout.addLayout(vel_layout_wrapper)
 
-        # Sync scrolling (Grid -> Keys)
+        # Sync scrolling (Grid -> Keys, Grid -> Velocity)
         self.scroll_area.verticalScrollBar().valueChanged.connect(
             self.keys_scroll.verticalScrollBar().setValue
         )
         self.keys_scroll.verticalScrollBar().valueChanged.connect(
             self.scroll_area.verticalScrollBar().setValue
+        )
+        self.scroll_area.horizontalScrollBar().valueChanged.connect(
+            self.vel_widget.update
         )
         
         self.setFocusPolicy(Qt.StrongFocus)
@@ -1699,7 +1702,8 @@ class VelocityWidget(QWidget):
             return
 
         # Otherwise, find nearest note
-        beat = x / self.parent_roll.BW
+        scroll_off = self.parent_roll.scroll_area.horizontalScrollBar().value()
+        beat = (x + scroll_off) / self.parent_roll.BW
 
         best = -1
         best_dist = float('inf')
@@ -1731,8 +1735,9 @@ class VelocityWidget(QWidget):
 
         notes = self.parent_roll._get_edit_notes()
         bw = max(3, self.parent_roll.state.snap * self.parent_roll.BW * 0.6)
+        scroll_off = self.parent_roll.scroll_area.horizontalScrollBar().value()
         for i, n in enumerate(notes):
-            x = n.start * self.parent_roll.BW + 2
+            x = n.start * self.parent_roll.BW + 2 - scroll_off
             h = n.velocity / 127 * 46
             color = QColor('#fff') if i in self.parent_roll._selected else QColor(vel_color(n.velocity))
             

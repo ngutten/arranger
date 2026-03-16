@@ -251,15 +251,27 @@ void PluginAdapterNode::process(
             auto& cb = buffers_.control.entries[ctrl_map_i].second;
             if (is_out) {
                 cb.value = 0.0f;
+                cb.samples_written = false;
+                cb.samples = outputs[out_i].control_buf;
+                cb.frames  = ctx.block_size;
                 out_i++;
             } else {
                 assert(in_i < static_cast<int>(inputs.size()));
-                cb.value = inputs[in_i++].control;
+                cb.value = inputs[in_i].control;
+                cb.samples = inputs[in_i].control_buf;
+                cb.frames  = ctx.block_size;
                 if (control_map_[ctrl_map_i].has_pending &&
                     !control_map_[ctrl_map_i].is_connected) {
-                    cb.value = control_map_[ctrl_map_i].pending_value->load(
+                    float pv = control_map_[ctrl_map_i].pending_value->load(
                         std::memory_order_relaxed);
+                    cb.value = pv;
+                    // Fill per-sample buffer with constant for unconnected ports
+                    if (cb.samples) {
+                        for (int s = 0; s < ctx.block_size; ++s)
+                            cb.samples[s] = pv;
+                    }
                 }
+                in_i++;
             }
             ctrl_map_i++;
             break;
@@ -306,8 +318,17 @@ void PluginAdapterNode::process(
         case PluginPortType::Control: {
             for (size_t ci = 0; ci < control_map_.size(); ++ci) {
                 if (control_map_[ci].plugin_port_id == pd.id) {
-                    outputs[out_i].control =
-                        buffers_.control.entries[ci].second.value;
+                    auto& cb = buffers_.control.entries[ci].second;
+                    outputs[out_i].control = cb.value;
+                    if (cb.samples_written) {
+                        outputs[out_i].control_per_sample = true;
+                    } else if (outputs[out_i].control_buf) {
+                        // Block-rate producer: fill pool buffer with constant
+                        float* buf = outputs[out_i].control_buf;
+                        for (int s = 0; s < pctx.block_size; ++s)
+                            buf[s] = cb.value;
+                        outputs[out_i].control_per_sample = false;
+                    }
                     break;
                 }
             }

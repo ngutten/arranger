@@ -66,25 +66,25 @@ public:
         auto* out = buffers.audio.get("audio_out");
         if (!in || !out) return;
 
-        float gain  = param(buffers, "gain",  1.0f);
+        auto* gain_buf = buffers.control.get("gain");
+        bool  ps_gain  = gain_buf && gain_buf->samples;
+        float const_g  = gain_buf ? gain_buf->value : 1.0f;
+
         float drive = std::max(0.5f, param(buffers, "drive", 1.0f));
         float pan   = param(buffers, "pan",   0.0f);
 
-        // Equal-power panning
-        // pan in [-1, 1] → angle in [0, π/2]
-        // Use a simple approximation: sqrt-law panning
+        // Equal-power panning (sqrt-law)
         float pan_norm = (pan + 1.0f) * 0.5f;  // [0, 1]
         float pan_l = std::sqrt(1.0f - pan_norm);
         float pan_r = std::sqrt(pan_norm);
 
         // Normalisation constant so tanh soft-clipping is unity at small signals
-        // output = tanh(x * drive) / tanh(drive) — at x=1, gain=1 this saturates
-        // gracefully. We pre-compute the denominator once per block.
         float norm = 1.0f / std::tanh(drive);
 
-        float effective_gain = gain * drive;
-
         for (int i = 0; i < ctx.block_size; ++i) {
+            float g = ps_gain ? gain_buf->samples[i] : const_g;
+            float effective_gain = g * drive;
+
             float l = in->left[i];
             float r = in->right ? in->right[i] : l;
 

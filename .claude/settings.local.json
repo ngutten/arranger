@@ -14,7 +14,8 @@
       "Bash(cd /home/claude/arranger/audio_server/build && ./test_graph && ./test_render 2>&1)",
       "WebFetch(domain:www.ee.columbia.edu)",
       "WebFetch(domain:www.dsprelated.com)",
-      "Bash(./test_graph:*)"
+      "Bash(./test_graph:*)",
+      "Bash(./audio_server/build/test_graph:*)"
     ]
   }
 }

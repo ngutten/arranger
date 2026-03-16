@@ -45,11 +45,27 @@ public:
     }
 
     void process(const PluginProcessContext& /*ctx*/, PluginBuffers& buffers) override {
-        float a = param(buffers, "a", 1.0f);
-        float b = param(buffers, "b", 1.0f);
+        auto* a_buf = buffers.control.get("a");
+        auto* b_buf = buffers.control.get("b");
+        auto* out   = buffers.control.get("output");
+        if (!out) return;
 
-        auto* out = buffers.control.get("output");
-        if (out) out->value = a * b;
+        float a_val = a_buf ? a_buf->value : 1.0f;
+        float b_val = b_buf ? b_buf->value : 1.0f;
+        bool ps_a = a_buf && a_buf->samples;
+        bool ps_b = b_buf && b_buf->samples;
+
+        if ((ps_a || ps_b) && out->samples && out->frames > 0) {
+            for (int i = 0; i < out->frames; ++i) {
+                float a = ps_a ? a_buf->samples[i] : a_val;
+                float b = ps_b ? b_buf->samples[i] : b_val;
+                out->samples[i] = a * b;
+            }
+            out->value = out->samples[0];
+            out->samples_written = true;
+        } else {
+            out->value = a_val * b_val;
+        }
     }
 
 private:

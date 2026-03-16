@@ -109,10 +109,20 @@ public:
         auto* out = buffers.audio.get("audio_out");
         if (!in || !out) return;
 
-        float semitones = std::clamp(param(buffers, "semitones", 0.f), -24.f, 24.f);
-        double ratio    = std::pow(2.0, semitones / 12.0);
+        auto* semi_ctl = buffers.control.get("semitones");
+        bool  ps_semi  = semi_ctl && semi_ctl->samples;
+        float const_semi = std::clamp(semi_ctl ? semi_ctl->value : 0.f, -24.f, 24.f);
+        double ratio     = std::pow(2.0, const_semi / 12.0);
 
         for (int i = 0; i < ctx.block_size; ++i) {
+            // Per-sample semitones: recompute ratio on change
+            if (ps_semi) {
+                float s = std::clamp(semi_ctl->samples[i], -24.f, 24.f);
+                if (s != last_semitones_) {
+                    ratio = std::pow(2.0, s / 12.0);
+                    last_semitones_ = s;
+                }
+            }
             // ----- Write current sample -----
             buf_[0][write_pos_] = in->left[i];
             buf_[1][write_pos_] = in->right ? in->right[i] : in->left[i];
@@ -197,7 +207,8 @@ private:
         return p ? p->value : fallback;
     }
 
-    float  sample_rate_ = 44100.f;
+    float  sample_rate_     = 44100.f;
+    float  last_semitones_  = -999.f;   // for on-change ratio recomputation
 
     std::vector<float> buf_[2];
 

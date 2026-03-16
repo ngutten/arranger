@@ -156,22 +156,42 @@ public:
         if (!in || !out) return;
 
         int   mode = std::clamp(static_cast<int>(param(buffers, "mode", 0.f)), 0, 3);
-        float freq = std::clamp(param(buffers, "frequency", 1000.f), 20.f, sample_rate_ * 0.49f);
         float q    = std::max(0.1f, param(buffers, "q", 0.707f));
+        float sr   = sample_rate_;
 
-        // Recompute coefficients only if something changed (control rate)
-        if (mode != last_mode_ || freq != last_freq_ || q != last_q_) {
-            filter_L_.compute(mode, freq, q, sample_rate_);
-            filter_R_ = filter_L_;   // Same coefficients for both channels
-            last_mode_ = mode;
-            last_freq_ = freq;
-            last_q_    = q;
-        }
+        auto* freq_buf = buffers.control.get("frequency");
+        bool  ps_freq  = freq_buf && freq_buf->samples;
 
-        for (int i = 0; i < ctx.block_size; ++i) {
-            out->left[i] = filter_L_.process(in->left[i]);
-            if (out->right)
-                out->right[i] = filter_R_.process(in->right ? in->right[i] : in->left[i]);
+        if (!ps_freq) {
+            // Block-rate path (original)
+            float freq = std::clamp(freq_buf ? freq_buf->value : 1000.f, 20.f, sr * 0.49f);
+            if (mode != last_mode_ || freq != last_freq_ || q != last_q_) {
+                filter_L_.compute(mode, freq, q, sr);
+                filter_R_ = filter_L_;
+                last_mode_ = mode;
+                last_freq_ = freq;
+                last_q_    = q;
+            }
+            for (int i = 0; i < ctx.block_size; ++i) {
+                out->left[i] = filter_L_.process(in->left[i]);
+                if (out->right)
+                    out->right[i] = filter_R_.process(in->right ? in->right[i] : in->left[i]);
+            }
+        } else {
+            // Per-sample frequency path
+            for (int i = 0; i < ctx.block_size; ++i) {
+                float freq = std::clamp(freq_buf->samples[i], 20.f, sr * 0.49f);
+                if (freq != last_freq_ || mode != last_mode_ || q != last_q_) {
+                    filter_L_.compute(mode, freq, q, sr);
+                    filter_R_ = filter_L_;
+                    last_mode_ = mode;
+                    last_freq_ = freq;
+                    last_q_    = q;
+                }
+                out->left[i] = filter_L_.process(in->left[i]);
+                if (out->right)
+                    out->right[i] = filter_R_.process(in->right ? in->right[i] : in->left[i]);
+            }
         }
     }
 

@@ -89,25 +89,41 @@ public:
         bool  sync  = param(buffers, "sync",  0.0f) >= 0.5f;
         float beats = std::max(0.0625f, param(buffers, "beats", 4.0f));
 
-        double phase;
-        if (sync) {
-            // Phase driven by beat_position — no state needed, always coherent
-            phase = std::fmod(ctx.beat_position / beats, 1.0);
-        } else {
-            // Free-running: advance by freq/sample_rate per block
-            // We evaluate once per block (control rate), so advance by
-            // one block's worth of phase.
-            double inc = (freq * ctx.block_size) / sample_rate_;
-            phase_ = std::fmod(phase_ + inc, 1.0);
-            phase = phase_;
-        }
-
-        float raw = evaluate(shape, static_cast<float>(phase));
-        // raw is in [-1, 1]; map to [offset - amplitude, offset + amplitude]
-        float value = std::clamp(off + amp * raw, 0.0f, 1.0f);
-
         auto* out = buffers.control.get("control_out");
-        if (out) out->value = value;
+        if (!out) return;
+
+        if (out->samples && out->frames > 0) {
+            // Per-sample output: write full waveform into buffer
+            double phase_inc = sync
+                ? ctx.beats_per_sample / beats
+                : static_cast<double>(freq) / sample_rate_;
+
+            for (int i = 0; i < out->frames; ++i) {
+                double phase;
+                if (sync) {
+                    phase = std::fmod((ctx.beat_position + i * ctx.beats_per_sample) / beats, 1.0);
+                } else {
+                    phase_ = std::fmod(phase_ + phase_inc, 1.0);
+                    phase = phase_;
+                }
+                float raw = evaluate(shape, static_cast<float>(phase));
+                out->samples[i] = std::clamp(off + amp * raw, 0.0f, 1.0f);
+            }
+            out->value = out->samples[0];
+            out->samples_written = true;
+        } else {
+            // Block-rate fallback (original code)
+            double phase;
+            if (sync) {
+                phase = std::fmod(ctx.beat_position / beats, 1.0);
+            } else {
+                double inc = (freq * ctx.block_size) / sample_rate_;
+                phase_ = std::fmod(phase_ + inc, 1.0);
+                phase = phase_;
+            }
+            float raw = evaluate(shape, static_cast<float>(phase));
+            out->value = std::clamp(off + amp * raw, 0.0f, 1.0f);
+        }
     }
 
 private:

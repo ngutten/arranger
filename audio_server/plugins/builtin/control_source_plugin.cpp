@@ -56,14 +56,36 @@ public:
     void process(const PluginProcessContext& /*ctx*/, PluginBuffers& buffers) override {
         auto* in  = buffers.control.get("control_in");
         auto* out = buffers.control.get("control_out");
-        // Just pass through - dispatcher pre-scales values based on pattern min/max
-        if (out) {
-            out->value = in ? in->value : 0.0f;
+        if (!out) return;
+
+        float cur_val = in ? in->value : 0.0f;
+
+        // Per-sample path
+        if (out->samples && out->frames > 0) {
+            if (in && in->samples) {
+                // Input already per-sample — copy through
+                for (int i = 0; i < out->frames; ++i)
+                    out->samples[i] = in->samples[i];
+            } else {
+                // Block-rate input: linear interpolation from prev to current
+                float delta = (out->frames > 1)
+                    ? (cur_val - prev_value_) / static_cast<float>(out->frames)
+                    : 0.0f;
+                for (int i = 0; i < out->frames; ++i)
+                    out->samples[i] = prev_value_ + delta * (i + 1);
+            }
+            out->value = out->samples[0];
+            out->samples_written = true;
+        } else {
+            out->value = cur_val;
         }
+
+        prev_value_ = cur_val;
     }
 
 private:
     int automation_track_id_ = 0;    // 0 = no track selected
+    float prev_value_ = 0.0f;
 };
 
 REGISTER_PLUGIN(ControlSourcePlugin);

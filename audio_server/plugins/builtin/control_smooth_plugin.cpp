@@ -62,11 +62,25 @@ public:
         if (!in || !out) return;
 
         float tau = std::max(0.001f, param(buffers, "time_constant", 0.5f));
-        float dt  = static_cast<float>(ctx.block_size) / sample_rate_;
-        float alpha = 1.0f - std::exp(-dt / tau);
 
-        y_ = alpha * in->value + (1.0f - alpha) * y_;
-        out->value = y_;
+        if (out->samples && out->frames > 0) {
+            // Per-sample smoothing
+            float alpha_s = 1.0f - std::exp(-1.0f / (tau * sample_rate_));
+            bool ps_in = in->samples != nullptr;
+            for (int i = 0; i < out->frames; ++i) {
+                float x = ps_in ? in->samples[i] : in->value;
+                y_ = alpha_s * x + (1.0f - alpha_s) * y_;
+                out->samples[i] = y_;
+            }
+            out->value = out->samples[0];
+            out->samples_written = true;
+        } else {
+            // Block-rate fallback
+            float dt = static_cast<float>(ctx.block_size) / sample_rate_;
+            float alpha = 1.0f - std::exp(-dt / tau);
+            y_ = alpha * in->value + (1.0f - alpha) * y_;
+            out->value = y_;
+        }
     }
 
 private:

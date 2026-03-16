@@ -130,23 +130,43 @@ public:
         auto* dry_ctl   = buffers.control.get("dry");
         auto* width_ctl = buffers.control.get("width");
 
-        float room_size = room_ctl  ? room_ctl->value  : 0.7f;
-        float damping   = damp_ctl  ? damp_ctl->value  : 0.5f;
-        float wet       = wet_ctl   ? wet_ctl->value   : 0.3f;
-        float dry       = dry_ctl   ? dry_ctl->value   : 1.0f;
-        float width     = width_ctl ? width_ctl->value : 1.0f;
+        bool ps_room  = room_ctl  && room_ctl->samples;
+        bool ps_damp  = damp_ctl  && damp_ctl->samples;
+        bool ps_wet   = wet_ctl   && wet_ctl->samples;
+        bool ps_dry   = dry_ctl   && dry_ctl->samples;
+        bool ps_width = width_ctl && width_ctl->samples;
 
-        // Scale room_size to a usable feedback range
-        float feedback = room_size * 0.28f + 0.7f;  // maps [0,1] → [0.7, 0.98]
-        feedback = std::min(feedback, 0.98f);
+        float const_room  = room_ctl  ? room_ctl->value  : 0.7f;
+        float const_damp  = damp_ctl  ? damp_ctl->value  : 0.5f;
+        float const_wet   = wet_ctl   ? wet_ctl->value   : 0.3f;
+        float const_dry   = dry_ctl   ? dry_ctl->value   : 1.0f;
+        float const_width = width_ctl ? width_ctl->value : 1.0f;
 
-        float wet1 = wet * (width * 0.5f + 0.5f);
-        float wet2 = wet * ((1.0f - width) * 0.5f);
+        // Pre-compute block-rate values for non-per-sample case
+        float const_feedback = std::min(const_room * 0.28f + 0.7f, 0.98f);
+        float const_wet1 = const_wet * (const_width * 0.5f + 0.5f);
+        float const_wet2 = const_wet * ((1.0f - const_width) * 0.5f);
 
         for (int i = 0; i < ctx.block_size; ++i) {
+            float room_size = ps_room  ? room_ctl->samples[i]  : const_room;
+            float damping   = ps_damp  ? damp_ctl->samples[i]  : const_damp;
+            float wet       = ps_wet   ? wet_ctl->samples[i]   : const_wet;
+            float dry       = ps_dry   ? dry_ctl->samples[i]   : const_dry;
+            float width     = ps_width ? width_ctl->samples[i] : const_width;
+
+            float feedback, wet1, wet2;
+            if (ps_room || ps_wet || ps_width) {
+                feedback = std::min(room_size * 0.28f + 0.7f, 0.98f);
+                wet1 = wet * (width * 0.5f + 0.5f);
+                wet2 = wet * ((1.0f - width) * 0.5f);
+            } else {
+                feedback = const_feedback;
+                wet1 = const_wet1;
+                wet2 = const_wet2;
+            }
+
             float in_L = in->left[i];
             float in_R = in->right ? in->right[i] : in_L;
-            // Mix to mono for reverb input (standard Freeverb approach)
             float input = (in_L + in_R) * 0.5f;
 
             // Parallel comb filters

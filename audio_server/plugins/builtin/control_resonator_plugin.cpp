@@ -61,22 +61,51 @@ public:
     }
     
     void process(const PluginProcessContext& ctx, PluginBuffers& buffers) override {
-        float a = param(buffers, "input", 1.0f);
+        auto* in_buf  = buffers.control.get("input");
+        auto* out = buffers.control.get("output");
+        if (!out) return;
+
         float damp = param(buffers, "damping", 1.0f);
         float decay = param(buffers, "decay", 1.0f);
         float coupling = param(buffers, "coupling", 1.0f);
         float k = param(buffers, "k", 1.0f);
         float drag = param(buffers, "drag", 1.0f);
-        
+
+        bool ps_in = in_buf && in_buf->samples;
+
+        // Per-sample path
+        if (out->samples && out->frames > 0) {
+            float dt = 1.0f / sample_rate_;
+            float exp_damp  = exp(-10*dt*damp);
+            float exp_decay = exp(-10*dt*decay);
+            float scale = 10*dt;
+
+            for (int i = 0; i < out->frames; ++i) {
+                float a = ps_in ? in_buf->samples[i]
+                                : (in_buf ? in_buf->value : 1.0f);
+
+                v_ += scale*(coupling*a - k*x_);
+                v_ *= exp_damp;
+                x_ += scale*(drag*a + v_);
+                x_ *= exp_decay;
+
+                out->samples[i] = static_cast<float>(x_);
+            }
+            out->value = out->samples[0];
+            out->samples_written = true;
+            return;
+        }
+
+        // Block-rate fallback
+        float a = in_buf ? in_buf->value : 1.0f;
         float dt = ctx.block_size / sample_rate_;
-        
+
         v_ += 10*dt*(coupling*a - k*x_);
         v_ *= exp(-10*dt*damp);
         x_ += 10*dt*(drag*a + v_);
         x_ *= exp(-10*dt*decay);
-        
-        auto* out = buffers.control.get("output");
-        if (out) out->value = x_;
+
+        out->value = static_cast<float>(x_);
     }
 
 private:

@@ -27,6 +27,8 @@ struct PortBuffer {
     PortType type = PortType::AudioMono;
     float*   audio = nullptr;
     float    control = 0.0f;
+    float*   control_buf = nullptr;       // raw pool buffer for control ports
+    bool     control_per_sample = false;  // set if producer wrote per-sample data
 };
 
 // ---------------------------------------------------------------------------

@@ -462,6 +462,11 @@ public:
         attack_time_     = ctrl("attack", 0.01f);
         release_time_    = ctrl("release", 0.1f);
 
+        // Per-sample ADSR detection
+        auto* att_ctl = buffers.control.get("attack");
+        auto* rel_ctl = buffers.control.get("release");
+        bool ps_adsr = (att_ctl && att_ctl->samples) || (rel_ctl && rel_ctl->samples);
+
         for (auto& v : voices_) {
             if (!v.active.load(std::memory_order_relaxed)) continue;
 
@@ -480,8 +485,20 @@ public:
             int n_noise = v.cur_frame.valid ? v.cur_frame.num_noise_bands :
                           std::min(num_noise_bands_, MAX_NOISE_BANDS);
 
+            float last_att = attack_time_, last_rel = release_time_;
+
             // --- Additive synthesis ---
             for (int i = 0; i < N; ++i) {
+                // Per-sample ADSR update
+                if (ps_adsr) {
+                    float a = att_ctl && att_ctl->samples ? att_ctl->samples[i] : attack_time_;
+                    float r = rel_ctl && rel_ctl->samples ? rel_ctl->samples[i] : release_time_;
+                    if (a != last_att || r != last_rel) {
+                        v.env.update(sample_rate_, a, 0.05f, 0.8f, r);
+                        last_att = a; last_rel = r;
+                    }
+                }
+
                 float t = std::min(v.frame_phase, 1.0f);
                 float env_val = v.env.next();
 

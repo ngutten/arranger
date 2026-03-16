@@ -546,6 +546,12 @@ public:
         sus_cached_.store(dec_lvl, std::memory_order_relaxed);
         rel_cached_.store(rel_s, std::memory_order_relaxed);
 
+        // Update envelopes of active voices when ADSR params change mid-note
+        for (auto& v : voices_) {
+            if (v.active)
+                v.env.update(sample_rate_, att_s, dec_s, dec_lvl, rel_s);
+        }
+
         bool stereo = (sample_R_.size() == static_cast<size_t>(sample_frames_));
 
         for (auto& v : voices_) {

@@ -215,6 +215,14 @@ public:
         sustain_ = ctrl("sustain", 0.8f);
         release_ = std::max(0.001f, ctrl("release", 0.2f));
 
+        // Per-sample ADSR detection
+        auto* att_ctl = buffers.control.get("attack");
+        auto* dec_ctl = buffers.control.get("decay");
+        auto* sus_ctl = buffers.control.get("sustain");
+        auto* rel_ctl = buffers.control.get("release");
+        bool ps_adsr = (att_ctl && att_ctl->samples) || (dec_ctl && dec_ctl->samples)
+                    || (sus_ctl && sus_ctl->samples) || (rel_ctl && rel_ctl->samples);
+
         vm_.delta_smooth = ctrl("delta_smooth", 0.2f);
         float overshoot  = ctrl("delta_overshoot", 0.0f);
         float tremolo    = ctrl("delta_tremolo", 0.0f);
@@ -245,7 +253,21 @@ public:
             float a2 = g * a1;
             float a3 = g * a2;
 
+            float last_a = attack_, last_d = decay_, last_s = sustain_, last_r = release_;
+
             for (int i = 0; i < N; ++i) {
+                // Per-sample ADSR update
+                if (ps_adsr) {
+                    float a = att_ctl && att_ctl->samples ? std::max(0.001f, att_ctl->samples[i]) : attack_;
+                    float d = dec_ctl && dec_ctl->samples ? std::max(0.001f, dec_ctl->samples[i]) : decay_;
+                    float s = sus_ctl && sus_ctl->samples ? sus_ctl->samples[i] : sustain_;
+                    float r = rel_ctl && rel_ctl->samples ? std::max(0.001f, rel_ctl->samples[i]) : release_;
+                    if (a != last_a || d != last_d || s != last_s || r != last_r) {
+                        v.env.update(vm_.sample_rate, a, d, s, r);
+                        last_a = a; last_d = d; last_s = s; last_r = r;
+                    }
+                }
+
                 float env_val = v.env.next();
                 if (v.env.is_off()) { v.active = false; break; }
 

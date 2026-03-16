@@ -62,21 +62,33 @@ public:
         int func = std::clamp(
             static_cast<int>(param(buffers, "function", 0.0f)), 0, 3);
 
-        float x = in->value;
-        float y;
-
-        switch (func) {
-            case 0:  y = std::abs(x);                                        break;
-            case 1:  y = x * x;                                              break;
-            case 2:  y = std::sin(2.0f * static_cast<float>(M_PI) * x);      break;
-            case 3:  y = std::tanh(x);                                       break;
-            default: y = x;                                                  break;
+        // Per-sample path
+        bool ps_in = in->samples != nullptr;
+        if (out->samples && out->frames > 0) {
+            for (int i = 0; i < out->frames; ++i) {
+                float x = ps_in ? in->samples[i] : in->value;
+                out->samples[i] = evaluate(func, x);
+            }
+            out->value = out->samples[0];
+            out->samples_written = true;
+            return;
         }
 
-        out->value = y;
+        // Block-rate fallback
+        out->value = evaluate(func, in->value);
     }
 
 private:
+    static float evaluate(int func, float x) {
+        switch (func) {
+            case 0:  return std::abs(x);
+            case 1:  return x * x;
+            case 2:  return std::sin(2.0f * static_cast<float>(M_PI) * x);
+            case 3:  return std::tanh(x);
+            default: return x;
+        }
+    }
+
     static float param(PluginBuffers& b, const char* id, float fallback) {
         auto* p = b.control.get(id);
         return p ? p->value : fallback;

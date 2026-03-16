@@ -91,47 +91,64 @@ public:
         auto* out = buffers.audio.get("audio_out");
         if (!in || !out) return;
 
-        float rate      = std::clamp(param(buffers, "rate", 0.5f), 0.01f, 10.0f);
-        float depth     = std::clamp(param(buffers, "depth", 0.7f), 0.0f, 1.0f);
-        float feedback  = std::clamp(param(buffers, "feedback", 0.5f), -0.95f, 0.95f);
-        float delay_ms  = std::clamp(param(buffers, "delay_ms", 5.0f), 1.0f, 15.0f);
-        float mix       = std::clamp(param(buffers, "mix", 0.5f), 0.0f, 1.0f);
+        auto* rate_ctl     = buffers.control.get("rate");
+        auto* depth_ctl    = buffers.control.get("depth");
+        auto* feedback_ctl = buffers.control.get("feedback");
+        auto* delay_ctl    = buffers.control.get("delay_ms");
+        auto* mix_ctl      = buffers.control.get("mix");
 
-        float delay_center = delay_ms * sample_rate_ / 1000.0f;
-        float delay_range  = delay_center * depth;  // Modulation amplitude in samples
-        
-        double phase_inc = 2.0 * M_PI * rate / sample_rate_;
+        bool ps_rate     = rate_ctl     && rate_ctl->samples;
+        bool ps_depth    = depth_ctl    && depth_ctl->samples;
+        bool ps_feedback = feedback_ctl && feedback_ctl->samples;
+        bool ps_delay    = delay_ctl    && delay_ctl->samples;
+        bool ps_mix      = mix_ctl      && mix_ctl->samples;
+
+        float const_rate     = std::clamp(rate_ctl     ? rate_ctl->value     : 0.5f,   0.01f, 10.0f);
+        float const_depth    = std::clamp(depth_ctl    ? depth_ctl->value    : 0.7f,   0.0f,  1.0f);
+        float const_feedback = std::clamp(feedback_ctl ? feedback_ctl->value : 0.5f,  -0.95f, 0.95f);
+        float const_delay_ms = std::clamp(delay_ctl    ? delay_ctl->value    : 5.0f,   1.0f,  15.0f);
+        float const_mix      = std::clamp(mix_ctl      ? mix_ctl->value      : 0.5f,   0.0f,  1.0f);
 
         for (int i = 0; i < ctx.block_size; ++i) {
-            // LFO modulation: sine wave oscillating delay time
+            float rate     = ps_rate     ? std::clamp(rate_ctl->samples[i],     0.01f, 10.0f)  : const_rate;
+            float depth    = ps_depth    ? std::clamp(depth_ctl->samples[i],    0.0f,  1.0f)   : const_depth;
+            float fb       = ps_feedback ? std::clamp(feedback_ctl->samples[i],-0.95f, 0.95f)  : const_feedback;
+            float delay_ms = ps_delay    ? std::clamp(delay_ctl->samples[i],    1.0f,  15.0f)  : const_delay_ms;
+            float mix      = ps_mix      ? std::clamp(mix_ctl->samples[i],      0.0f,  1.0f)   : const_mix;
+
+            float delay_center = delay_ms * sample_rate_ / 1000.0f;
+            float delay_range  = delay_center * depth;
+
+            // LFO modulation
             float lfo = static_cast<float>(std::sin(lfo_phase_));
             float delay_samples = delay_center + delay_range * lfo;
-            
+
             // Process both channels
             float in_l  = in->left[i];
             float in_r  = in->right ? in->right[i] : in->left[i];
-            
+
             float delayed_l = read_linear(0, delay_samples);
             float delayed_r = read_linear(1, delay_samples);
-            
-            // Feedback: mix delayed signal back into input before writing
-            float feedback_l = in_l + delayed_l * feedback;
-            float feedback_r = in_r + delayed_r * feedback;
-            
+
+            // Feedback
+            float feedback_l = in_l + delayed_l * fb;
+            float feedback_r = in_r + delayed_r * fb;
+
             // Write to delay line
             int buf_size = static_cast<int>(delay_buf_[0].size());
             delay_buf_[0][write_pos_[0]] = feedback_l;
             delay_buf_[1][write_pos_[1]] = feedback_r;
-            
+
             write_pos_[0] = (write_pos_[0] + 1) % buf_size;
             write_pos_[1] = (write_pos_[1] + 1) % buf_size;
-            
+
             // Mix dry and wet
             out->left[i] = in_l * (1.0f - mix) + delayed_l * mix;
             if (out->right)
                 out->right[i] = in_r * (1.0f - mix) + delayed_r * mix;
-            
-            // Advance LFO phase
+
+            // Advance LFO phase with per-sample rate
+            double phase_inc = 2.0 * M_PI * rate / sample_rate_;
             lfo_phase_ += phase_inc;
             if (lfo_phase_ >= 2.0 * M_PI)
                 lfo_phase_ -= 2.0 * M_PI;

@@ -378,14 +378,21 @@ void Graph::process(const ProcessContext& ctx) {
             PortBuffer pb;
             pb.type = p.type;
             if (p.is_output) {
-                pb.audio = pool_.get(entry.output_buf_indices[out_i++]);
-                if (p.type == PortType::Control) pb.control = 0.0f;
+                int buf_idx = entry.output_buf_indices[out_i++];
+                pb.audio = pool_.get(buf_idx);
+                if (p.type == PortType::Control) {
+                    pb.control = 0.0f;
+                    pb.control_buf = pool_.get(buf_idx);
+                    pb.control_per_sample = false;
+                }
                 outputs.push_back(pb);
             } else {
                 int buf_idx = entry.input_buf_indices[in_i++];
                 pb.audio = pool_.get(buf_idx);
-                if (p.type == PortType::Control)
+                if (p.type == PortType::Control) {
                     pb.control = pool_.get(buf_idx)[0];
+                    pb.control_buf = pool_.get(buf_idx);
+                }
                 inputs.push_back(pb);
             }
         }
@@ -395,8 +402,14 @@ void Graph::process(const ProcessContext& ctx) {
         out_i = 0;
         for (auto& p : entry.ports) {
             if (!p.is_output) continue;
-            if (p.type == PortType::Control)
-                pool_.get(entry.output_buf_indices[out_i])[0] = outputs[out_i].control;
+            if (p.type == PortType::Control) {
+                float* buf = pool_.get(entry.output_buf_indices[out_i]);
+                float val = outputs[out_i].control;
+                buf[0] = val;
+                if (!outputs[out_i].control_per_sample) {
+                    for (int s = 1; s < ctx.block_size; ++s) buf[s] = val;
+                }
+            }
             out_i++;
         }
 

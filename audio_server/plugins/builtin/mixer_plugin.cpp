@@ -71,7 +71,8 @@ public:
         // Output is pre-zeroed by the adapter
 
         auto* master = buffers.control.get("master_gain");
-        float mg = master ? master->value : 1.0f;
+        bool  ps_master = master && master->samples;
+        float const_mg  = master ? master->value : 1.0f;
 
         for (int ch = 0; ch < channel_count_; ++ch) {
             std::string idx = std::to_string(ch);
@@ -79,9 +80,12 @@ public:
             auto* gain = buffers.control.get("gain_" + idx);
             if (!in) continue;
 
-            float g = (gain ? gain->value : 1.0f) * mg;
+            bool  ps_gain = gain && gain->samples;
+            float const_g = gain ? gain->value : 1.0f;
 
             for (int i = 0; i < ctx.block_size; ++i) {
+                float g = (ps_gain ? gain->samples[i] : const_g)
+                        * (ps_master ? master->samples[i] : const_mg);
                 out->left[i]  += in->left[i]  * g;
                 out->right[i] += in->right[i] * g;
             }

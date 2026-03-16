@@ -58,5 +58,15 @@ struct ADSREnvelope {
         return level;
     }
 
+    // Recompute rates from ADSR params without resetting stage or level.
+    // Call mid-note when control params change to take effect immediately.
+    void update(float sample_rate, float attack_s, float decay_s,
+                float sustain, float release_s) {
+        sustain_level = sustain;
+        attack_rate   = (attack_s  > 0.001f) ? 1.0f / (attack_s  * sample_rate) : 1.0f;
+        decay_rate    = (decay_s   > 0.001f) ? 1.0f / (decay_s   * sample_rate) : 1.0f;
+        release_rate  = (release_s > 0.001f) ? 1.0f / (release_s * sample_rate) : 1.0f;
+    }
+
     bool is_off() const { return stage == Stage::Off; }
 };

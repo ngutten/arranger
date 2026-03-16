@@ -60,6 +60,9 @@ public:
         history_.assign(MAX_KERNEL, 0.0f);
         write_pos_ = 0;
         last_width_ = -1.0f;  // Force kernel rebuild on first process
+        ps_smooth_ = 0.0f;
+        ps_alpha_ = 0.0f;
+        last_ps_width_ = -1.0f;
     }
 
     void deactivate() override {
@@ -74,7 +77,35 @@ public:
 
         float width = std::clamp(param(buffers, "width", 0.1f), 0.01f, 2.0f);
 
-        // Rebuild kernel if width changed
+        bool ps_in = in->samples != nullptr;
+
+        // Per-sample path: IIR smoothed differentiator
+        // One-pole lowpass + finite difference — O(1) per sample
+        if (out->samples && out->frames > 0 && ps_in) {
+            if (width != last_ps_width_) {
+                float dt = 1.0f / sample_rate_;
+                ps_alpha_ = 1.0f - std::exp(-dt / width);
+                last_ps_width_ = width;
+            }
+
+            float alpha = ps_alpha_;
+            float one_minus_alpha = 1.0f - alpha;
+            float inv_alpha = 1.0f / alpha;
+            float smooth = ps_smooth_;
+
+            for (int i = 0; i < out->frames; ++i) {
+                float s = alpha * in->samples[i] + one_minus_alpha * smooth;
+                out->samples[i] = (s - smooth) * inv_alpha;
+                smooth = s;
+            }
+
+            ps_smooth_ = smooth;
+            out->value = out->samples[0];
+            out->samples_written = true;
+            return;
+        }
+
+        // Block-rate fallback
         if (width != last_width_ || block_size_ != ctx.block_size) {
             block_size_ = ctx.block_size;
             rebuild_kernel(width);
@@ -101,10 +132,16 @@ private:
     int   max_block_size_ = 512;
     int   block_size_     = 512;
     float last_width_     = -1.0f;
+    float last_ps_width_  = -1.0f;
 
+    // Block-rate FIR state
     std::vector<float> history_;
     std::vector<float> kernel_;
     int write_pos_ = 0;
+
+    // Per-sample IIR state
+    float ps_smooth_ = 0.0f;
+    float ps_alpha_  = 0.0f;
 
     static float param(PluginBuffers& b, const char* id, float fallback) {
         auto* p = b.control.get(id);
@@ -116,29 +153,26 @@ private:
         float sigma = width_sec * sample_rate_ / block_size_;
         if (sigma < 0.5f) sigma = 0.5f;
 
-        // Kernel length: ceil(4σ) + 1, capped at MAX_KERNEL
+        float center = 2.0f * sigma;
         int len = std::min(static_cast<int>(std::ceil(4.0f * sigma)) + 1, MAX_KERNEL);
 
         kernel_.resize(len);
 
-        // h[k] = -k · exp(-k²/(2σ²))
-        // k=0 contributes 0 (current sample has no slope contribution)
         float two_sigma_sq = 2.0f * sigma * sigma;
         float abs_sum = 0.0f;
-        kernel_[0] = 0.0f;
-        for (int k = 1; k < len; ++k) {
-            float fk = static_cast<float>(k);
-            kernel_[k] = -fk * std::exp(-(fk * fk) / two_sigma_sq);
+        for (int k = 0; k < len; ++k) {
+            float d = static_cast<float>(k) - center;
+            kernel_[k] = -d * std::exp(-(d * d) / two_sigma_sq);
             abs_sum += std::abs(kernel_[k]);
         }
 
-        // Normalize so Σ|h[k]| = 1
         if (abs_sum > 0.0f) {
-            for (int k = 1; k < len; ++k) {
+            for (int k = 0; k < len; ++k) {
                 kernel_[k] /= abs_sum;
             }
         }
     }
+
 };
 
 REGISTER_PLUGIN(ControlDiffPlugin);

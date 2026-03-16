@@ -62,26 +62,32 @@ public:
         auto* out = buffers.audio.get("audio_out");
         if (!in || !out) return;
 
-        float delay_ms      = std::clamp(param(buffers, "delay_ms", 100.0f), 0.0f, 2000.0f);
-        float delay_samples = delay_ms * sample_rate_ / 1000.0f;
-        
+        auto* delay_ctl = buffers.control.get("delay_ms");
+        bool  ps_delay  = delay_ctl && delay_ctl->samples;
+        float const_delay_ms = std::clamp(
+            delay_ctl ? delay_ctl->value : 100.0f, 0.0f, 2000.0f);
+
         int buf_size = static_cast<int>(delay_buf_[0].size());
 
         for (int i = 0; i < ctx.block_size; ++i) {
+            float dm = ps_delay ? delay_ctl->samples[i] : const_delay_ms;
+            dm = std::clamp(dm, 0.0f, 2000.0f);
+            float delay_samples = dm * sample_rate_ / 1000.0f;
+
             float in_l = in->left[i];
             float in_r = in->right ? in->right[i] : in->left[i];
-            
+
             // Read delayed samples
             float out_l = read_linear(0, delay_samples, buf_size);
             float out_r = read_linear(1, delay_samples, buf_size);
-            
+
             // Write new samples
             delay_buf_[0][write_pos_[0]] = in_l;
             delay_buf_[1][write_pos_[1]] = in_r;
-            
+
             write_pos_[0] = (write_pos_[0] + 1) % buf_size;
             write_pos_[1] = (write_pos_[1] + 1) % buf_size;
-            
+
             // Output
             out->left[i] = out_l;
             if (out->right) out->right[i] = out_r;
