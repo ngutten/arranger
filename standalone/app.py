@@ -1100,11 +1100,13 @@ class App(QMainWindow):
 
     def do_export(self, fmt):
         """Export the arrangement as MIDI, WAV, MP3, or MusicXML."""
+        _proj_dir = self.settings.get_recent_dir('project')
         if fmt == 'midi':
             path, _ = QFileDialog.getSaveFileName(
-                None, 'Export MIDI', '', 'MIDI files (*.mid);;All files (*.*)',
+                None, 'Export MIDI', _proj_dir, 'MIDI files (*.mid);;All files (*.*)',
                 options=QFileDialog.DontUseNativeDialog)
             if path:
+                self.settings.set_recent_dir('project', path)
                 midi = export_ops.export_midi(self.state)
                 with open(path, 'wb') as f:
                     f.write(midi)
@@ -1112,10 +1114,11 @@ class App(QMainWindow):
 
         if fmt == 'musicxml':
             path, _ = QFileDialog.getSaveFileName(
-                None, 'Export MusicXML', '',
+                None, 'Export MusicXML', _proj_dir,
                 'MusicXML files (*.musicxml *.xml);;All files (*.*)',
                 options=QFileDialog.DontUseNativeDialog)
             if path:
+                self.settings.set_recent_dir('project', path)
                 data = export_ops.export_musicxml(self.state)
                 with open(path, 'wb') as f:
                     f.write(data)
@@ -1124,15 +1127,16 @@ class App(QMainWindow):
         # Get file path BEFORE starting background thread
         if fmt == 'mp3':
             path, _ = QFileDialog.getSaveFileName(
-                None, 'Export MP3', '', 'MP3 files (*.mp3);;All files (*.*)',
+                None, 'Export MP3', _proj_dir, 'MP3 files (*.mp3);;All files (*.*)',
                 options=QFileDialog.DontUseNativeDialog)
         else:
             path, _ = QFileDialog.getSaveFileName(
-                None, 'Export WAV', '', 'WAV files (*.wav);;All files (*.*)',
+                None, 'Export WAV', _proj_dir, 'WAV files (*.wav);;All files (*.*)',
                 options=QFileDialog.DontUseNativeDialog)
 
         if not path:
             return
+        self.settings.set_recent_dir('project', path)
 
         engine = self.engine
 
@@ -1182,16 +1186,20 @@ class App(QMainWindow):
 
     def save_project(self):
         path, _ = QFileDialog.getSaveFileName(
-            None, 'Save Project', '', 'JSON files (*.json);;All files (*.*)',
+            None, 'Save Project', self.settings.get_recent_dir('project'),
+            'JSON files (*.json);;All files (*.*)',
             options=QFileDialog.DontUseNativeDialog)
         if path:
+            self.settings.set_recent_dir('project', path)
             project_io.save_project(self.state, path)
 
     def load_project(self):
         path, _ = QFileDialog.getOpenFileName(
-            None, 'Load Project', '', 'JSON files (*.json);;All files (*.*)',
+            None, 'Load Project', self.settings.get_recent_dir('project'),
+            'JSON files (*.json);;All files (*.*)',
             options=QFileDialog.DontUseNativeDialog)
         if path:
+            self.settings.set_recent_dir('project', path)
             try:
                 def sf2_loader(sf2_path):
                     self.state.sf2 = SF2Info(sf2_path)

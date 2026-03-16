@@ -370,8 +370,10 @@ class ConfigDialog(QDialog):
     def _browse_sf2(self):
         from PySide6.QtWidgets import QFileDialog
         path, _ = QFileDialog.getOpenFileName(
-            self, 'Select SoundFont', '', 'SoundFont files (*.sf2);;All files (*.*)', options=QFileDialog.Option.DontUseNativeDialog)
+            self, 'Select SoundFont', self.settings.get_recent_dir('instruments'),
+            'SoundFont files (*.sf2);;All files (*.*)', options=QFileDialog.Option.DontUseNativeDialog)
         if path:
+            self.settings.set_recent_dir('instruments', path)
             self._sf2_path = path
             self.sf2_label.setText(self._short_path(path))
 

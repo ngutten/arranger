@@ -1,5 +1,7 @@
 """Left panel - pattern and beat pattern lists with drag support."""
 
+import os
+
 from PySide6.QtWidgets import (QFrame, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
                                 QScrollArea, QWidget, QLineEdit, QSizePolicy, QMenu)
 from PySide6.QtCore import Qt, QMimeData, Signal
@@ -413,10 +415,13 @@ class PatternList(QFrame):
             QMessageBox.warning(self, 'Export', 'No melodic pattern selected.')
             return
         safe_name = pat.name.replace(' ', '_').replace('/', '_')
+        start_dir = self.app.settings.get_recent_dir('patterns')
+        default_name = os.path.join(start_dir, f'{safe_name}.json') if start_dir else f'{safe_name}.json'
         path, _ = QFileDialog.getSaveFileName(
-            self, 'Export Pattern', f'{safe_name}.json',
+            self, 'Export Pattern', default_name,
             'Pattern files (*.json);;All files (*.*)', options=QFileDialog.Option.DontUseNativeDialog)
         if path:
+            self.app.settings.set_recent_dir('patterns', path)
             export_pattern(pat, path)
 
     def _export_beat_pattern(self):
@@ -427,19 +432,23 @@ class PatternList(QFrame):
             QMessageBox.warning(self, 'Export', 'No beat pattern selected.')
             return
         safe_name = pat.name.replace(' ', '_').replace('/', '_')
+        start_dir = self.app.settings.get_recent_dir('patterns')
+        default_name = os.path.join(start_dir, f'{safe_name}.json') if start_dir else f'{safe_name}.json'
         path, _ = QFileDialog.getSaveFileName(
-            self, 'Export Beat Pattern', f'{safe_name}.json',
+            self, 'Export Beat Pattern', default_name,
             'Pattern files (*.json);;All files (*.*)', options=QFileDialog.Option.DontUseNativeDialog)
         if path:
+            self.app.settings.set_recent_dir('patterns', path)
             export_beat_pattern(pat, path)
 
     def _import_pattern(self):
         from PySide6.QtWidgets import QFileDialog, QMessageBox
         from ..ops.project_io import import_pattern
         path, _ = QFileDialog.getOpenFileName(
-            self, 'Import Pattern', '',
+            self, 'Import Pattern', self.app.settings.get_recent_dir('patterns'),
             'Pattern files (*.json);;All files (*.*)', options=QFileDialog.Option.DontUseNativeDialog)
         if path:
+            self.app.settings.set_recent_dir('patterns', path)
             try:
                 import_pattern(self.state, path)
             except ValueError as e:
@@ -451,9 +460,10 @@ class PatternList(QFrame):
         from PySide6.QtWidgets import QFileDialog, QMessageBox
         from ..ops.project_io import import_beat_pattern
         path, _ = QFileDialog.getOpenFileName(
-            self, 'Import Beat Pattern', '',
+            self, 'Import Beat Pattern', self.app.settings.get_recent_dir('patterns'),
             'Pattern files (*.json);;All files (*.*)', options=QFileDialog.Option.DontUseNativeDialog)
         if path:
+            self.app.settings.set_recent_dir('patterns', path)
             try:
                 import_beat_pattern(self.state, path)
             except ValueError as e:

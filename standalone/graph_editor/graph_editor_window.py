@@ -75,6 +75,7 @@ class GraphEditorWindow(QWidget):
         self.model         = model
         self.server_engine = server_engine
         self.state         = state
+        self.settings      = server_engine.settings if server_engine and hasattr(server_engine, 'settings') else None
         self._on_graph_changed = on_graph_changed
 
         # Debounce live push so rapid drag events don't hammer the IPC
@@ -123,6 +124,7 @@ class GraphEditorWindow(QWidget):
         self._canvas.param_changed.connect(self._on_param_changed_fast)
         self._canvas._server_engine = self.server_engine
         self._canvas._state = self.state
+        self._canvas._settings = self.settings
 
         # Toolbar
         toolbar = QHBoxLayout()
@@ -521,11 +523,14 @@ class GraphEditorWindow(QWidget):
     # -----------------------------------------------------------------------
 
     def _save_graph(self) -> None:
+        start_dir = self.settings.get_recent_dir('graph') if self.settings else ''
         path, _ = QFileDialog.getSaveFileName(
-            None, "Save Signal Graph", "", "Graph JSON (*.graph.json *.json)",
+            None, "Save Signal Graph", start_dir, "Graph JSON (*.graph.json *.json)",
             options=QFileDialog.DontUseNativeDialog)
         if not path:
             return
+        if self.settings:
+            self.settings.set_recent_dir('graph', path)
         try:
             with open(path, "w") as f:
                 json.dump(self.model.to_dict(), f, indent=2)
@@ -535,11 +540,14 @@ class GraphEditorWindow(QWidget):
             QMessageBox.warning(self, "Save failed", str(e))
 
     def _load_graph(self) -> None:
+        start_dir = self.settings.get_recent_dir('graph') if self.settings else ''
         path, _ = QFileDialog.getOpenFileName(
-            None, "Load Signal Graph", "", "Graph JSON (*.graph.json *.json)",
+            None, "Load Signal Graph", start_dir, "Graph JSON (*.graph.json *.json)",
             options=QFileDialog.DontUseNativeDialog)
         if not path:
             return
+        if self.settings:
+            self.settings.set_recent_dir('graph', path)
         try:
             with open(path) as f:
                 d = json.load(f)

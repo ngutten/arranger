@@ -43,6 +43,7 @@ class Settings:
         self.autosave_interval: int = DEFAULTS['autosave_interval']
         self.audio_backend: str = DEFAULTS['audio_backend']
         self.server_address: str = DEFAULTS['server_address']
+        self.recent_dirs: dict[str, str] = {}
         self._load()
 
     def _load(self):
@@ -58,6 +59,9 @@ class Settings:
             self.autosave_interval = int(d.get('autosave_interval', self.autosave_interval))
             self.audio_backend = str(d.get('audio_backend', self.audio_backend))
             self.server_address = str(d.get('server_address', self.server_address))
+            rd = d.get('recent_dirs', {})
+            if isinstance(rd, dict):
+                self.recent_dirs = {str(k): str(v) for k, v in rd.items()}
         except Exception:
             logger.exception("Failed to load settings from %s, using defaults", self.path)
         self._validate()
@@ -94,6 +98,21 @@ class Settings:
                     'autosave_interval': self.autosave_interval,
                     'audio_backend': self.audio_backend,
                     'server_address': self.server_address,
+                    'recent_dirs': self.recent_dirs,
                 }, f, indent=2)
         except Exception:
             logger.exception("Failed to save settings to %s", self.path)
+
+    def get_recent_dir(self, category: str) -> str:
+        """Return the last-used directory for *category*, or '' if unset/missing."""
+        d = self.recent_dirs.get(category, '')
+        if d and Path(d).is_dir():
+            return d
+        return ''
+
+    def set_recent_dir(self, category: str, path: str) -> None:
+        """Store the directory of *path* (extracting parent if it's a file) and persist."""
+        p = Path(path)
+        d = str(p if p.is_dir() else p.parent)
+        self.recent_dirs[category] = d
+        self.save()

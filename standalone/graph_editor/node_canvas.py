@@ -446,7 +446,8 @@ class NodeGraphCanvas(QWidget):
         if self._settings_factory:
             w = self._settings_factory(node, self)
         else:
-            w = _make_default_settings_widget(node, self, self._on_node_param_changed)
+            settings = getattr(self, '_settings', None)
+            w = _make_default_settings_widget(node, self, self._on_node_param_changed, settings=settings)
 
         if w:
             view = _ScaledWidgetView(w, self)
@@ -1071,7 +1072,7 @@ class NodeGraphCanvas(QWidget):
 # Default inline settings widgets
 # ---------------------------------------------------------------------------
 
-def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable):
+def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable, settings=None):
     """Build a compact inline settings panel for a node type.
 
     Returns None if this node type has no settings.
@@ -1243,7 +1244,7 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable):
         # Special-case: control_monitor gets a live sparkline widget
         if t in ("builtin.control_monitor", "control_monitor"):
             return _make_control_monitor_widget(node, parent)
-        return _make_plugin_settings_widget(node, desc, parent, on_change)
+        return _make_plugin_settings_widget(node, desc, parent, on_change, settings=settings)
     return None
 
 
@@ -1415,7 +1416,7 @@ def _make_control_monitor_widget(node: GraphNode, parent) -> "QWidget":
     return SparklineWidget(parent)
 
 
-def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change: Callable):
+def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change: Callable, settings=None):
     """Auto-generate a settings panel from a plugin descriptor.
 
     Generates widgets for:
@@ -1514,21 +1515,30 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
             file_filter = cp.get("file_filter", "All Files (*)")
             save_mode = cp.get("save_mode", False)
             is_dir = (cp_type == "dirpath")
-            def _browse(checked=False, e=edit, cid=cp_id, ff=file_filter, sm=save_mode, dr=is_dir):
+            _CP_CATEGORIES = {
+                'sf2_path': 'instruments', 'sample_path': 'samples',
+                'scl_path': 'scales', 'kbm_path': 'scales',
+                'model_dir': 'models', 'output_path': 'midi_capture',
+            }
+            _cat = _CP_CATEGORIES.get(cp_id, 'node_files')
+            def _browse(checked=False, e=edit, cid=cp_id, ff=file_filter, sm=save_mode, dr=is_dir, cat=_cat):
                 from PySide6.QtWidgets import QFileDialog
+                start = settings.get_recent_dir(cat) if settings else ""
                 if dr:
                     p = QFileDialog.getExistingDirectory(
-                        w, f"Select {cp_display}", "",
+                        w, f"Select {cp_display}", start,
                         options=QFileDialog.Option.DontUseNativeDialog | QFileDialog.Option.ShowDirsOnly)
                 elif sm:
                     p, _ = QFileDialog.getSaveFileName(
-                        w, f"Select {cp_display}", "", ff,
+                        w, f"Select {cp_display}", start, ff,
                         options=QFileDialog.Option.DontUseNativeDialog)
                 else:
                     p, _ = QFileDialog.getOpenFileName(
-                        w, f"Select {cp_display}", "", ff,
+                        w, f"Select {cp_display}", start, ff,
                         options=QFileDialog.Option.DontUseNativeDialog)
                 if p:
+                    if settings:
+                        settings.set_recent_dir(cat, p)
                     e.setText(p)
                     on_change(node.node_id, cid, p)
             browse_btn.clicked.connect(_browse)
