@@ -80,12 +80,15 @@ def _bend_curve_events(note_start_beats, duration, control_points, tpb, resoluti
     return result
 
 
-def create_midi(arr, tpb=480):
+def create_midi(arr, tpb=480, tempo_map=None):
     """Create MIDI file bytes from an arrangement dict.
 
     arr should have: bpm, tsNum, tsDen, tracks[]
     Each track: name, channel, bank, program, volume, placements[]
     Each placement: pattern{notes[], length}, time, transpose, repeats
+
+    tempo_map: optional list of (beat, bpm) tuples for tempo automation.
+    If provided, emits multiple Set Tempo meta-events in track 0.
     """
     bpm = arr.get('bpm', 120)
     tsn = arr.get('tsNum', 4)
@@ -93,12 +96,20 @@ def create_midi(arr, tpb=480):
     tracks = []
 
     # Track 0: tempo + time sig
-    t0 = [
-        (0, bytes([0xFF, 0x51, 0x03]) + struct.pack('>I', int(60e6 / bpm))[1:]),
-        (0, bytes([0xFF, 0x58, 0x04, tsn,
-                   {1: 0, 2: 1, 4: 2, 8: 3, 16: 4, 32: 5}.get(tsd, 2), 24, 8])),
-        (0, bytes([0xFF, 0x2F, 0x00]))
-    ]
+    t0 = []
+    if tempo_map:
+        # Emit multiple tempo events from the automation map
+        for beat, map_bpm in tempo_map:
+            tick = max(0, int(beat * tpb))
+            uspb = int(60e6 / max(1, map_bpm))
+            t0.append((tick, bytes([0xFF, 0x51, 0x03]) + struct.pack('>I', uspb)[1:]))
+    else:
+        t0.append((0, bytes([0xFF, 0x51, 0x03]) + struct.pack('>I', int(60e6 / bpm))[1:]))
+    t0.append((0, bytes([0xFF, 0x58, 0x04, tsn,
+                   {1: 0, 2: 1, 4: 2, 8: 3, 16: 4, 32: 5}.get(tsd, 2), 24, 8])))
+    t0.append((0, bytes([0xFF, 0x2F, 0x00])))
+    # Sort track 0 by tick (tempo events may be at various ticks)
+    t0.sort(key=lambda e: e[0])
     tracks.append(t0)
 
     for trk in arr.get('tracks', []):

@@ -1,7 +1,7 @@
 """Top control bar - BPM, time signature, snap, tool buttons, and action buttons."""
 
-from PySide6.QtWidgets import (QFrame, QLabel, QPushButton, QSpinBox, QComboBox, 
-                                QHBoxLayout)
+from PySide6.QtWidgets import (QFrame, QLabel, QPushButton, QSpinBox, QComboBox,
+                                QDoubleSpinBox, QHBoxLayout)
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 
@@ -47,10 +47,12 @@ class TopBar(QFrame):
 
         # BPM
         layout.addWidget(QLabel('BPM'))
-        self.bpm_spin = QSpinBox()
-        self.bpm_spin.setRange(20, 300)
+        self.bpm_spin = QDoubleSpinBox()
+        self.bpm_spin.setRange(20.0, 300.0)
+        self.bpm_spin.setDecimals(1)
+        self.bpm_spin.setSingleStep(1.0)
         self.bpm_spin.setValue(s.bpm)
-        self.bpm_spin.setMaximumWidth(60)
+        self.bpm_spin.setMaximumWidth(70)
         self.bpm_spin.valueChanged.connect(self._on_bpm)
         layout.addWidget(self.bpm_spin)
 
@@ -154,7 +156,7 @@ class TopBar(QFrame):
         layout.addWidget(load_btn)
 
     def _on_bpm(self, value):
-        self.state.bpm = value
+        self.state.bpm = float(value)
 
     def _on_ts(self):
         try:
@@ -178,15 +180,25 @@ class TopBar(QFrame):
 
     def refresh(self):
         """Update controls from state."""
+        self.bpm_spin.blockSignals(True)
         self.bpm_spin.setValue(self.state.bpm)
+        self.bpm_spin.blockSignals(False)
         self.ts_num_combo.setCurrentText(str(self.state.ts_num))
         self.ts_den_combo.setCurrentText(str(self.state.ts_den))
-        
+
         # Map snap value to display format
         snap_map = {1: '1', 0.5: '1/2', 0.25: '1/4', 0.125: '1/8', 0.0625: '1/16'}
         self.snap_combo.setCurrentText(snap_map.get(self.state.snap, '1/4'))
-        
+
         self.play_btn.setText('⏹' if self.state.playing else '▶')
+
+        # Grey out BPM spinbox when a tempo automation track exists
+        has_tempo_track = self.state.find_tempo_track() is not None
+        self.bpm_spin.setEnabled(not has_tempo_track)
+        if has_tempo_track:
+            self.bpm_spin.setToolTip('BPM is controlled by the tempo automation track')
+        else:
+            self.bpm_spin.setToolTip('')
 
         # Enable graph editor button when the engine supports the graph protocol
         graph_available = bool(self.app.engine and hasattr(self.app.engine, '_send'))
@@ -195,3 +207,9 @@ class TopBar(QFrame):
             'Open signal graph editor' if graph_available
             else 'Signal graph editor requires the C++ built-in or server backend'
         )
+
+    def update_bpm_display(self, bpm: float):
+        """Update spinbox to show current BPM without triggering _on_bpm."""
+        self.bpm_spin.blockSignals(True)
+        self.bpm_spin.setValue(bpm)
+        self.bpm_spin.blockSignals(False)

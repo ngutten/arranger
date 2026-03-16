@@ -17,10 +17,49 @@ def _get_sf2_path(sf2):
     return None
 
 
+def _build_tempo_map_for_midi(state):
+    """Build a list of (beat, bpm) tuples from the tempo automation track.
+
+    Returns None if no tempo track exists.
+    """
+    tempo_track = state.find_tempo_track()
+    if not tempo_track:
+        return None
+
+    from ..core.curve_utils import interpolate_curve
+
+    placements = sorted(
+        [ap for ap in state.automation_placements if ap.track_id == tempo_track.id],
+        key=lambda ap: ap.time
+    )
+    if not placements:
+        return None
+
+    points = [(0.0, float(state.bpm))]
+    for ap in placements:
+        pattern = state.find_automation_pattern(ap.pattern_id)
+        if not pattern or not pattern.points:
+            continue
+        curve_points = [(p.time, p.value, p.curve) for p in pattern.points]
+        repeats = ap.repeats or 1
+        for rep in range(repeats):
+            offset = ap.time + rep * pattern.length
+            num_samples = max(16, int(pattern.length * 16))
+            for i in range(num_samples + 1):
+                t = (i / num_samples) * pattern.length if num_samples > 0 else 0.0
+                norm = interpolate_curve(curve_points, t, pattern.length, 0.0)
+                norm = max(0.0, min(1.0, norm))
+                bpm = pattern.min_value + norm * (pattern.max_value - pattern.min_value)
+                bpm = max(20.0, min(300.0, bpm))
+                points.append((offset + t, round(bpm, 2)))
+    return points
+
+
 def export_midi(state):
     """Build arrangement and return MIDI bytes."""
     arr = state.build_arrangement()
-    return create_midi(arr)
+    tempo_map = _build_tempo_map_for_midi(state)
+    return create_midi(arr, tempo_map=tempo_map)
 
 
 def export_musicxml(state):

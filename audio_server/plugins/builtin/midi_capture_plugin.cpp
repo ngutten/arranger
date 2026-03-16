@@ -61,29 +61,65 @@ struct MidiTick {
     uint8_t  status, d1, d2;
 };
 
+struct TempoChange {
+    uint32_t tick;
+    float    bpm;
+};
+
 static bool write_midi_file(const std::string& path,
                             const std::vector<MidiTick>& events,
-                            float bpm) {
+                            float bpm,
+                            const std::vector<TempoChange>& tempo_changes = {}) {
+    // Build a unified event list: tempo meta-events + MIDI events
+    // We'll emit both as (tick, bytes) pairs, then sort and serialize.
+    struct TrackEvent {
+        uint32_t tick;
+        std::vector<uint8_t> data;
+    };
+    std::vector<TrackEvent> all_events;
+
+    // Tempo events
+    if (tempo_changes.empty()) {
+        // Single tempo at tick 0
+        const uint32_t uspb = static_cast<uint32_t>(std::round(60000000.0f / bpm));
+        TrackEvent te;
+        te.tick = 0;
+        te.data = {0xFF, 0x51, 0x03};
+        te.data.push_back(static_cast<uint8_t>((uspb >> 16) & 0xFF));
+        te.data.push_back(static_cast<uint8_t>((uspb >> 8) & 0xFF));
+        te.data.push_back(static_cast<uint8_t>(uspb & 0xFF));
+        all_events.push_back(std::move(te));
+    } else {
+        for (const auto& tc : tempo_changes) {
+            const uint32_t uspb = static_cast<uint32_t>(std::round(60000000.0f / tc.bpm));
+            TrackEvent te;
+            te.tick = tc.tick;
+            te.data = {0xFF, 0x51, 0x03};
+            te.data.push_back(static_cast<uint8_t>((uspb >> 16) & 0xFF));
+            te.data.push_back(static_cast<uint8_t>((uspb >> 8) & 0xFF));
+            te.data.push_back(static_cast<uint8_t>(uspb & 0xFF));
+            all_events.push_back(std::move(te));
+        }
+    }
+
+    // MIDI events
+    for (const auto& e : events) {
+        TrackEvent te;
+        te.tick = e.tick;
+        te.data = {e.status, e.d1, e.d2};
+        all_events.push_back(std::move(te));
+    }
+
+    // Sort by tick (stable sort to preserve insertion order at same tick)
+    std::stable_sort(all_events.begin(), all_events.end(),
+        [](const TrackEvent& a, const TrackEvent& b){ return a.tick < b.tick; });
+
     std::vector<uint8_t> track;
-
-    // Set Tempo meta-event at tick 0.
-    const uint32_t uspb = static_cast<uint32_t>(std::round(60000000.0f / bpm));
-    push_vlq(track, 0);                       // delta = 0
-    track.push_back(0xFF); track.push_back(0x51); track.push_back(0x03);
-    push_be(track, uspb, 3);
-
-    // MIDI events, sorted by tick (they should already be, but be safe).
-    std::vector<MidiTick> sorted = events;
-    std::stable_sort(sorted.begin(), sorted.end(),
-        [](const MidiTick& a, const MidiTick& b){ return a.tick < b.tick; });
-
     uint32_t prev_tick = 0;
-    for (const auto& e : sorted) {
+    for (const auto& e : all_events) {
         push_vlq(track, e.tick - prev_tick);
         prev_tick = e.tick;
-        track.push_back(e.status);
-        track.push_back(e.d1);
-        track.push_back(e.d2);
+        track.insert(track.end(), e.data.begin(), e.data.end());
     }
 
     // End-of-track meta-event.
@@ -169,14 +205,23 @@ public:
     // -----------------------------------------------------------------------
 
     void process(const PluginProcessContext& ctx, PluginBuffers& buffers) override {
-        // Capture BPM for the file header (last seen value is fine).
+        // Track BPM changes for tempo meta-events
+        if (ctx.bpm != last_bpm_) {
+            double beat = ctx.beat_position;
+            uint32_t tick = static_cast<uint32_t>(std::max(0.0, beat) * PPQ);
+            tempo_changes_.push_back({tick, ctx.bpm});
+            last_bpm_ = ctx.bpm;
+        }
         bpm_ = ctx.bpm;
 
         auto* ev_in  = buffers.events.get("events_in");
 
         // On transport start, clear the previous capture.
-        if (ctx.transport_started)
+        if (ctx.transport_started) {
             events_.clear();
+            tempo_changes_.clear();
+            last_bpm_ = 0.0f;  // force re-record of initial tempo
+        }
 
         if (ev_in && ev_in->events) {
             for (const auto& e : *ev_in->events) {
@@ -205,19 +250,21 @@ public:
 
     void on_transport_stop() override {
         if (output_path_.empty()) return;
-        if (events_.empty())      return;        
-        
-        write_midi_file(output_path_, events_, bpm_);
+        if (events_.empty())      return;
+
+        write_midi_file(output_path_, events_, bpm_, tempo_changes_);
         // Intentionally not clearing events_ here — they remain readable
         // until the next transport_started clears them, so repeated stops
         // (e.g. punch-in/out) don't lose data.
     }
 
 private:
-    std::string           output_path_;
-    float                 sample_rate_ = 44100.0f;
-    float                 bpm_         = 120.0f;
-    std::vector<MidiTick> events_;
+    std::string                output_path_;
+    float                      sample_rate_ = 44100.0f;
+    float                      bpm_         = 120.0f;
+    float                      last_bpm_    = 0.0f;
+    std::vector<MidiTick>      events_;
+    std::vector<TempoChange>   tempo_changes_;
 };
 
 REGISTER_PLUGIN(MidiCapturePlugin);

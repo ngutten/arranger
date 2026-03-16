@@ -125,11 +125,26 @@ json ServerHandler::dispatch(const std::string& cmd, const json& req) {
         }
         return {{"status", "ok"}};
     }
+    if (cmd == protocol::CMD_SET_TEMPO_MAP) {
+        TempoMap tmap;
+        if (req.contains("map") && req["map"].is_array()) {
+            for (auto& pt : req["map"]) {
+                tmap.points.push_back({
+                    pt.value("beat", 0.0),
+                    pt.value("bpm", 120.0f)
+                });
+            }
+        }
+        engine_.set_tempo_map(std::move(tmap));
+        return {{"status", "ok"}};
+    }
+
     if (cmd == protocol::CMD_GET_POSITION) {
         engine_.poll();   // drain on_transport_stop() for natural arrangement-end
         return {{"status", "ok"},
                 {"beat",    engine_.current_beat()},
-                {"playing", engine_.is_playing()}};
+                {"playing", engine_.is_playing()},
+                {"bpm",     engine_.current_bpm()}};
     }
 
     // -------------------------------------------------------------------

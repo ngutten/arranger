@@ -55,6 +55,7 @@ constexpr const char* CMD_SEEK          = "seek";           // {beat: float} →
 constexpr const char* CMD_SET_LOOP      = "set_loop";       // {start,end} or {enabled:false} → {status}
 constexpr const char* CMD_GET_POSITION  = "get_position";   // → {beat: float, playing: bool}
 constexpr const char* CMD_SET_BPM       = "set_bpm";        // {bpm: float} → {status}
+constexpr const char* CMD_SET_TEMPO_MAP = "set_tempo_map";   // {map: [{beat,bpm},...]} → {status}
 
 // -- Event stream --
 // Send a batch of timed MIDI-style events (replaces current schedule).

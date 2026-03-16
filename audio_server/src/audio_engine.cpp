@@ -346,6 +346,18 @@ void AudioEngine::disable_loop() {
     delete pending_loop_.exchange(ls, std::memory_order_acq_rel);
 }
 
+void AudioEngine::set_tempo_map(TempoMap map) {
+    // Sort by beat just in case
+    std::sort(map.points.begin(), map.points.end(),
+        [](const TempoPoint& a, const TempoPoint& b) { return a.beat < b.beat; });
+    tempo_map_ = std::move(map);
+}
+
+float AudioEngine::current_bpm() const {
+    double beat = current_beat_.load(std::memory_order_relaxed);
+    return tempo_map_.bpm_at(beat, bpm_);
+}
+
 void AudioEngine::set_param(const std::string& nid, const std::string& param, float val) {
     // Enqueue so the audio thread applies this at the start of the next block,
     // avoiding a data race between this (IPC/main) thread and the audio thread
@@ -626,8 +638,9 @@ void AudioEngine::process_block(float* L, float* R, int frames) {
         // Still process graph (for preview notes) but without advancing beat
         if (graph) {
             double beat = current_beat_.load(std::memory_order_relaxed);
-            double bps  = bpm_ / 60.0 / cfg_.sample_rate;
-            ProcessContext ctx { frames, cfg_.sample_rate, bpm_,
+            float cur_bpm = tempo_map_.bpm_at(beat, bpm_);
+            double bps  = cur_bpm / 60.0 / cfg_.sample_rate;
+            ProcessContext ctx { frames, cfg_.sample_rate, cur_bpm,
                                  beat, bps };
             graph->process(ctx);
             const float* gL = graph->output_L();
@@ -647,12 +660,11 @@ void AudioEngine::process_block(float* L, float* R, int frames) {
         return;
     }
 
-    // We use a fixed BPM stored in bpm_, set from the graph JSON via set_graph().
-    float bpm = bpm_;
-
+    // BPM: use tempo map if available, otherwise fixed bpm_
     double beat_pos = current_beat_.load(std::memory_order_relaxed);
+    float bpm = tempo_map_.bpm_at(beat_pos, bpm_);
     double bps      = bpm / 60.0 / cfg_.sample_rate;  // beats per sample
-    double end_beat = beat_pos + frames * bps;
+    double end_beat = tempo_map_.advance(beat_pos, frames, cfg_.sample_rate, bpm_);
 
     // Dispatch events to graph nodes
     dispatcher_.dispatch(beat_pos, end_beat, graph);
@@ -715,7 +727,9 @@ std::vector<float> AudioEngine::render_offline(float tail_seconds, double durati
                                             : dispatcher_.arrangement_length();
     if (length <= 0.0) return {};
 
-    double total_seconds = length * 60.0 / bpm + tail_seconds;
+    double total_seconds = tempo_map_.empty()
+        ? (length * 60.0 / bpm + tail_seconds)
+        : (tempo_map_.beat_to_seconds(length, bpm) + tail_seconds);
     int    total_frames  = static_cast<int>(total_seconds * cfg_.sample_rate);
     int    block         = cfg_.block_size;
 
@@ -736,19 +750,20 @@ std::vector<float> AudioEngine::render_offline(float tail_seconds, double durati
     dispatcher_.seek(0.0);
 
     double beat_pos = 0.0;
-    double bps      = bpm / 60.0 / cfg_.sample_rate;
     int    frames_done = 0;
 
     while (frames_done < total_frames) {
         int n = std::min(block, total_frames - frames_done);
-        double end_beat = beat_pos + n * bps;
+        float block_bpm = tempo_map_.bpm_at(beat_pos, bpm);
+        double bps      = block_bpm / 60.0 / cfg_.sample_rate;
+        double end_beat = tempo_map_.advance(beat_pos, n, cfg_.sample_rate, bpm);
 
         dispatcher_.dispatch(beat_pos, end_beat, graph);
 
         bool is_first = (frames_done == 0);
         bool is_last  = (frames_done + n >= total_frames);
 
-        ProcessContext ctx { n, cfg_.sample_rate, bpm, beat_pos, bps,
+        ProcessContext ctx { n, cfg_.sample_rate, block_bpm, beat_pos, bps,
                              /*is_playing=*/true,
                              /*transport_started=*/is_first,
                              /*transport_stopped=*/is_last };

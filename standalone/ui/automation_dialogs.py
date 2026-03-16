@@ -182,10 +182,19 @@ class AutomationTrackDialog(QDialog):
         name_layout.addWidget(self.name_edit)
         layout.addLayout(name_layout)
 
+        # Target
+        target_layout = QHBoxLayout()
+        target_layout.addWidget(QLabel('Target:'))
+        self.target_combo = QComboBox()
+        self.target_combo.addItems(['None', 'Tempo'])
+        target_layout.addWidget(self.target_combo)
+        layout.addLayout(target_layout)
+
         # Info label
         info_label = QLabel(
             'Create an automation track, then create a Control Source node\n'
-            'in the Graph Editor and select this track from its settings.'
+            'in the Graph Editor and select this track from its settings.\n'
+            'Set Target to "Tempo" to use this track as a BPM automation lane.'
         )
         info_label.setStyleSheet('color: #888; font-size: 10px;')
         info_label.setWordWrap(True)
@@ -194,21 +203,25 @@ class AutomationTrackDialog(QDialog):
         # Buttons
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
-        
+
         cancel_btn = QPushButton('Cancel')
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(cancel_btn)
-        
+
         ok_btn = QPushButton('OK')
         ok_btn.clicked.connect(self._on_ok)
         ok_btn.setDefault(True)
         btn_layout.addWidget(ok_btn)
-        
+
         layout.addLayout(btn_layout)
 
     def _load_track(self, track):
         """Load existing track data into fields."""
         self.name_edit.setText(track.name)
+        if track.target == 'tempo':
+            self.target_combo.setCurrentText('Tempo')
+        else:
+            self.target_combo.setCurrentText('None')
 
     def _on_ok(self):
         """Validate and accept."""
@@ -217,16 +230,30 @@ class AutomationTrackDialog(QDialog):
             QMessageBox.warning(self, 'Invalid Name', 'Track name cannot be empty.')
             return
 
+        target_text = self.target_combo.currentText()
+        target = 'tempo' if target_text == 'Tempo' else None
+
+        # Validate: only one tempo track allowed
+        if target == 'tempo':
+            existing = self.state.find_tempo_track()
+            if existing and (not self.track or existing.id != self.track.id):
+                QMessageBox.warning(self, 'Duplicate Tempo Track',
+                    'A tempo automation track already exists. '
+                    'Only one track can target tempo.')
+                return
+
         if self.track:
             # Editing existing
             self.track.name = name
+            self.track.target = target
             self.result_track = self.track
         else:
             # Creating new
             track_id = self.state.new_id()
             self.result_track = AutomationTrack(
                 id=track_id,
-                name=name
+                name=name,
+                target=target,
             )
 
         self.accept()

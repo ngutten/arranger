@@ -475,24 +475,31 @@ class AutomationPattern:
 @dataclass
 class AutomationTrack:
     """Track containing automation pattern placements.
-    
+
     ControlSource nodes in the signal graph reference automation tracks by ID.
     This is the inverse of the old design where tracks referenced nodes.
+
+    target: Optional special routing. "tempo" makes this track drive BPM.
     """
     id: int
     name: str
+    target: Optional[str] = None
 
     def to_dict(self):
-        return {
-            'id': self.id, 
+        d = {
+            'id': self.id,
             'name': self.name,
         }
+        if self.target is not None:
+            d['target'] = self.target
+        return d
 
     @staticmethod
     def from_dict(d):
         return AutomationTrack(
-            id=d['id'], 
+            id=d['id'],
             name=d['name'],
+            target=d.get('target'),
         )
 
 
@@ -679,7 +686,7 @@ class AppState:
     )
 
     def __init__(self):
-        self.bpm: int = 120
+        self.bpm: float = 120.0
         self.snap: float = 0.5
         self.ts_num: int = 4
         self.ts_den: int = 4
@@ -868,6 +875,13 @@ class AppState:
     def find_automation_placement(self, aplid) -> Optional[AutomationPlacement]:
         return self._automation_placements.get(aplid)
 
+    def find_tempo_track(self) -> Optional[AutomationTrack]:
+        """Return the first automation track with target=='tempo', or None."""
+        for t in self._automation_tracks:
+            if t.target == 'tempo':
+                return t
+        return None
+
     def find_variation(self, vid) -> Optional[Variation]:
         return self._variations.get(vid)
 
@@ -980,7 +994,7 @@ class AppState:
 
     def load_json(self, text: str):
         d = json.loads(text)
-        self.bpm = d.get('bpm', 120)
+        self.bpm = float(d.get('bpm', 120))
         self.snap = d.get('snap', 0.5)
         self.ts_num = d.get('tsNum', 4)
         self.ts_den = d.get('tsDen', 4)

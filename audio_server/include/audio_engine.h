@@ -22,6 +22,83 @@ struct AudioEngineConfig {
     int   output_device = -1;    // -1 = default
 };
 
+// Piecewise-constant tempo map: holds BPM at each beat position.
+// Between points, BPM is constant at the last point's value.
+struct TempoPoint { double beat; float bpm; };
+
+struct TempoMap {
+    std::vector<TempoPoint> points;  // sorted by beat
+
+    bool empty() const { return points.empty(); }
+
+    // Return BPM at the given beat (last point at or before beat).
+    // Falls back to fallback_bpm if before the first point or map is empty.
+    float bpm_at(double beat, float fallback_bpm) const {
+        if (points.empty()) return fallback_bpm;
+        // Binary search for last point <= beat
+        // std::upper_bound finds first point > beat, then we go back one
+        auto it = std::upper_bound(points.begin(), points.end(), beat,
+            [](double b, const TempoPoint& tp) { return b < tp.beat; });
+        if (it == points.begin()) return fallback_bpm;
+        --it;
+        return it->bpm;
+    }
+
+    // Advance from start_beat by 'frames' samples, integrating the
+    // piecewise-constant tempo curve.  Returns the end beat.
+    double advance(double start_beat, int frames, float sample_rate,
+                   float fallback_bpm) const {
+        if (points.empty()) {
+            double bps = fallback_bpm / 60.0 / sample_rate;
+            return start_beat + frames * bps;
+        }
+        double beat = start_beat;
+        int remaining = frames;
+        while (remaining > 0) {
+            float bpm = bpm_at(beat, fallback_bpm);
+            double bps = bpm / 60.0 / sample_rate;
+            // Find next tempo change after current beat
+            auto it = std::upper_bound(points.begin(), points.end(), beat,
+                [](double b, const TempoPoint& tp) { return b < tp.beat; });
+            if (it != points.end()) {
+                // How many samples until the next tempo point?
+                double beats_to_next = it->beat - beat;
+                int samples_to_next = static_cast<int>(beats_to_next / bps);
+                if (samples_to_next <= 0) samples_to_next = 1;
+                if (samples_to_next <= remaining) {
+                    beat += samples_to_next * bps;
+                    remaining -= samples_to_next;
+                    continue;
+                }
+            }
+            // Consume all remaining samples at current BPM
+            beat += remaining * bps;
+            remaining = 0;
+        }
+        return beat;
+    }
+
+    // Integrate tempo from beat 0 to target_beat and return seconds.
+    double beat_to_seconds(double target_beat, float fallback_bpm) const {
+        if (target_beat <= 0.0) return 0.0;
+        if (points.empty()) return target_beat * 60.0 / fallback_bpm;
+        double seconds = 0.0;
+        double prev_beat = 0.0;
+        float cur_bpm = fallback_bpm;
+        for (auto& tp : points) {
+            if (tp.beat >= target_beat) break;
+            if (tp.beat > prev_beat) {
+                seconds += (tp.beat - prev_beat) * 60.0 / cur_bpm;
+                prev_beat = tp.beat;
+            }
+            cur_bpm = tp.bpm;
+        }
+        // Remaining segment
+        seconds += (target_beat - prev_beat) * 60.0 / cur_bpm;
+        return seconds;
+    }
+};
+
 class AudioEngine {
 public:
     explicit AudioEngine(const AudioEngineConfig& cfg = {});
@@ -69,6 +146,8 @@ public:
     void set_loop(double start, double end);   // call with (0,0) to disable
     void disable_loop();
     void set_bpm(float bpm) { bpm_ = bpm; }
+    void set_tempo_map(TempoMap map);
+    float current_bpm() const;
 
     // Poll for pending transport callbacks (on_transport_stop etc.).
     // Call from any main-thread entry point; no-op if nothing is pending.
@@ -175,6 +254,7 @@ private:
     std::mutex               cmd_mutex_;
 
     float bpm_ = 120.0f;  // set from graph JSON or set_bpm(); read by callback + render
+    TempoMap tempo_map_;  // piecewise-constant tempo automation; empty = use bpm_
 
     // Transport edge detection — audio thread only, no atomics needed.
     bool  prev_playing_  = false;

@@ -335,6 +335,54 @@ def _build_server_schedule(state) -> list[dict]:
 
     return events
 
+def _build_tempo_map(state) -> list:
+    """Build a tempo map from the tempo automation track.
+
+    Returns a list of {"beat": float, "bpm": float} dicts for the C++ engine.
+    Empty list if no tempo track exists.
+    """
+    tempo_track = state.find_tempo_track()
+    if not tempo_track:
+        return []
+
+    from ..core.curve_utils import interpolate_curve
+
+    # Collect all placements on the tempo track, sorted by time
+    placements = sorted(
+        [ap for ap in state.automation_placements if ap.track_id == tempo_track.id],
+        key=lambda ap: ap.time
+    )
+    if not placements:
+        return []
+
+    tempo_points = []
+    # Emit initial BPM at beat 0 (before first placement)
+    tempo_points.append({"beat": 0.0, "bpm": float(state.bpm)})
+
+    for ap in placements:
+        pattern = state.find_automation_pattern(ap.pattern_id)
+        if not pattern or not pattern.points:
+            continue
+
+        curve_points = [(p.time, p.value, p.curve) for p in pattern.points]
+        repeats = ap.repeats or 1
+
+        for rep in range(repeats):
+            offset = ap.time + rep * pattern.length
+            # Sample at 16 points per beat
+            num_samples = max(16, int(pattern.length * 16))
+            for i in range(num_samples + 1):
+                t = (i / num_samples) * pattern.length if num_samples > 0 else 0.0
+                norm_value = interpolate_curve(curve_points, t, pattern.length, 0.0)
+                norm_value = max(0.0, min(1.0, norm_value))
+                bpm_value = pattern.min_value + norm_value * (pattern.max_value - pattern.min_value)
+                # Clamp BPM to reasonable range
+                bpm_value = max(20.0, min(300.0, bpm_value))
+                tempo_points.append({"beat": offset + t, "bpm": round(bpm_value, 2)})
+
+    return tempo_points
+
+
 # ---------------------------------------------------------------------------
 # Dynamic plugin loader
 # ---------------------------------------------------------------------------
@@ -401,6 +449,7 @@ class BindingEngine:
         # Cache playing state so is_playing doesn't need a round-trip every call.
         self._is_playing   = False
         self._current_beat = 0.0
+        self._current_bpm  = 120.0
 
         # Populate graph editor plugin descriptors
         resp = self._send({"cmd": "list_registered_plugins"})
@@ -492,10 +541,14 @@ class BindingEngine:
             self._last_graph_hash = graph_hash
 
         self._send({"cmd": "set_bpm", "bpm": self.state.bpm})
-        
+
+        # Build and send tempo map from tempo automation track
+        tempo_map = _build_tempo_map(self.state)
+        self._send({"cmd": "set_tempo_map", "map": tempo_map})
+
         # Adjust all programming beats to just after the current beat to make sure they re-fire
         events = _build_server_schedule(self.state)
-        
+
         self._send({"cmd": "set_schedule",
                     "events": events})
 
@@ -528,7 +581,12 @@ class BindingEngine:
         if resp and resp.get("status") == "ok":
             self._current_beat = resp.get("beat", self._current_beat)
             self._is_playing   = resp.get("playing", self._is_playing)
+            self._current_bpm  = resp.get("bpm", self._current_bpm)
         return self._current_beat
+
+    @property
+    def current_bpm(self) -> float:
+        return self._current_bpm
 
     @property
     def is_playing(self) -> bool:

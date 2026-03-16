@@ -1019,6 +1019,11 @@ class App(QMainWindow):
             return
 
         self.state.playhead = beat
+
+        # Animate BPM display if tempo automation is active
+        if hasattr(self.engine, 'current_bpm') and self.state.find_tempo_track():
+            self.topbar.update_bpm_display(self.engine.current_bpm)
+
         self.arrangement.refresh()
         self.piano_roll.grid_widget.update()  # Update piano roll for background notes
 
@@ -1093,6 +1098,8 @@ class App(QMainWindow):
         if self.engine:
             self.engine.stop()
         self.player.stop()
+        # Reset BPM display to base value
+        self.topbar.update_bpm_display(self.state.bpm)
         self.topbar.refresh()
         self.arrangement.refresh()
 
