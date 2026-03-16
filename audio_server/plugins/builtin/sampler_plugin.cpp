@@ -26,6 +26,7 @@
 //   attack/decay/sustain/release – ADSR envelope
 
 #include "plugin_api.h"
+#include "adsr.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -266,10 +267,8 @@ struct Voice {
     int      pitch    = 0;
     float    vel_gain = 1.0f;
 
-    // ADSR
-    enum class Stage { Attack, Decay, Sustain, Release, Off } stage = Stage::Off;
-    float    env      = 0.0f;
-    float    env_rate = 0.0f;
+    // ADSR (shared implementation from adsr.h)
+    ADSREnvelope env;
 
     PitchMode mode = PitchMode::Spectral;
 
@@ -436,10 +435,11 @@ public:
         v->channel  = channel;
         v->pitch    = pitch;
         v->vel_gain = velocity / 127.0f;
-        v->stage    = Voice::Stage::Attack;
-        v->env      = 0.0f;
         float att = std::max(0.001f, att_cached_.load());
-        v->env_rate = 1.0f / (att * sample_rate_);
+        float dec = std::max(0.001f, dec_cached_.load());
+        float sus = sus_cached_.load();
+        float rel = std::max(0.001f, rel_cached_.load());
+        v->env.trigger(sample_rate_, att, dec, sus, rel);
 
         // Select mode with fallbacks
         PitchMode mode = pitch_mode_;
@@ -496,11 +496,9 @@ public:
     void note_off(int channel, int pitch) override {
         for (auto& v : voices_) {
             if (v.active && v.channel == channel && v.pitch == pitch
-                    && v.stage != Voice::Stage::Release
-                    && v.stage != Voice::Stage::Off) {
-                v.stage = Voice::Stage::Release;
-                float rel = std::max(0.001f, rel_cached_.load());
-                v.env_rate = (v.env > 0.0f) ? v.env / (rel * sample_rate_) : 0.001f;
+                    && v.env.stage != ADSREnvelope::Stage::Release
+                    && v.env.stage != ADSREnvelope::Stage::Off) {
+                v.env.release();
                 break;
             }
         }
@@ -509,14 +507,8 @@ public:
     void all_notes_off(int channel) override {
         for (auto& v : voices_) {
             if (!v.active) continue;
-            if (channel == -1 || v.channel == channel) {
-                v.stage = Voice::Stage::Release;
-                float rel = std::max(0.001f, rel_cached_.load());
-                if (v.env > 0.0f)
-                    v.env_rate = v.env / (rel * sample_rate_);
-                else
-                    v.active = false;
-            }
+            if (channel == -1 || v.channel == channel)
+                v.env.release();
         }
     }
 
@@ -550,6 +542,8 @@ public:
 
         root_note_cached_.store(root, std::memory_order_relaxed);
         att_cached_.store(att_s, std::memory_order_relaxed);
+        dec_cached_.store(dec_s, std::memory_order_relaxed);
+        sus_cached_.store(dec_lvl, std::memory_order_relaxed);
         rel_cached_.store(rel_s, std::memory_order_relaxed);
 
         bool stereo = (sample_R_.size() == static_cast<size_t>(sample_frames_));
@@ -559,16 +553,16 @@ public:
 
             switch (v.mode) {
                 case PitchMode::Spectral:
-                    _process_voice_spectral(v, ctx, L, R, gain, dec_s, dec_lvl);
+                    _process_voice_spectral(v, ctx, L, R, gain);
                     break;
                 case PitchMode::WSOLA:
-                    _process_voice_wsola(v, ctx, L, R, gain, dec_s, dec_lvl);
+                    _process_voice_wsola(v, ctx, L, R, gain);
                     break;
                 case PitchMode::PSOLA:
-                    _process_voice_psola(v, ctx, L, R, gain, dec_s, dec_lvl, stereo);
+                    _process_voice_psola(v, ctx, L, R, gain, stereo);
                     break;
                 case PitchMode::Varrate:
-                    _process_voice_varrate(v, ctx, L, R, gain, dec_s, dec_lvl,
+                    _process_voice_varrate(v, ctx, L, R, gain,
                                             stereo, out->right != nullptr);
                     break;
             }
@@ -607,11 +601,10 @@ private:
     // -----------------------------------------------------------------------
     void _process_voice_varrate(Voice& v, const PluginProcessContext& ctx,
                                  float* L, float* R, float gain,
-                                 float dec_s, float dec_lvl,
                                  bool stereo, bool has_right) {
         for (int i = 0; i < ctx.block_size; ++i) {
-            float env = _advance_envelope(v, dec_s, dec_lvl);
-            if (!v.active) break;
+            float env = v.env.next();
+            if (v.env.is_off()) { v.active = false; break; }
 
             double fp = v.pos;
             long   ip = static_cast<long>(fp);
@@ -645,7 +638,6 @@ private:
             v.pos += v.rate;
             if (v.pos >= static_cast<double>(sample_frames_)) {
                 v.active = false;
-                v.stage  = Voice::Stage::Off;
                 break;
             }
         }
@@ -655,16 +647,15 @@ private:
     // PSOLA playback (with skip-repeats fix)
     // -----------------------------------------------------------------------
     void _process_voice_psola(Voice& v, const PluginProcessContext& ctx,
-                               float* L, float* R, float gain,
-                               float dec_s, float dec_lvl, bool stereo) {
+                               float* L, float* R, float gain, bool stereo) {
         int n_marks = static_cast<int>(pitch_marks_.size());
         int bs = ctx.block_size;
 
-        float env_start = v.env;
+        float env_start = v.env.level;
         for (int i = 0; i < bs; ++i)
-            _advance_envelope(v, dec_s, dec_lvl);
-        if (!v.active && v.overlap_len == 0) return;
-        float env_avg = (env_start + v.env) * 0.5f;
+            v.env.next();
+        if (v.env.is_off() && v.overlap_len == 0) { v.active = false; return; }
+        float env_avg = (env_start + v.env.level) * 0.5f;
         float amp = env_avg * v.vel_gain * gain;
 
         // Add leftover overlap
@@ -797,8 +788,7 @@ private:
     // Spectral pitch-shift playback
     // -----------------------------------------------------------------------
     void _process_voice_spectral(Voice& v, const PluginProcessContext& ctx,
-                                  float* L, float* R, float gain,
-                                  float dec_s, float dec_lvl) {
+                                  float* L, float* R, float gain) {
         float shift = static_cast<float>(v.rate);
         int remaining = ctx.block_size;
         int out_pos = 0;
@@ -806,8 +796,8 @@ private:
         while (remaining > 0) {
             // Drain output buffer first (with per-sample envelope)
             while (v.spect_out_avail > 0 && remaining > 0) {
-                float env = _advance_envelope(v, dec_s, dec_lvl);
-                if (!v.active) return;
+                float env = v.env.next();
+                if (v.env.is_off()) { v.active = false; return; }
 
                 float s = v.spect_out_buf[v.spect_out_read++] * env * v.vel_gain * gain;
                 L[out_pos] += s;
@@ -824,7 +814,6 @@ private:
             double fi = v.spect_frame_pos;
             if (fi >= spectral_bank_.n_frames - 1) {
                 v.active = false;
-                v.stage  = Voice::Stage::Off;
                 break;
             }
 
@@ -1016,11 +1005,10 @@ private:
     }
 
     void _process_voice_wsola(Voice& v, const PluginProcessContext& ctx,
-                               float* L, float* R, float gain,
-                               float dec_s, float dec_lvl) {
+                               float* L, float* R, float gain) {
         for (int i = 0; i < ctx.block_size; ++i) {
-            float env = _advance_envelope(v, dec_s, dec_lvl);
-            if (!v.active) break;
+            float env = v.env.next();
+            if (v.env.is_off()) { v.active = false; break; }
 
             // Ensure we have enough time-stretched data ahead
             int read_int = static_cast<int>(v.wsola_ts_read);
@@ -1028,7 +1016,6 @@ private:
                 _wsola_fill(&v, read_int + v.wsola_grain_size * 4);
                 if (read_int + 2 >= v.wsola_produced) {
                     v.active = false;
-                    v.stage  = Voice::Stage::Off;
                     break;
                 }
             }
@@ -1046,47 +1033,6 @@ private:
 
             v.wsola_ts_read += v.rate;
         }
-    }
-
-    // -----------------------------------------------------------------------
-    // Envelope helper
-    // -----------------------------------------------------------------------
-    float _advance_envelope(Voice& v, float dec_s, float dec_lvl) {
-        float env = v.env;
-        switch (v.stage) {
-            case Voice::Stage::Attack:
-                env += v.env_rate;
-                if (env >= 1.0f) {
-                    env = 1.0f;
-                    v.stage = Voice::Stage::Decay;
-                    v.env_rate = (1.0f - dec_lvl) / (dec_s * sample_rate_);
-                }
-                break;
-            case Voice::Stage::Decay:
-                env -= v.env_rate;
-                if (env <= dec_lvl) {
-                    env = dec_lvl;
-                    v.stage = Voice::Stage::Sustain;
-                    v.env_rate = 0.0f;
-                }
-                break;
-            case Voice::Stage::Sustain:
-                env = dec_lvl;
-                break;
-            case Voice::Stage::Release:
-                env -= v.env_rate;
-                if (env <= 0.0f) {
-                    env = 0.0f;
-                    v.stage  = Voice::Stage::Off;
-                    v.active = false;
-                }
-                break;
-            case Voice::Stage::Off:
-                v.active = false;
-                break;
-        }
-        v.env = env;
-        return env;
     }
 
     // -----------------------------------------------------------------------
@@ -1250,9 +1196,9 @@ private:
 
     Voice* _steal_voice() {
         for (auto& v : voices_)
-            if (v.stage == Voice::Stage::Release) return &v;
+            if (v.env.stage == ADSREnvelope::Stage::Release) return &v;
         for (auto& v : voices_)
-            if (v.stage == Voice::Stage::Sustain) return &v;
+            if (v.env.stage == ADSREnvelope::Stage::Sustain) return &v;
         return &voices_[0];
     }
 
@@ -1281,6 +1227,8 @@ private:
     std::atomic<int>         auto_root_note_{60};   // from YIN F0 detection
     std::atomic<int>         root_note_cached_{60};
     std::atomic<float>       att_cached_{0.01f};
+    std::atomic<float>       dec_cached_{0.1f};
+    std::atomic<float>       sus_cached_{0.8f};
     std::atomic<float>       rel_cached_{0.2f};
 
     Voice voices_[MAX_VOICES] = {};

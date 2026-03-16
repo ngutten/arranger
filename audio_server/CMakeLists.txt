@@ -407,6 +407,11 @@ plugin_library(note_invert SOURCES plugins/builtin/note_invert_plugin.cpp)
 
 plugin_library(event_gate SOURCES plugins/builtin/event_gate_plugin.cpp)
 
+# --- Synthesizer plugins (shared synth_common.h, no extra deps) ---
+plugin_library(additive_synth    SOURCES plugins/builtin/additive_synth_plugin.cpp)
+plugin_library(subtractive_synth SOURCES plugins/builtin/subtractive_synth_plugin.cpp)
+plugin_library(fm_synth          SOURCES plugins/builtin/fm_synth_plugin.cpp)
+
 # --- Sampler (libsndfile for audio I/O) ---
 if(ENABLE_SNDFILE)
     plugin_library(sampler
@@ -449,6 +454,9 @@ add_dependencies(audio_server_lib
     arranger_plugin_note_invert
     arranger_plugin_event_gate
     arranger_plugin_pattern_stamper
+    arranger_plugin_additive_synth
+    arranger_plugin_subtractive_synth
+    arranger_plugin_fm_synth
 )
 
 if(ENABLE_SF2)
