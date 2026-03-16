@@ -233,13 +233,13 @@ void PluginAdapterNode::process(
             auto& ab = buffers_.audio.entries[audio_map_i].second;
             ab.frames = ctx.block_size;
             if (is_out) {
-                assert(out_i + 1 < static_cast<int>(outputs.size()) + 1);
+                assert(out_i + 1 < static_cast<int>(outputs.size()));
                 ab.left  = outputs[out_i++].audio;
                 ab.right = outputs[out_i++].audio;
                 std::memset(ab.left,  0, ctx.block_size * sizeof(float));
                 std::memset(ab.right, 0, ctx.block_size * sizeof(float));
             } else {
-                assert(in_i + 1 < static_cast<int>(inputs.size()) + 1);
+                assert(in_i + 1 < static_cast<int>(inputs.size()));
                 ab.left  = const_cast<float*>(inputs[in_i++].audio);
                 ab.right = const_cast<float*>(inputs[in_i++].audio);
             }
@@ -257,19 +257,22 @@ void PluginAdapterNode::process(
                 out_i++;
             } else {
                 assert(in_i < static_cast<int>(inputs.size()));
-                cb.value = inputs[in_i].control;
-                cb.samples = inputs[in_i].control_buf;
                 cb.frames  = ctx.block_size;
                 if (control_map_[ctrl_map_i].has_pending &&
                     !control_map_[ctrl_map_i].is_connected) {
+                    // Disconnected port: use pending value (from set_param or
+                    // default).  Null out samples so downstream plugins use
+                    // the block-rate cb.value path — all disconnected ports
+                    // share buffer 0 in the pool, so writing per-sample data
+                    // there would clobber other ports' values.
                     float pv = control_map_[ctrl_map_i].pending_value->load(
                         std::memory_order_relaxed);
-                    cb.value = pv;
-                    // Fill per-sample buffer with constant for unconnected ports
-                    if (cb.samples) {
-                        for (int s = 0; s < ctx.block_size; ++s)
-                            cb.samples[s] = pv;
-                    }
+                    cb.value   = pv;
+                    cb.samples = nullptr;
+                } else {
+                    // Connected port: wire through upstream buffer
+                    cb.value   = inputs[in_i].control;
+                    cb.samples = inputs[in_i].control_buf;
                 }
                 in_i++;
             }

@@ -28,6 +28,7 @@ from typing import Optional, Callable
 
 from PySide6.QtWidgets import (
     QWidget, QSizePolicy, QMenu,
+    QGraphicsScene, QGraphicsView, QFrame,
 )
 from PySide6.QtCore import Qt, QPointF, QRectF, QPoint, Signal, QTimer
 from PySide6.QtGui import (
@@ -45,12 +46,15 @@ from .param_widgets import SmartFloatWidget
 # ---------------------------------------------------------------------------
 
 NODE_W          = 180     # base node width (scene units)
+NODE_W_WIDE     = 340     # wider width for two-column parameter nodes
 NODE_HEADER_H   = 26      # title bar height
 PORT_ROW_H      = 16      # height per port row (compact)
 PORT_R          = 5       # port circle radius (smaller = more compact)
 SETTINGS_PAD    = 4       # padding inside settings area
 MIN_BUTTON_W    = 16      # minimize toggle button width
 MIN_BUTTON_H    = 13
+TWO_COL_THRESHOLD = 6     # param count above which two-column layout kicks in
+ZOOM_HIDE_SCALE = 0.75    # hide settings widgets below this zoom level
 
 # Colours
 C_BG            = QColor("#0d1117")
@@ -92,6 +96,53 @@ C_MARQUEE_LINE  = QColor("#3a7bd5")
 C_TEXT          = QColor("#e6e6e6")
 C_TEXT_DIM      = QColor("#888888")
 C_DEFAULT_BADGE = QColor("#f9ca24")
+
+
+# ---------------------------------------------------------------------------
+# Scaled widget view — wraps a settings QWidget in a QGraphicsProxyWidget
+# so it scales visually (and interactively) with the node graph zoom.
+# ---------------------------------------------------------------------------
+
+class _ScaledWidgetView(QGraphicsView):
+    """QGraphicsView that wraps a single QWidget via QGraphicsProxyWidget.
+
+    Calling set_zoom(scale) scales the embedded widget uniformly, making
+    sliders, text boxes, etc. grow and shrink with the canvas zoom.
+    """
+
+    def __init__(self, widget: QWidget, parent: QWidget = None):
+        self._scene = QGraphicsScene()
+        super().__init__(self._scene, parent)
+        self._proxy = self._scene.addWidget(widget)
+        self._inner = widget
+
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setStyleSheet("background: transparent; border: none;")
+        self.setRenderHint(QPainter.Antialiasing)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.viewport().setStyleSheet("background: transparent;")
+
+    def set_zoom(self, scale: float, avail_width: float) -> None:
+        """Apply zoom and resize view to fit the scaled content.
+
+        avail_width is the scene-space width available (node_w - padding).
+        """
+        self.resetTransform()
+        self.scale(scale, scale)
+        # Tell the inner widget how wide it should lay out at (unscaled)
+        self._inner.setFixedWidth(int(avail_width))
+        base_h = self._inner.sizeHint().height()
+        self.setFixedSize(int(avail_width * scale), int(base_h * scale))
+
+    def sizeHint(self):
+        """Return the inner widget's unscaled size hint."""
+        return self._inner.sizeHint()
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        # Forward to parent canvas for zoom instead of scrolling
+        event.ignore()
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +251,7 @@ class NodeGraphCanvas(QWidget):
             return
         xs = [n.x for n in self.model.nodes]
         ys = [n.y for n in self.model.nodes]
-        max_ws = [n.x + NODE_W for n in self.model.nodes]
+        max_ws = [n.x + self._node_width(n) for n in self.model.nodes]
         max_hs = [n.y + self._node_height(n) for n in self.model.nodes]
 
         margin = 60
@@ -239,6 +290,14 @@ class NodeGraphCanvas(QWidget):
     # Node geometry (scene units)
     # -----------------------------------------------------------------------
 
+    def _node_width(self, node: GraphNode) -> float:
+        view = self._settings_widgets.get(node.node_id)
+        if view is not None:
+            inner = getattr(view, '_inner', view)
+            if getattr(inner, '_two_column', False):
+                return NODE_W_WIDE
+        return NODE_W
+
     def _node_height(self, node: GraphNode) -> float:
         if node.minimised:
             return NODE_HEADER_H
@@ -253,13 +312,15 @@ class NodeGraphCanvas(QWidget):
         return NODE_HEADER_H + port_h + settings_h
 
     def _settings_height(self, node: GraphNode) -> float:
-        w = self._settings_widgets.get(node.node_id)
-        if w is None:
+        view = self._settings_widgets.get(node.node_id)
+        if view is None:
             return 0
-        return w.sizeHint().height() + SETTINGS_PAD
+        # Use the inner widget's unscaled sizeHint for scene-space height
+        inner = getattr(view, '_inner', view)
+        return inner.sizeHint().height() + SETTINGS_PAD
 
     def _node_rect(self, node: GraphNode) -> QRectF:
-        return QRectF(node.x, node.y, NODE_W, self._node_height(node))
+        return QRectF(node.x, node.y, self._node_width(node), self._node_height(node))
 
     def _port_scene_pos(self, node: GraphNode, port: PortDef) -> QPointF:
         """Centre of a port circle in scene coordinates.
@@ -371,7 +432,11 @@ class NodeGraphCanvas(QWidget):
                 self._create_settings_widget(node)
 
     def _create_settings_widget(self, node: GraphNode) -> None:
-        """Create (or recreate) the inline settings widget for a node."""
+        """Create (or recreate) the inline settings widget for a node.
+
+        The raw widget is wrapped in a _ScaledWidgetView so that it scales
+        visually with the canvas zoom level.
+        """
         # Remove existing if present
         if node.node_id in self._settings_widgets:
             old = self._settings_widgets.pop(node.node_id)
@@ -384,9 +449,9 @@ class NodeGraphCanvas(QWidget):
             w = _make_default_settings_widget(node, self, self._on_node_param_changed)
 
         if w:
-            w.setParent(self)
-            w.hide()
-            self._settings_widgets[node.node_id] = w
+            view = _ScaledWidgetView(w, self)
+            view.hide()
+            self._settings_widgets[node.node_id] = view
 
     def _on_node_param_changed(self, node_id: str, key: str, value) -> None:
         """Called by inline settings widgets when a param changes."""
@@ -416,33 +481,46 @@ class NodeGraphCanvas(QWidget):
         Settings are placed at the bottom of the port area — below all port
         rows — so they sit between the two columns rather than having a
         separate section.
-        
+
         Widgets are clipped to only show in non-overlapped regions, so that
         painted node bodies from nodes drawn on top properly obscure widgets
         from nodes drawn below.
+
+        When zoomed out past ZOOM_HIDE_SCALE, widgets are hidden since they
+        would be too small to interact with.
         """
         from PySide6.QtGui import QRegion
-        
+
+        # Hide all widgets when zoomed out too far to interact
+        if self._scale < ZOOM_HIDE_SCALE:
+            for w in self._settings_widgets.values():
+                w.hide()
+            return
+
         for idx, node in enumerate(self.model.nodes):
-            w = self._settings_widgets.get(node.node_id)
-            if w is None:
+            view = self._settings_widgets.get(node.node_id)
+            if view is None:
                 continue
             if node.minimised:
-                w.hide()
+                view.hide()
                 continue
             r = self._node_rect(node)
+            node_w = r.width()
             vis = node.visible_ports()
             n_ports = max(len([p for p in vis if not p.is_output]),
                           len([p for p in vis if p.is_output]), 1)
             port_bottom = (r.top() + NODE_HEADER_H + SETTINGS_PAD +
                            n_ports * PORT_ROW_H)
 
-            # Convert scene rect to view rect
-            tl = self.scene_to_view(QPointF(r.left() + SETTINGS_PAD, port_bottom))
-            w_width  = int((NODE_W - SETTINGS_PAD * 2) * self._scale)
-            w_height = w.sizeHint().height()
+            # Apply zoom to the embedded widget and compute view-space size
+            avail_w = node_w - SETTINGS_PAD * 2
+            view.set_zoom(self._scale, avail_w)
+            w_width = view.width()
+            w_height = view.height()
 
-            w.setGeometry(int(tl.x()), int(tl.y()), w_width, w_height)
+            # Convert scene position to view position
+            tl = self.scene_to_view(QPointF(r.left() + SETTINGS_PAD, port_bottom))
+            view.move(int(tl.x()), int(tl.y()))
             
             # Compute clipping region: subtract rectangles of all nodes drawn after this one
             # (nodes drawn later appear on top and should obscure this widget)
@@ -464,11 +542,11 @@ class NodeGraphCanvas(QWidget):
             
             # If completely obscured, hide the widget; otherwise set mask and show
             if clip_region.isEmpty():
-                w.hide()
+                view.hide()
             else:
-                w.setMask(clip_region)
-                w.show()
-                w.raise_()
+                view.setMask(clip_region)
+                view.show()
+                view.raise_()
 
     # -----------------------------------------------------------------------
     # Paint
@@ -636,7 +714,7 @@ class NodeGraphCanvas(QWidget):
             painter.drawEllipse(QPointF(cx, y), PORT_R, PORT_R)
             painter.setPen(QPen(C_TEXT_DIM))
             label_x = cx + PORT_R + 3
-            label_w = NODE_W / 2 - PORT_R - 8
+            label_w = r.width() / 2 - PORT_R - 8
             painter.drawText(QRectF(label_x, y - PORT_ROW_H / 2, label_w, PORT_ROW_H),
                              Qt.AlignVCenter | Qt.AlignLeft, port.name)
 
@@ -648,7 +726,7 @@ class NodeGraphCanvas(QWidget):
             painter.setBrush(QBrush(col))
             painter.setPen(QPen(col.darker(120), 1))
             painter.drawEllipse(QPointF(cx, y), PORT_R, PORT_R)
-            lbl_w = NODE_W / 2 - PORT_R - 8
+            lbl_w = r.width() / 2 - PORT_R - 8
             painter.setPen(QPen(C_TEXT_DIM))
             painter.drawText(QRectF(cx - lbl_w - PORT_R - 3, y - PORT_ROW_H / 2,
                                     lbl_w, PORT_ROW_H),
@@ -1343,6 +1421,10 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
     Generates widgets for:
       - Control input ports (based on ControlHint)
       - ConfigParams (file pickers, dropdowns, spinboxes, etc.)
+
+    Uses two-column layout when the total parameter count exceeds
+    TWO_COL_THRESHOLD, so that long parameter lists don't produce
+    excessively tall nodes.
     """
     from PySide6.QtWidgets import (
         QWidget, QFormLayout, QLabel, QDoubleSpinBox, QSpinBox,
@@ -1360,11 +1442,43 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
     if not ctrl_inputs and not config_params:
         return None
 
+    # Count visible params to decide on two-column layout
+    n_visible_config = sum(
+        1 for cp in config_params
+        if not cp.get("advanced", False) or node.params.get(cp.get("id", ""), cp.get("default", ""))
+    )
+    n_total = n_visible_config + len(ctrl_inputs)
+    use_two_col = n_total >= TWO_COL_THRESHOLD
+
     w = QWidget(parent)
     w.setStyleSheet("background: transparent; color: #ccc;")
-    lay = QFormLayout(w)
-    lay.setContentsMargins(4, 2, 4, 2)
-    lay.setSpacing(3)
+    w._two_column = use_two_col
+
+    if use_two_col:
+        outer = QHBoxLayout(w)
+        outer.setContentsMargins(4, 2, 4, 2)
+        outer.setSpacing(8)
+        left_form = QFormLayout()
+        left_form.setSpacing(3)
+        right_form = QFormLayout()
+        right_form.setSpacing(3)
+        outer.addLayout(left_form)
+        outer.addLayout(right_form)
+        _forms = [left_form, right_form]
+        _row_counter = [0]
+
+        def _add_row(label, widget):
+            _forms[_row_counter[0] % 2].addRow(label, widget)
+            _row_counter[0] += 1
+
+        lay = left_form  # fallback reference (unused when two-col)
+    else:
+        lay = QFormLayout(w)
+        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setSpacing(3)
+
+        def _add_row(label, widget):
+            lay.addRow(label, widget)
 
     STYLE_ACTIVE = "background: #0d1117; color: #ccc; border: 1px solid #2a3a5c;"
     STYLE_DISABLED = "background: #111; color: #444; border: 1px solid #1a1a1a;"
@@ -1419,7 +1533,7 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
                     on_change(node.node_id, cid, p)
             browse_btn.clicked.connect(_browse)
             row_lay.addWidget(browse_btn)
-            lay.addRow(QLabel(cp_display + ":"), row)
+            _add_row(QLabel(cp_display + ":"), row)
 
         elif cp_type == "categorical":
             combo = QComboBox()
@@ -1433,7 +1547,7 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
             combo.setCurrentIndex(idx)
             combo.currentTextChanged.connect(
                 lambda text, cid=cp_id: on_change(node.node_id, cid, text))
-            lay.addRow(QLabel(cp_display + ":"), combo)
+            _add_row(QLabel(cp_display + ":"), combo)
 
         elif cp_type == "integer":
             # Special handling for automation_track_id: show dropdown of track names
@@ -1463,8 +1577,8 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
                     # Connect to parameter change
                     combo.currentIndexChanged.connect(
                         lambda idx, cid=cp_id, cb=combo: on_change(node.node_id, cid, cb.itemData(idx)))
-                    
-                    lay.addRow(QLabel(cp_display + ":"), combo)
+
+                    _add_row(QLabel(cp_display + ":"), combo)
                 else:
                     # Fallback to spinbox if state not available
                     spin = QSpinBox()
@@ -1474,7 +1588,7 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
                     spin.setMaximumWidth(80)
                     spin.valueChanged.connect(
                         lambda v, cid=cp_id: on_change(node.node_id, cid, v))
-                    lay.addRow(QLabel(cp_display + ":"), spin)
+                    _add_row(QLabel(cp_display + ":"), spin)
             else:
                 # Default integer handling
                 spin = QSpinBox()
@@ -1484,7 +1598,7 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
                 spin.setMaximumWidth(80)
                 spin.valueChanged.connect(
                     lambda v, cid=cp_id: on_change(node.node_id, cid, v))
-                lay.addRow(QLabel(cp_display + ":"), spin)
+                _add_row(QLabel(cp_display + ":"), spin)
 
         elif cp_type == "bool":
             cb = QCheckBox()
@@ -1509,7 +1623,7 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
             """)
             cb.toggled.connect(
                 lambda checked, cid=cp_id: on_change(node.node_id, cid, 1 if checked else 0))
-            lay.addRow(QLabel(cp_display + ":"), cb)
+            _add_row(QLabel(cp_display + ":"), cb)
 
         elif cp_type == "float":
             spin = QDoubleSpinBox()
@@ -1519,14 +1633,14 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
             spin.setMaximumWidth(80)
             spin.valueChanged.connect(
                 lambda v, cid=cp_id: on_change(node.node_id, cid, v))
-            lay.addRow(QLabel(cp_display + ":"), spin)
+            _add_row(QLabel(cp_display + ":"), spin)
 
         else:  # string
             edit = QLineEdit(str(stored))
             edit.setStyleSheet(STYLE_ACTIVE)
             edit.textChanged.connect(
                 lambda text, cid=cp_id: on_change(node.node_id, cid, text))
-            lay.addRow(QLabel(cp_display + ":"), edit)
+            _add_row(QLabel(cp_display + ":"), edit)
 
     # --- Control input ports ---
     for p in ctrl_inputs:
@@ -1568,7 +1682,7 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
                     node.node_id, k, 1.0 if checked else 0.0))
             lbl = QLabel(display + ":")
             lbl.setStyleSheet("color: #aaa; font-size: 8px;")
-            lay.addRow(lbl, cb)
+            _add_row(lbl, cb)
             _ctrl_widgets[pid] = cb
 
         elif hint in ("categorical", "radio") and choices:
@@ -1583,7 +1697,7 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
                 lambda idx, k=pid_capture: on_change(node.node_id, k, float(idx)))
             lbl = QLabel(display + ":")
             lbl.setStyleSheet("color: #aaa; font-size: 8px;")
-            lay.addRow(lbl, combo)
+            _add_row(lbl, combo)
             _ctrl_widgets[pid] = combo
 
         elif hint == "integer":
@@ -1598,14 +1712,14 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
                 lambda v, k=pid_capture: on_change(node.node_id, k, float(v)))
             lbl = QLabel(display + ":")
             lbl.setStyleSheet("color: #aaa; font-size: 8px;")
-            lay.addRow(lbl, spin)
+            _add_row(lbl, spin)
             _ctrl_widgets[pid] = spin
 
         elif hint == "meter":
             # Read-only meter — just show label for now (future: VU bar)
             val_lbl = QLabel(f"{float(stored):.2f}")
             val_lbl.setStyleSheet("color: #6bcb77; font-size: 8px;")
-            lay.addRow(QLabel(display + ":"), val_lbl)
+            _add_row(QLabel(display + ":"), val_lbl)
 
         else:
             # Continuous (default) → SmartFloatWidget with adaptive slider
@@ -1614,7 +1728,7 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
                 lambda v, k=pid_capture: on_change(node.node_id, k, v))
             lbl = QLabel(display + ":")
             lbl.setStyleSheet("color: #aaa; font-size: 8px;")
-            lay.addRow(lbl, widget)
+            _add_row(lbl, widget)
             _ctrl_widgets[pid] = widget
 
     def refresh_wired_ports(wired: set):
