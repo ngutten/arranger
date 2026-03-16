@@ -90,7 +90,7 @@ public:
               ControlHint::Continuous, 0.2f, 0.001f, 0.5f, 0.0f, {}, "", false },
             { "delta_overshoot", "Delta Overshoot", "Pitch overshoot from pitch delta (semitones per unit delta).",
               PluginPortType::Control, PortRole::Input,
-              ControlHint::Continuous, 0.0f, 0.0f, 2.0f, 0.0f, {}, "", false },
+              ControlHint::Continuous, 0.0f, -2.0f, 2.0f, 0.0f, {}, "", false },
             { "delta_tremolo", "Delta Tremolo", "Pitch oscillation amplitude from pitch delta.",
               PluginPortType::Control, PortRole::Input,
               ControlHint::Continuous, 0.0f, 0.0f, 2.0f, 0.0f, {}, "", false },
