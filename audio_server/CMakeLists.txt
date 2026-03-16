@@ -411,6 +411,7 @@ plugin_library(event_gate SOURCES plugins/builtin/event_gate_plugin.cpp)
 plugin_library(additive_synth    SOURCES plugins/builtin/additive_synth_plugin.cpp)
 plugin_library(subtractive_synth SOURCES plugins/builtin/subtractive_synth_plugin.cpp)
 plugin_library(fm_synth          SOURCES plugins/builtin/fm_synth_plugin.cpp)
+plugin_library(waveguide_string  SOURCES plugins/builtin/waveguide_string_plugin.cpp)
 
 # --- Sampler (libsndfile for audio I/O) ---
 if(ENABLE_SNDFILE)
@@ -457,6 +458,7 @@ add_dependencies(audio_server_lib
     arranger_plugin_additive_synth
     arranger_plugin_subtractive_synth
     arranger_plugin_fm_synth
+    arranger_plugin_waveguide_string
 )
 
 if(ENABLE_SF2)

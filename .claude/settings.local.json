@@ -11,7 +11,10 @@
       "Bash(tail:*)",
       "Bash(g++ -std=c++17 -I include -I plugins/builtin tests/test_pitch_delta.cpp -o tests/test_pitch_delta -lm && ./tests/test_pitch_delta 2>&1)",
       "Bash(./test_graph 2>&1 && ./test_render 2>&1)",
-      "Bash(cd /home/claude/arranger/audio_server/build && ./test_graph && ./test_render 2>&1)"
+      "Bash(cd /home/claude/arranger/audio_server/build && ./test_graph && ./test_render 2>&1)",
+      "WebFetch(domain:www.ee.columbia.edu)",
+      "WebFetch(domain:www.dsprelated.com)",
+      "Bash(./test_graph:*)"
     ]
   }
 }
