@@ -17,5 +17,6 @@
       "Bash(./test_graph:*)",
       "Bash(./audio_server/build/test_graph:*)"
     ]
-  }
+  },
+  "outputStyle": "default"
 }
