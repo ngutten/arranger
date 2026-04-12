@@ -113,6 +113,10 @@ class _ScaledWidgetView(QGraphicsView):
     def __init__(self, widget: QWidget, parent: QWidget = None):
         self._scene = QGraphicsScene()
         super().__init__(self._scene, parent)
+        # QGraphicsScene.addWidget() requires a top-level (parentless) widget.
+        # Callers often pass widgets created with a parent for ownership; strip
+        # it here so the proxy embedding works on all Qt platform back-ends.
+        widget.setParent(None)
         self._proxy = self._scene.addWidget(widget)
         self._inner = widget
 
@@ -123,18 +127,24 @@ class _ScaledWidgetView(QGraphicsView):
         self.setRenderHint(QPainter.Antialiasing)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.viewport().setStyleSheet("background: transparent;")
+        # Anchor scene content to top-left so high-DPI viewport
+        # sizing doesn't shift the proxy widget away from (0,0).
+        self.setAlignment(Qt.AlignLeft | Qt.AlignTop)
 
-    def set_zoom(self, scale: float, avail_width: float) -> None:
-        """Apply zoom and resize view to fit the scaled content.
+    def set_zoom(self, scale: float, avail_width: float) -> tuple[int, int]:
+        """Apply zoom and compute the view-space size.
 
-        avail_width is the scene-space width available (node_w - padding).
+        Returns (width, height) in view pixels.  The caller is responsible
+        for positioning and sizing this widget via setGeometry() so that
+        position and size are applied atomically (avoids a deferred-layout
+        race on some Qt platform back-ends).
         """
         self.resetTransform()
         self.scale(scale, scale)
-        # Tell the inner widget how wide it should lay out at (unscaled)
         self._inner.setFixedWidth(int(avail_width))
         base_h = self._inner.sizeHint().height()
-        self.setFixedSize(int(avail_width * scale), int(base_h * scale))
+        self.setSceneRect(0, 0, avail_width, base_h)
+        return int(avail_width * scale), int(base_h * scale)
 
     def sizeHint(self):
         """Return the inner widget's unscaled size hint."""
@@ -515,13 +525,13 @@ class NodeGraphCanvas(QWidget):
 
             # Apply zoom to the embedded widget and compute view-space size
             avail_w = node_w - SETTINGS_PAD * 2
-            view.set_zoom(self._scale, avail_w)
-            w_width = view.width()
-            w_height = view.height()
+            w_width, w_height = view.set_zoom(self._scale, avail_w)
 
-            # Convert scene position to view position
+            # Convert scene position to view position and set geometry
+            # atomically (separate setFixedSize + move can race on some
+            # Qt platform back-ends, leaving the widget stuck at 0,0).
             tl = self.scene_to_view(QPointF(r.left() + SETTINGS_PAD, port_bottom))
-            view.move(int(tl.x()), int(tl.y()))
+            view.setGeometry(int(tl.x()), int(tl.y()), w_width, w_height)
             
             # Compute clipping region: subtract rectangles of all nodes drawn after this one
             # (nodes drawn later appear on top and should obscure this widget)
@@ -1321,10 +1331,9 @@ def _make_control_monitor_widget(node: GraphNode, parent) -> "QWidget":
             self._timer.start()
 
         def _poll(self):
-            # Walk up to find a NodeGraphCanvas to get server_engine
-            canvas = self.parent()
-            while canvas and not hasattr(canvas, 'model'):
-                canvas = canvas.parent()
+            # The widget is reparented into a QGraphicsScene, so parent()
+            # no longer reaches the canvas — use the closure reference.
+            canvas = parent
             if canvas is None:
                 return
             server_engine = getattr(canvas, '_server_engine', None)
@@ -1524,17 +1533,21 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
             def _browse(checked=False, e=edit, cid=cp_id, ff=file_filter, sm=save_mode, dr=is_dir, cat=_cat):
                 from PySide6.QtWidgets import QFileDialog
                 start = settings.get_recent_dir(cat) if settings else ""
+                # Use the canvas's top-level window as parent: the settings
+                # widget lives inside a QGraphicsScene (parent was cleared by
+                # _ScaledWidgetView), so it can't host a modal dialog.
+                dlg_parent = parent.window() if parent else None
                 if dr:
                     p = QFileDialog.getExistingDirectory(
-                        w, f"Select {cp_display}", start,
+                        dlg_parent, f"Select {cp_display}", start,
                         options=QFileDialog.Option.DontUseNativeDialog | QFileDialog.Option.ShowDirsOnly)
                 elif sm:
                     p, _ = QFileDialog.getSaveFileName(
-                        w, f"Select {cp_display}", start, ff,
+                        dlg_parent, f"Select {cp_display}", start, ff,
                         options=QFileDialog.Option.DontUseNativeDialog)
                 else:
                     p, _ = QFileDialog.getOpenFileName(
-                        w, f"Select {cp_display}", start, ff,
+                        dlg_parent, f"Select {cp_display}", start, ff,
                         options=QFileDialog.Option.DontUseNativeDialog)
                 if p:
                     if settings:
