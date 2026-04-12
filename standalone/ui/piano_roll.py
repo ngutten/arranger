@@ -5,8 +5,9 @@ import time
 from PySide6.QtWidgets import (QFrame, QWidget, QScrollArea, QLabel, QPushButton,
                                 QComboBox, QSlider, QVBoxLayout, QHBoxLayout,
                                 QLineEdit)
-from PySide6.QtCore import Qt, QRect, QPoint, QRectF
-from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont, QKeyEvent
+from PySide6.QtCore import Qt, QRect, QPoint, QPointF, QRectF
+from PySide6.QtGui import (QPainter, QColor, QPen, QBrush, QFont, QKeyEvent,
+                            QPainterPath, QCursor)
 
 from ..state import NOTE_NAMES, scale_set, vel_color, Note
 from ..clipboard import NoteClipboard
@@ -54,6 +55,14 @@ class PianoRoll(QFrame):
         # Variation editing cache
         self._var_resolved_notes = None  # cached resolved notes for current variation
         self._var_note_categories = {}   # note_id -> category string
+
+        # Fine-edit loupe state (Alt-held magnifier with scaled cursor deltas)
+        self._alt_loupe = False
+        self._loupe_anchor = None        # (x, y) floats — visual center of loupe
+        self._loupe_virtual = None       # (x, y) floats — virtual cursor pos (edit coords)
+        self._loupe_scale = 4.0          # adaptive zoom factor
+        self._loupe_radius = 90          # on-screen radius in px
+        self._last_real_pos = None       # QPoint: last raw cursor pos in grid widget
 
         self._build()
 
@@ -373,6 +382,69 @@ class PianoRoll(QFrame):
     def _snap(self, beat):
         return int(beat / self.state.snap) * self.state.snap
 
+    # -- Fine-edit loupe helpers --
+
+    def _xy(self, event):
+        """Return the logical (x, y) for this event. In loupe mode, use the
+        virtual cursor so edits track the magnified view, not the real mouse."""
+        if self._alt_loupe and self._loupe_virtual is not None:
+            return self._loupe_virtual
+        p = event.pos()
+        return (float(p.x()), float(p.y()))
+
+    def _compute_loupe_scale(self, x, y):
+        """Pick a zoom factor so the smallest note near (x, y) renders at a
+        comfortable size. Capped at 6x; minimum 2x."""
+        search_px = 120
+        beat_lo = (x - search_px) / self.BW
+        beat_hi = (x + search_px) / self.BW
+        pitch_lo = self.HI - int((y + search_px) / self.NH)
+        pitch_hi = self.HI - int((y - search_px) / self.NH)
+        notes = self._get_edit_notes()
+        min_dur_px = None
+        for n in notes:
+            if (pitch_lo <= n.pitch <= pitch_hi
+                    and n.start < beat_hi
+                    and n.start + n.duration > beat_lo):
+                dur_px = n.duration * self.BW
+                if min_dur_px is None or dur_px < min_dur_px:
+                    min_dur_px = dur_px
+        if min_dur_px is None or min_dur_px >= 20:
+            return 3.0
+        return max(2.0, min(6.0, 20.0 / max(1.0, min_dur_px)))
+
+    def _activate_loupe(self):
+        """Turn on fine-edit loupe, anchored at the current cursor position."""
+        if self._alt_loupe or self._last_real_pos is None:
+            return
+        x = float(self._last_real_pos.x())
+        y = float(self._last_real_pos.y())
+        self._alt_loupe = True
+        self._loupe_anchor = (x, y)
+        self._loupe_virtual = (x, y)
+        self._loupe_scale = self._compute_loupe_scale(x, y)
+        # Hide the real OS cursor — the virtual crosshair at the loupe centre
+        # replaces it. Avoids the "cursor drifts off the loupe" confusion.
+        self.grid_widget.setCursor(Qt.BlankCursor)
+        self.grid_widget.update()
+
+    def _deactivate_loupe(self):
+        """Turn off fine-edit loupe. Warp the real cursor to the virtual
+        position so edits continue smoothly after release."""
+        if not self._alt_loupe:
+            return
+        if self._loupe_virtual is not None:
+            vx, vy = self._loupe_virtual
+            target = QPoint(int(vx), int(vy))
+            global_pos = self.grid_widget.mapToGlobal(target)
+            QCursor.setPos(global_pos)
+            self._last_real_pos = target
+        self._alt_loupe = False
+        self._loupe_anchor = None
+        self._loupe_virtual = None
+        self.grid_widget.unsetCursor()
+        self.grid_widget.update()
+
     def _hit_bend_point(self, x, y, radius=6):
         """Hit-test bend control points. Returns (note, point_index) or (None, -1)."""
         notes = self._get_edit_notes()
@@ -391,6 +463,19 @@ class PianoRoll(QFrame):
                     return n, i
         return None, -1
 
+    # Resize handle width in pixels, capped so it never swallows the whole
+    # note. 6px feels right for pointer hit-testing; the cap prevents short
+    # notes from being resize-only (previously 0.15 beats covered a 1/16).
+    RESIZE_HANDLE_PX = 6.0
+    RESIZE_HANDLE_MAX_FRAC = 0.35
+
+    def _resize_handle_beats(self, note):
+        """How many beats from the end of `note` count as the resize zone."""
+        note_px = note.duration * self.BW
+        handle_px = min(self.RESIZE_HANDLE_PX,
+                        max(2.0, note_px * self.RESIZE_HANDLE_MAX_FRAC))
+        return handle_px / self.BW
+
     def _hit_note(self, x, y):
         """Hit test for notes. Returns (note, index, is_resize_handle)."""
         notes = self._get_edit_notes()
@@ -401,7 +486,8 @@ class PianoRoll(QFrame):
         for i in range(len(notes) - 1, -1, -1):
             n = notes[i]
             if n.pitch == pitch and n.start <= beat < n.start + n.duration:
-                is_resize = beat > n.start + n.duration - 0.15
+                handle_beats = self._resize_handle_beats(n)
+                is_resize = beat > n.start + n.duration - handle_beats
                 return n, i, is_resize
         return None, -1, False
     
@@ -781,7 +867,20 @@ class PianoRoll(QFrame):
         """Handle keyboard shortcuts."""
         modifiers = event.modifiers()
         key = event.key()
-        
+
+        # Z — activate fine-edit loupe (magnified, slowed cursor).
+        # Alt was avoided because most Linux WMs grab Alt+drag for window-move.
+        if key == Qt.Key_Z and not event.isAutoRepeat():
+            self._activate_loupe()
+            event.accept()
+            return
+
+        # Arrow keys — nudge selected notes by snap (no modifier = move,
+        # Shift = resize)
+        if key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
+            if self._nudge_selection(key, modifiers):
+                return
+
         # Escape - clear selection or cancel ghost mode
         if key == Qt.Key_Escape:
             if self._ghost_notes:
@@ -830,18 +929,80 @@ class PianoRoll(QFrame):
         
         super().keyPressEvent(event)
 
+    def keyReleaseEvent(self, event: QKeyEvent):
+        """Handle key releases — used to exit the loupe."""
+        if event.key() == Qt.Key_Z and not event.isAutoRepeat():
+            self._deactivate_loupe()
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
+    def _nudge_selection(self, key, modifiers):
+        """Keyboard-driven editing for selected notes. Arrow keys move by
+        snap (Up/Down = pitch), Shift+Left/Right resizes duration. Returns
+        True if the event was handled."""
+        if not self._selected:
+            return False
+        notes = self._get_edit_notes()
+        if not notes:
+            return False
+
+        snap = self.state.snap
+        shift = bool(modifiers & Qt.ShiftModifier)
+        changed = False
+
+        for idx in self._selected:
+            if not (0 <= idx < len(notes)):
+                continue
+            n = notes[idx]
+            if key == Qt.Key_Left:
+                if shift:
+                    new_dur = max(snap, n.duration - snap)
+                    if new_dur != n.duration:
+                        n.duration = new_dur
+                        changed = True
+                else:
+                    new_start = max(0, n.start - snap)
+                    if new_start != n.start:
+                        n.start = new_start
+                        changed = True
+            elif key == Qt.Key_Right:
+                if shift:
+                    n.duration = n.duration + snap
+                    changed = True
+                else:
+                    n.start = n.start + snap
+                    changed = True
+            elif key == Qt.Key_Up and not shift:
+                new_pitch = min(self.HI, n.pitch + 1)
+                if new_pitch != n.pitch:
+                    n.pitch = new_pitch
+                    changed = True
+            elif key == Qt.Key_Down and not shift:
+                new_pitch = max(self.LO, n.pitch - 1)
+                if new_pitch != n.pitch:
+                    n.pitch = new_pitch
+                    changed = True
+
+        if changed:
+            if self._is_variation_mode():
+                self._persist_variation_edits()
+            self.state.notify('note_edit')
+            self.refresh()
+        return True
+
     def _on_click(self, event):
         """Handle left mouse button press."""
         pat = self._get_edit_pattern()
         if not pat:
             return
 
-        x, y = event.pos().x(), event.pos().y()
+        x, y = self._xy(event)
         beat, pitch = self._coords_to_beat_pitch(x, y)
         modifiers = event.modifiers()
 
         # Store initial click position for deadzone check
-        self._drag_start_pos = QPoint(x, y)
+        self._drag_start_pos = QPoint(int(x), int(y))
 
         # If in ghost mode, commit the paste
         if self._ghost_notes:
@@ -866,12 +1027,18 @@ class PianoRoll(QFrame):
                     self.refresh()
                 else:
                     # Start marquee selection
-                    self._marquee_start = QPoint(x, y)
+                    self._marquee_start = QPoint(int(x), int(y))
             else:
                 # Regular click
                 if n and is_resize:
-                    # Resize existing note (but will check deadzone in drag)
+                    # Resize existing note (but will check deadzone in drag).
+                    # Also select so that a click-release always selects —
+                    # previously clicking on the handle of a short note could
+                    # fail to ever select it.
+                    if i not in self._selected:
+                        self._selected = {i}
                     self._resize_note = n
+                    self.refresh()
                 elif n:
                     # Select and prepare to drag
                     if i not in self._selected:
@@ -988,7 +1155,7 @@ class PianoRoll(QFrame):
         if not pat:
             return
 
-        x, y = event.pos().x(), event.pos().y()
+        x, y = self._xy(event)
         beat, pitch = self._coords_to_beat_pitch(x, y)
 
         # Update ghost note preview
@@ -1005,7 +1172,7 @@ class PianoRoll(QFrame):
         if self.state.tool == 'edit':
             # Check deadzone for resize operations (10 pixels)
             if self._resize_note and self._drag_start_pos:
-                dist = (QPoint(x, y) - self._drag_start_pos).manhattanLength()
+                dist = (QPoint(int(x), int(y)) - self._drag_start_pos).manhattanLength()
                 if dist < 10:
                     # Still in deadzone, don't resize yet
                     return
@@ -1020,7 +1187,7 @@ class PianoRoll(QFrame):
             elif self._drag_note:
                 # Check deadzone for drag operations
                 if self._drag_start_pos:
-                    dist = (QPoint(x, y) - self._drag_start_pos).manhattanLength()
+                    dist = (QPoint(int(x), int(y)) - self._drag_start_pos).manhattanLength()
                     if dist < 10:
                         # Still in deadzone, don't move yet
                         return
@@ -1112,7 +1279,7 @@ class PianoRoll(QFrame):
         if not pat:
             return
 
-        x, y = event.pos().x(), event.pos().y()
+        x, y = self._xy(event)
 
         if self.state.tool == 'bend':
             # Delete bend control point under cursor
@@ -1232,32 +1399,67 @@ class PianoGridWidget(QWidget):
         """Forward keyboard events to parent roll."""
         self.parent_roll.keyPressEvent(event)
 
+    def keyReleaseEvent(self, event):
+        """Forward key releases (e.g. Alt) to parent roll."""
+        self.parent_roll.keyReleaseEvent(event)
+
     def mousePressEvent(self, event):
         # Ensure grid widget has keyboard focus
         self.setFocus()
-        
+
+        # Track raw cursor position so the loupe and its fine deltas work
+        self.parent_roll._last_real_pos = event.pos()
+
         if event.button() == Qt.LeftButton:
             self.parent_roll._on_click(event)
         elif event.button() == Qt.RightButton:
             self.parent_roll._on_right_click(event)
 
     def mouseMoveEvent(self, event):
+        roll = self.parent_roll
+        # Update virtual cursor first: in loupe mode, scale the raw delta down;
+        # otherwise, just follow the real cursor.
+        if roll._alt_loupe and roll._last_real_pos is not None and roll._loupe_virtual is not None:
+            dx = event.pos().x() - roll._last_real_pos.x()
+            dy = event.pos().y() - roll._last_real_pos.y()
+            vx, vy = roll._loupe_virtual
+            vx += dx / roll._loupe_scale
+            vy += dy / roll._loupe_scale
+            # Clamp to widget bounds
+            vx = max(0.0, min(float(self.width() - 1), vx))
+            vy = max(0.0, min(float(self.height() - 1), vy))
+            roll._loupe_virtual = (vx, vy)
+            # Anchor follows virtual — the loupe drifts along with the edit
+            # instead of leaving the cursor behind.
+            roll._loupe_anchor = (vx, vy)
+            self.update()
+        roll._last_real_pos = event.pos()
+
         if event.buttons() & Qt.LeftButton:
-            self.parent_roll._on_drag(event)
+            roll._on_drag(event)
         else:
+            x, y = roll._xy(event)
             # Update slice preview
-            if self.parent_roll.state.tool == 'slice':
-                x, y = event.pos().x(), event.pos().y()
-                n, i, _ = self.parent_roll._hit_note(x, y)
+            if roll.state.tool == 'slice':
+                n, i, _ = roll._hit_note(x, y)
                 if n:
-                    beat, _ = self.parent_roll._coords_to_beat_pitch(x, y)
+                    beat, _ = roll._coords_to_beat_pitch(x, y)
                     self._slice_hover_pos = (i, beat)
                 else:
                     self._slice_hover_pos = None
                 self.update()
-        
+            # Cursor hint — show a horizontal-resize cursor over the handle
+            # so users can tell where "resize" vs "move" starts. Only in
+            # edit mode; other tools have their own affordances.
+            elif roll.state.tool == 'edit' and not roll._alt_loupe:
+                n, _, is_resize = roll._hit_note(x, y)
+                if n and is_resize:
+                    self.setCursor(Qt.SizeHorCursor)
+                else:
+                    self.unsetCursor()
+
         # Always update ghost note position when ghost notes are active
-        if self.parent_roll._ghost_notes:
+        if roll._ghost_notes:
             self.update()
 
     def mouseReleaseEvent(self, event):
@@ -1485,10 +1687,15 @@ class PianoGridWidget(QWidget):
             painter.setBrush(color)
             painter.drawRect(int(x), y + 1, int(w - 1), self.parent_roll.NH - 2)
 
-            # Resize handle
+            # Resize handle — width matches the hit zone so the visual cue is
+            # honest about where the handle starts.
+            handle_beats = self.parent_roll._resize_handle_beats(n)
+            handle_w = handle_beats * self.parent_roll.BW
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(255, 255, 255, 51))
-            painter.drawRect(int(x + w - 4), y + 1, 3, self.parent_roll.NH - 2)
+            painter.setBrush(QColor(255, 255, 255, 80))
+            painter.drawRect(QRectF(x + w - handle_w, y + 1,
+                                     max(1.0, handle_w - 1),
+                                     self.parent_roll.NH - 2))
 
             # Velocity text for selected notes
             if sel:
@@ -1659,6 +1866,118 @@ class PianoGridWidget(QWidget):
                     painter.setPen(QPen(QColor('#ffffff'), 1, Qt.DashLine))
                     painter.setBrush(color)
                     painter.drawRect(int(x), y + 1, int(w - 1), self.parent_roll.NH - 2)
+
+        # Fine-edit loupe overlay — draws a magnified, clipped view of the
+        # region around the virtual cursor so users can edit tiny notes.
+        if self.parent_roll._alt_loupe:
+            self._paint_loupe(painter)
+
+    def _paint_loupe(self, painter):
+        """Draw the fine-edit magnifier. The loupe is anchored where Alt was
+        pressed; mouse deltas while Alt is held move a virtual cursor at
+        1/scale speed, and the loupe renders a magnified view around it."""
+        roll = self.parent_roll
+        if roll._loupe_anchor is None or roll._loupe_virtual is None:
+            return
+        scale = roll._loupe_scale
+        radius = roll._loupe_radius
+        ax, ay = roll._loupe_anchor
+        vx, vy = roll._loupe_virtual
+
+        dest_rect = QRectF(ax - radius, ay - radius, 2 * radius, 2 * radius)
+        src_half = radius / scale
+        src_rect = QRectF(vx - src_half, vy - src_half, 2 * src_half, 2 * src_half)
+
+        painter.save()
+        clip = QPainterPath()
+        clip.addEllipse(dest_rect)
+        painter.setClipPath(clip)
+
+        # Background tint
+        painter.fillRect(dest_rect, QColor('#12122a'))
+
+        # Transform: point (vx, vy) in source space maps to (ax, ay) on screen,
+        # scaled up by `scale` around that pivot.
+        painter.translate(ax, ay)
+        painter.scale(scale, scale)
+        painter.translate(-vx, -vy)
+
+        # Draw row backgrounds + key-scale shading within the loupe viewport
+        pat = roll._get_edit_pattern()
+        in_key = scale_set(pat.key, pat.scale) if pat else set()
+        pitch_top = int(roll.HI - src_rect.top() / roll.NH) + 1
+        pitch_bot = int(roll.HI - src_rect.bottom() / roll.NH) - 1
+        for p in range(pitch_bot, pitch_top + 1):
+            if p < roll.LO or p > roll.HI:
+                continue
+            y = (roll.HI - p) * roll.NH
+            nm = NOTE_NAMES[p % 12]
+            is_black = '#' in nm
+            ik = (p % 12) in in_key
+            if is_black:
+                bg = QColor('#1e1a40') if ik else QColor('#15152a')
+            else:
+                bg = QColor('#252050') if ik else QColor('#1a1a30')
+            painter.fillRect(QRectF(src_rect.left(), y, src_rect.width(), roll.NH), bg)
+
+        # Beat subdivision lines
+        beat_lo = max(0.0, src_rect.left() / roll.BW)
+        beat_hi = src_rect.right() / roll.BW
+        first_sub = int(beat_lo * 4) - 1
+        last_sub = int(beat_hi * 4) + 1
+        for b in range(first_sub, last_sub + 1):
+            gx = b * roll.BW / 4.0
+            if b % 4 == 0:
+                color = QColor('#3a3a6a')
+            elif b % 2 == 0:
+                color = QColor('#2a2a5a')
+            else:
+                color = QColor('#222244')
+            pen = QPen(color, 1.0 / scale)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(gx, src_rect.top()), QPointF(gx, src_rect.bottom()))
+
+        # Notes within source rect (same logic as main paint, simplified)
+        notes = roll._get_edit_notes() if roll._is_variation_mode() else (pat.notes if pat else [])
+        for i, n in enumerate(notes):
+            nx = n.start * roll.BW
+            ny = (roll.HI - n.pitch) * roll.NH
+            nw = n.duration * roll.BW
+            if nx + nw < src_rect.left() or nx > src_rect.right():
+                continue
+            if ny + roll.NH < src_rect.top() or ny > src_rect.bottom():
+                continue
+            sel = i in roll._selected
+            color = QColor(vel_color(n.velocity))
+            border_color = roll._note_border_color(n)
+            if sel:
+                painter.setPen(QPen(QColor('#fff'), 2.0 / scale))
+            elif border_color:
+                painter.setPen(QPen(border_color, 2.0 / scale))
+            else:
+                painter.setPen(QPen(QColor(pat.color) if pat else QColor('#888'), 1.0 / scale))
+            painter.setBrush(color)
+            painter.drawRect(QRectF(nx, ny + 1, max(1.0, nw - 1), roll.NH - 2))
+
+            # Resize handle hint — match main-paint sizing for consistency
+            handle_w = roll._resize_handle_beats(n) * roll.BW
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(255, 255, 255, 110))
+            painter.drawRect(QRectF(nx + nw - handle_w, ny + 1,
+                                     max(1.0, handle_w - 1), roll.NH - 2))
+
+        painter.restore()
+
+        # Loupe border
+        painter.setPen(QPen(QColor('#fee440'), 2))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(dest_rect)
+
+        # Crosshair at virtual cursor — by construction it's at the centre of
+        # the loupe in screen space.
+        painter.setPen(QPen(QColor('#fee440'), 1))
+        painter.drawLine(int(ax - 6), int(ay), int(ax + 6), int(ay))
+        painter.drawLine(int(ax), int(ay - 6), int(ax), int(ay + 6))
 
 
 class VelocityWidget(QWidget):
