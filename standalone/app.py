@@ -2,12 +2,13 @@
 
 import os
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxLayout,
-                                QSplitter, QFileDialog, QMessageBox)
+                                QSplitter, QFileDialog, QMessageBox, QMenuBar)
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QKeySequence, QShortcut, QPalette, QColor
+from PySide6.QtGui import QKeySequence, QShortcut, QPalette, QColor, QAction
 
 from .state import (
     AppState, Pattern, Track, BeatTrack, BeatInstrument, BeatPlacement,
@@ -56,6 +57,12 @@ from .graph_editor import GraphModel, GraphEditorWindow
 _HAS_GRAPH_EDITOR = True
 #except ImportError:
 #    _HAS_GRAPH_EDITOR = False
+
+try:
+    from .song_plugins.ui import PluginHost, PluginsDock, BroadcastBand
+    _HAS_SONG_PLUGINS = True
+except Exception:
+    _HAS_SONG_PLUGINS = False
 
 class App(QMainWindow):
     """Main application - owns the state, creates the window, coordinates UI."""
@@ -240,6 +247,50 @@ class App(QMainWindow):
             QListWidget::item:selected {
                 background-color: #e94560;
             }
+            QMenuBar {
+                background-color: #1a1a2e;
+                color: #eeeeee;
+                border-bottom: 1px solid #2a2a4a;
+            }
+            QMenuBar::item {
+                background-color: transparent;
+                padding: 4px 10px;
+            }
+            QMenuBar::item:selected {
+                background-color: #e94560;
+                color: #ffffff;
+            }
+            QMenuBar::item:pressed {
+                background-color: #d63850;
+                color: #ffffff;
+            }
+            QMenu {
+                background-color: #1a1a2e;
+                color: #eeeeee;
+                border: 1px solid #2a2a4a;
+                padding: 4px 0;
+            }
+            QMenu::item {
+                padding: 4px 24px 4px 20px;
+                background-color: transparent;
+            }
+            QMenu::item:selected {
+                background-color: #e94560;
+                color: #ffffff;
+            }
+            QMenu::item:disabled {
+                color: #555577;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #2a2a4a;
+                margin: 4px 8px;
+            }
+            QMenu::indicator {
+                width: 14px;
+                height: 14px;
+                left: 4px;
+            }
         """)
 
     def _build_ui(self):
@@ -286,9 +337,26 @@ class App(QMainWindow):
             }
         """)
 
-        # Arrangement view (top)
-        self.arrangement = ArrangementView(self.splitter, self)
-        self.splitter.addWidget(self.arrangement)
+        # Arrangement view (top) with an optional BroadcastBand slot
+        # stacked directly beneath it. The band spans the same width as
+        # the arranger (not the whole window) because it lives in the
+        # same splitter pane. It starts hidden and only reveals itself
+        # when a plugin block claims the broadcast slot.
+        self._arrangement_container = QWidget(self.splitter)
+        _arr_layout = QVBoxLayout(self._arrangement_container)
+        _arr_layout.setContentsMargins(0, 0, 0, 0)
+        _arr_layout.setSpacing(0)
+        self.arrangement = ArrangementView(self._arrangement_container, self)
+        _arr_layout.addWidget(self.arrangement, stretch=1)
+        self.broadcast_band = None
+        if _HAS_SONG_PLUGINS:
+            try:
+                self.broadcast_band = BroadcastBand(self._arrangement_container)
+                _arr_layout.addWidget(self.broadcast_band)
+            except Exception as exc:
+                print(f"[App] BroadcastBand init failed: {exc}")
+                self.broadcast_band = None
+        self.splitter.addWidget(self._arrangement_container)
 
         # Editor area (bottom) - switches between piano roll, beat grid, and automation curve
         self.editor_container = QWidget()
@@ -318,6 +386,213 @@ class App(QMainWindow):
         main_layout.addWidget(self.track_panel)
 
         layout.addWidget(main)
+
+        # Song-plugins host + dock (optional)
+        self.plugin_host = None
+        self.plugins_dock = None
+        if _HAS_SONG_PLUGINS:
+            try:
+                self.plugin_host = PluginHost(self)
+                self.plugins_dock = PluginsDock(self.plugin_host, self)
+                self.addDockWidget(Qt.RightDockWidgetArea, self.plugins_dock)
+                self.plugins_dock.hide()  # default hidden
+                self.plugin_host.selection_provider.install_focus_tracker()
+                if self.broadcast_band is not None:
+                    self.plugin_host.set_broadcast_band(self.broadcast_band)
+                    # Sync the band's horizontal view with the arranger's
+                    # viewport so beats line up and scroll in lockstep.
+                    try:
+                        self.broadcast_band.set_arrangement_view(self.arrangement)
+                    except Exception as exc:
+                        print(f"[App] broadcast_band arrangement sync failed: {exc}")
+            except Exception as exc:
+                print(f"[App] Song-plugins UI init failed: {exc}")
+                self.plugin_host = None
+                self.plugins_dock = None
+
+        self._build_menu_bar()
+
+    def _build_menu_bar(self):
+        """Build the main window menu bar."""
+        mb = self.menuBar()
+        self._build_file_menu(mb)
+        self._build_edit_menu(mb)
+        self._build_view_menu(mb)
+
+    def _build_file_menu(self, mb):
+        file_menu = mb.addMenu("&File")
+
+        new_act = QAction("&New", self)
+        new_act.setShortcut(QKeySequence.New)  # Ctrl+N
+        new_act.triggered.connect(self.new_project)
+        file_menu.addAction(new_act)
+
+        open_act = QAction("&Open...", self)
+        open_act.setShortcut(QKeySequence.Open)  # Ctrl+O
+        open_act.triggered.connect(self.load_project)
+        file_menu.addAction(open_act)
+
+        save_act = QAction("&Save", self)
+        save_act.setShortcut(QKeySequence.Save)  # Ctrl+S
+        save_act.triggered.connect(self.save_project_current)
+        file_menu.addAction(save_act)
+
+        save_as_act = QAction("Save &As...", self)
+        save_as_act.setShortcut(QKeySequence.SaveAs)  # Ctrl+Shift+S
+        save_as_act.triggered.connect(self.save_project)
+        file_menu.addAction(save_as_act)
+
+        file_menu.addSeparator()
+
+        exp_midi = QAction("Export &MIDI...", self)
+        exp_midi.triggered.connect(lambda: self.do_export('midi'))
+        file_menu.addAction(exp_midi)
+
+        exp_xml = QAction("Export Music&XML...", self)
+        exp_xml.triggered.connect(lambda: self.do_export('musicxml'))
+        file_menu.addAction(exp_xml)
+
+        exp_mp3 = QAction("Export M&P3...", self)
+        exp_mp3.triggered.connect(lambda: self.do_export('mp3'))
+        file_menu.addAction(exp_mp3)
+
+        exp_wav = QAction("Export &WAV...", self)
+        exp_wav.triggered.connect(lambda: self.do_export('wav'))
+        file_menu.addAction(exp_wav)
+
+        file_menu.addSeparator()
+
+        cfg_act = QAction("Settin&gs...", self)
+        cfg_act.triggered.connect(self.open_config)
+        file_menu.addAction(cfg_act)
+
+        file_menu.addSeparator()
+
+        quit_act = QAction("&Quit", self)
+        quit_act.setShortcut(QKeySequence("Ctrl+Q"))
+        quit_act.triggered.connect(self.close)
+        file_menu.addAction(quit_act)
+
+    def _build_edit_menu(self, mb):
+        edit_menu = mb.addMenu("&Edit")
+
+        # Undo / Redo — existing QShortcut bindings in _bind_keys() already
+        # own Ctrl+Z and Ctrl+Y. Don't re-bind on the QAction (would cause
+        # "ambiguous shortcut overload"). Just show the key hint in the label.
+        undo_act = QAction("&Undo\tCtrl+Z", self)
+        undo_act.triggered.connect(self.do_undo)
+        edit_menu.addAction(undo_act)
+
+        redo_act = QAction("&Redo\tCtrl+Y", self)
+        redo_act.triggered.connect(self.do_redo)
+        edit_menu.addAction(redo_act)
+
+        edit_menu.addSeparator()
+
+        # Cut/Copy/Paste — the app already has QShortcut handlers wired to
+        # _on_cut/_on_copy/_on_paste which do smart context-aware dispatch
+        # (arrangement vs piano roll vs beat grid). Reuse those same handlers.
+        # Don't set shortcuts on the QAction (existing QShortcut owns them).
+        cut_act = QAction("Cu&t\tCtrl+X", self)
+        cut_act.triggered.connect(self._menu_cut)
+        edit_menu.addAction(cut_act)
+
+        copy_act = QAction("&Copy\tCtrl+C", self)
+        copy_act.triggered.connect(self._menu_copy)
+        edit_menu.addAction(copy_act)
+
+        paste_act = QAction("&Paste\tCtrl+V", self)
+        paste_act.triggered.connect(self._menu_paste)
+        edit_menu.addAction(paste_act)
+
+        edit_menu.addSeparator()
+
+        add_trk = QAction("Add &Track", self)
+        add_trk.triggered.connect(self.add_track)
+        edit_menu.addAction(add_trk)
+
+        add_beat = QAction("Add &Beat Track", self)
+        add_beat.triggered.connect(self.add_beat_track)
+        edit_menu.addAction(add_beat)
+
+        add_auto = QAction("Add &Automation Track", self)
+        add_auto.triggered.connect(self.add_automation_track)
+        edit_menu.addAction(add_auto)
+
+    def _build_view_menu(self, mb):
+        view_menu = mb.addMenu("&View")
+
+        # Plugins dock (kept — added in earlier PR)
+        if self.plugins_dock is not None:
+            self._plugins_action = QAction("&Plugins", self, checkable=True)
+            self._plugins_action.setChecked(self.plugins_dock.isVisible())
+            self._plugins_action.toggled.connect(self._toggle_plugins_dock)
+            # Mirror state if the dock is closed via its own X button.
+            self.plugins_dock.visibilityChanged.connect(
+                lambda visible: self._plugins_action.setChecked(bool(visible)))
+            view_menu.addAction(self._plugins_action)
+            view_menu.addSeparator()
+
+        # Left sidebar (Pattern List)
+        pl_act = QAction("Pattern &List", self, checkable=True)
+        pl_act.setChecked(not self.pattern_list.isHidden())
+        pl_act.toggled.connect(self.pattern_list.setVisible)
+        view_menu.addAction(pl_act)
+
+        # Right sidebar (entire Track Panel)
+        tp_act = QAction("Right Side&bar", self, checkable=True)
+        tp_act.setChecked(not self.track_panel.isHidden())
+        tp_act.toggled.connect(self.track_panel.setVisible)
+        view_menu.addAction(tp_act)
+
+        view_menu.addSeparator()
+
+        # Right-sidebar sub-panels (GroupBoxes inside TrackPanel)
+        panel_frames = [
+            ("&Track Settings", 'trk_frame'),
+            ("&Soundfont", 'sf2_frame'),
+            ("P&lacement", 'pl_frame'),
+            ("Beat &Kit", 'kit_frame'),
+            ("&Automation Tracks", 'auto_frame'),
+        ]
+        self._panel_actions = {}
+        for label, attr in panel_frames:
+            frame = getattr(self.track_panel, attr, None)
+            if frame is None:
+                continue
+            act = QAction(label, self, checkable=True)
+            act.setChecked(not frame.isHidden())
+            # Bind frame via default-arg to avoid late-binding closure bug
+            act.toggled.connect(lambda checked, f=frame: f.setVisible(checked))
+            view_menu.addAction(act)
+            self._panel_actions[attr] = act
+
+        view_menu.addSeparator()
+
+        # Graph editor — popup window, not a panel
+        graph_act = QAction("&Graph Editor...", self)
+        graph_act.triggered.connect(self.open_graph_editor)
+        view_menu.addAction(graph_act)
+
+    def _toggle_plugins_dock(self, checked: bool):
+        if self.plugins_dock is None:
+            return
+        self.plugins_dock.setVisible(checked)
+        if checked:
+            self.plugins_dock.raise_()
+
+    # ---- Menu dispatchers for Cut/Copy/Paste ----
+    # These mirror the QShortcut handlers so the menu and keyboard route to the
+    # same smart-context logic (arrangement vs piano roll vs beat grid).
+
+    def _menu_cut(self):
+        self._on_cut()
+
+    def _menu_copy(self):
+        self._on_copy()
+
+    def _menu_paste(self):
+        self._on_paste()
 
     def _bind_keys(self):
         """Bind keyboard shortcuts."""
@@ -474,8 +749,16 @@ class App(QMainWindow):
             self.engine.mark_dirty()
 
         # Capture undo snapshot for certain actions (synchronous, reads AppState not widgets)
-        if source in self._undo_triggers:
+        if (source in self._undo_triggers
+                and not getattr(self, '_suppress_undo', False)):
             self._push_undo(source)
+
+        # Notify plugin host so live-mode blocks can mark-stale / rerun.
+        if self.plugin_host is not None:
+            try:
+                self.plugin_host.on_state_change(source)
+            except Exception as exc:
+                print(f"[App] plugin host state-change hook failed: {exc}")
 
         # Coalesce UI refresh — schedule once, skip if already pending
         self._schedule_refresh()
@@ -516,6 +799,24 @@ class App(QMainWindow):
             return  # Don't capture during undo/redo
         snapshot = capture_state(self.state)
         self.undo_stack.push(snapshot)
+
+    @contextmanager
+    def undo_group(self, label: str):
+        """Batch multiple notifies into a single undo entry.
+
+        While active, per-notify undo captures are suppressed. On exit
+        (outermost call only) one combined snapshot is pushed onto the
+        undo stack.
+        """
+        prev_suppress = getattr(self, '_suppress_undo', False)
+        self._suppress_undo = True
+        try:
+            yield
+        finally:
+            self._suppress_undo = prev_suppress
+            if not prev_suppress:
+                snapshot = capture_state(self.state)
+                self.undo_stack.push(snapshot)
     
     def do_undo(self):
         """Undo the last action."""
@@ -1192,6 +1493,7 @@ class App(QMainWindow):
                 QMessageBox.critical(self, 'Error', f'Failed to load initial state: {e}')
 
     def save_project(self):
+        """Save As — always prompt for a file path."""
         path, _ = QFileDialog.getSaveFileName(
             None, 'Save Project', self.settings.get_recent_dir('project'),
             'JSON files (*.json);;All files (*.*)',
@@ -1199,6 +1501,14 @@ class App(QMainWindow):
         if path:
             self.settings.set_recent_dir('project', path)
             project_io.save_project(self.state, path)
+
+    def save_project_current(self):
+        """Save to the current project path if known, otherwise prompt."""
+        path = getattr(self.state, '_project_path', None)
+        if path and os.path.isdir(os.path.dirname(path)):
+            project_io.save_project(self.state, path)
+        else:
+            self.save_project()
 
     def load_project(self):
         path, _ = QFileDialog.getOpenFileName(
