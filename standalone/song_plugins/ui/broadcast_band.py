@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
 
 from ..api import Annotation
 from .renderers import make_renderer
-from .renderers.scalar_curve import ScalarCurveRenderer
 
 logger = logging.getLogger(__name__)
 
@@ -180,13 +179,14 @@ class BroadcastBand(QFrame):
     def _sync_renderer_range(self) -> None:
         """If the current renderer supports fixed-range, push the
         arranger's current visible beat range into it."""
-        if not isinstance(self._renderer, ScalarCurveRenderer):
+        r = self._renderer
+        if r is None or not hasattr(r, "set_beat_range"):
             return
         rng = self._compute_visible_range()
         if rng is None:
-            self._renderer.set_beat_range(None, None)
+            r.set_beat_range(None, None)
         else:
-            self._renderer.set_beat_range(rng[0], rng[1])
+            r.set_beat_range(rng[0], rng[1])
 
     # -- API -------------------------------------------------------------
 
