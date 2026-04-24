@@ -348,7 +348,13 @@ class PianoRoll(QFrame):
         self.scroll_area.horizontalScrollBar().valueChanged.connect(
             self.vel_widget.update
         )
-        
+        # When the grid's horizontal scrollbar appears/disappears, its vertical
+        # viewport changes by the scrollbar height. Pad the keys widget to match
+        # so both vertical scrollbars share the same range and stay aligned.
+        self.scroll_area.horizontalScrollBar().rangeChanged.connect(
+            self._sync_keys_height
+        )
+
         self.setFocusPolicy(Qt.StrongFocus)
         
     def _on_note_len(self, text):
@@ -522,13 +528,22 @@ class PianoRoll(QFrame):
         total_h = pitch_range * self.NH
         beats = pat.length if pat else 16
         total_w = int(beats * self.BW)
-        
-        self.keys_widget.setMinimumSize(44, total_h)
+
         self.grid_widget.setMinimumSize(total_w, total_h)
-        
+        self.keys_widget.setMinimumSize(44, total_h + self._hscroll_pad())
+
         self.keys_widget.update()
         self.grid_widget.update()
         self.vel_widget.update()
+
+    def _hscroll_pad(self):
+        hs = self.scroll_area.horizontalScrollBar()
+        return hs.sizeHint().height() if hs.maximum() > 0 else 0
+
+    def _sync_keys_height(self):
+        pitch_range = self.HI - self.LO + 1
+        total_h = pitch_range * self.NH + self._hscroll_pad()
+        self.keys_widget.setMinimumSize(44, total_h)
 
     def clear_selection(self):
         self._selected.clear()
