@@ -50,12 +50,18 @@ def test_not_eligible_stats():
     assert not is_broadcast_eligible(_mk_manifest(("stats",)))
 
 
-def test_not_eligible_note_tags():
-    assert not is_broadcast_eligible(_mk_manifest(("note_tags",)))
+def test_eligible_note_tags():
+    # Tag schemas route to the piano-roll overlay via the broadcast
+    # mechanism, so they're eligible (single broadcaster, different target).
+    assert is_broadcast_eligible(_mk_manifest(("note_tags",)))
 
 
-def test_not_eligible_placement_tags():
-    assert not is_broadcast_eligible(_mk_manifest(("placement_tags",)))
+def test_eligible_placement_tags():
+    assert is_broadcast_eligible(_mk_manifest(("placement_tags",)))
+
+
+def test_eligible_regions():
+    assert is_broadcast_eligible(_mk_manifest(("regions",)))
 
 
 def test_not_eligible_custom():
@@ -97,9 +103,13 @@ def test_override_none_falls_back_to_schema_derivation():
 
 def test_known_eligible_schema_set():
     # Lock the canonical set so a regression can be detected.
-    assert BROADCAST_ELIGIBLE_SCHEMAS == frozenset(
-        {"scalar_curve", "multi_curve", "events", "grid2d"}
-    )
+    # BROADCAST_ELIGIBLE_SCHEMAS = band-eligible ∪ overlay-eligible.
+    assert BROADCAST_ELIGIBLE_SCHEMAS == frozenset({
+        # Band targets (beat-axis charts).
+        "scalar_curve", "multi_curve", "events", "grid2d",
+        # Piano-roll overlay targets (colored boxes / per-note badges).
+        "regions", "note_tags", "placement_tags",
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +171,7 @@ def _make_host():
     host._blocks = []
     host._broadcaster = None
     host._broadcast_band = None
+    host._piano_roll_overlay = None
     return host
 
 
@@ -225,11 +236,17 @@ def test_broadcaster_annotation_updated_only_for_current():
     host.set_broadcaster(a)
     # Reset band call log for clarity.
     band.calls.clear()
+
+    # Annotations are routed by schema; use a minimal stand-in.
+    class _Ann:
+        def __init__(self, schema):
+            self.schema = schema
+
     # Non-broadcaster reports a new annotation — ignored.
-    host.broadcaster_annotation_updated(b, object())
+    host.broadcaster_annotation_updated(b, _Ann("scalar_curve"))
     assert band.calls == []
-    # Broadcaster reports — forwarded.
-    ann = object()
+    # Broadcaster reports with a band-eligible schema — forwarded to band.
+    ann = _Ann("scalar_curve")
     host.broadcaster_annotation_updated(a, ann)
     assert band.calls == [("update", ann)]
 

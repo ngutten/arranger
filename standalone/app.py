@@ -405,6 +405,22 @@ class App(QMainWindow):
                         self.broadcast_band.set_arrangement_view(self.arrangement)
                     except Exception as exc:
                         print(f"[App] broadcast_band arrangement sync failed: {exc}")
+                # Piano-roll overlay — the sibling target for tag/region
+                # schemas. The piano roll reads it during paintEvent.
+                try:
+                    from .song_plugins.ui.piano_roll_overlay import (
+                        PianoRollOverlay,
+                    )
+                    self.piano_roll_overlay = PianoRollOverlay(self)
+                    self.plugin_host.set_piano_roll_overlay(
+                        self.piano_roll_overlay
+                    )
+                    if self.piano_roll is not None:
+                        self.piano_roll_overlay.changed.connect(
+                            self.piano_roll.grid_widget.update
+                        )
+                except Exception as exc:
+                    print(f"[App] piano-roll overlay init failed: {exc}")
             except Exception as exc:
                 print(f"[App] Song-plugins UI init failed: {exc}")
                 self.plugin_host = None

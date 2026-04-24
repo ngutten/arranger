@@ -34,9 +34,13 @@ class EventsRenderer(QWidget):
         self._events: List[dict] = []
         self._hint: dict = {}
         self._beat_range: Optional[Tuple[float, float]] = None
-        self.setMinimumHeight(110)
+        self.setMinimumHeight(40)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setMouseTracking(True)
+
+    # Widget heights below this threshold use a chrome-free layout suited
+    # to the broadcast band (no axis labels, no lane gutter, thinner boxes).
+    _COMPACT_THRESHOLD = 70
 
     def update_data(self, data, render_hint: Optional[dict] = None) -> None:
         if not isinstance(data, list):
@@ -106,7 +110,9 @@ class EventsRenderer(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
-        rect = self.rect().adjusted(4, 4, -4, -4)
+        compact = self.height() < self._COMPACT_THRESHOLD
+        margin = 1 if compact else 4
+        rect = self.rect().adjusted(margin, margin, -margin, -margin)
         p.fillRect(rect, QColor(28, 32, 50))
 
         if not self._events:
@@ -115,13 +121,14 @@ class EventsRenderer(QWidget):
             p.end()
             return
 
-        axis_left = 24
-        axis_bottom = 14
+        axis_left = 0 if compact else 24
+        axis_bottom = 0 if compact else 14
+        top_pad = 1 if compact else 4
         plot = QRectF(
             rect.left() + axis_left,
-            rect.top() + 4,
-            max(10.0, rect.width() - axis_left - 4),
-            max(10.0, rect.height() - axis_bottom - 4),
+            rect.top() + top_pad,
+            max(10.0, rect.width() - axis_left - margin),
+            max(10.0, rect.height() - axis_bottom - top_pad),
         )
 
         # Beat range — derive from events if not pinned.
@@ -146,24 +153,26 @@ class EventsRenderer(QWidget):
         # Lane layout.
         lanes = self._lane_order()
         lane_count = max(1, len(lanes))
-        lane_h = max(14.0, plot.height() / lane_count)
+        lane_min_h = 6.0 if compact else 14.0
+        lane_h = max(lane_min_h, plot.height() / lane_count)
         lane_top: Dict[str, float] = {
             name: plot.top() + i * lane_h for i, name in enumerate(lanes)
         }
 
         font = QFont()
-        font.setPointSize(9)
+        font.setPointSize(7 if compact else 9)
         p.setFont(font)
 
-        # Baseline.
-        pen = QPen(QColor(60, 70, 95))
-        pen.setWidth(1)
-        p.setPen(pen)
-        p.drawLine(plot.left(), plot.bottom(), plot.right(), plot.bottom())
-        p.drawLine(plot.left(), plot.top(), plot.left(), plot.bottom())
+        if not compact:
+            # Baseline — skipped in compact mode to leave more room.
+            pen = QPen(QColor(60, 70, 95))
+            pen.setWidth(1)
+            p.setPen(pen)
+            p.drawLine(plot.left(), plot.bottom(), plot.right(), plot.bottom())
+            p.drawLine(plot.left(), plot.top(), plot.left(), plot.bottom())
 
         # Events.
-        pad_y = 2.0
+        pad_y = 1.0 if compact else 2.0
         for i, e in enumerate(self._events):
             b0, b1 = self._event_span(e)
             # Clip to visible range.
@@ -175,8 +184,14 @@ class EventsRenderer(QWidget):
             x1 = to_x(b1c)
             lane = self._lane_for(e)
             lane_idx = lanes.index(lane) if lane in lanes else 0
-            top = lane_top.get(lane, plot.top()) + pad_y
-            h = max(8.0, lane_h - 2 * pad_y)
+            if compact:
+                # Center a slim box in the lane so vertical neighbours
+                # don't touch and nothing reaches the clip edge.
+                h = max(4.0, lane_h * 0.6)
+                top = lane_top.get(lane, plot.top()) + (lane_h - h) * 0.5
+            else:
+                h = max(8.0, lane_h - 2 * pad_y)
+                top = lane_top.get(lane, plot.top()) + pad_y
             color = self._color_for(e, lane_idx)
 
             if b1 > b0:  # span
@@ -207,29 +222,30 @@ class EventsRenderer(QWidget):
                         label,
                     )
 
-        # Lane name gutters on the left.
-        p.setPen(QColor(130, 140, 165))
-        for name, top in lane_top.items():
-            if name:
-                p.drawText(
-                    QRectF(rect.left(), top, axis_left - 2, lane_h),
-                    Qt.AlignRight | Qt.AlignVCenter,
-                    name[:6],
-                )
+        if not compact:
+            # Lane name gutters on the left.
+            p.setPen(QColor(130, 140, 165))
+            for name, top in lane_top.items():
+                if name:
+                    p.drawText(
+                        QRectF(rect.left(), top, axis_left - 2, lane_h),
+                        Qt.AlignRight | Qt.AlignVCenter,
+                        name[:6],
+                    )
 
-        # Beat axis labels.
-        p.setPen(QColor(170, 180, 210))
-        x_lab = self._hint.get("x_label", "beat")
-        p.drawText(
-            QRectF(plot.left(), rect.bottom() - 12, plot.width(), 12),
-            Qt.AlignLeft | Qt.AlignBottom,
-            f"{x_min:.1f} {x_lab}",
-        )
-        p.drawText(
-            QRectF(plot.left(), rect.bottom() - 12, plot.width(), 12),
-            Qt.AlignRight | Qt.AlignBottom,
-            f"{x_max:.1f}",
-        )
+            # Beat axis labels.
+            p.setPen(QColor(170, 180, 210))
+            x_lab = self._hint.get("x_label", "beat")
+            p.drawText(
+                QRectF(plot.left(), rect.bottom() - 12, plot.width(), 12),
+                Qt.AlignLeft | Qt.AlignBottom,
+                f"{x_min:.1f} {x_lab}",
+            )
+            p.drawText(
+                QRectF(plot.left(), rect.bottom() - 12, plot.width(), 12),
+                Qt.AlignRight | Qt.AlignBottom,
+                f"{x_max:.1f}",
+            )
         p.end()
 
     # -- Tooltips --------------------------------------------------------

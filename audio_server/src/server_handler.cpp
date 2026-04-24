@@ -324,6 +324,19 @@ json ServerHandler::dispatch(const std::string& cmd, const json& req) {
             }
             jp["config_params"] = config_params;
 
+            json presets = json::array();
+            for (auto& ps : desc->presets) {
+                json jps;
+                jps["name"] = ps.name;
+                json vals = json::object();
+                for (auto& [k, v] : ps.port_values) {
+                    vals[k] = v;
+                }
+                jps["values"] = vals;
+                presets.push_back(jps);
+            }
+            jp["presets"] = presets;
+
             plugins.push_back(jp);
         }
         return {{"status", "ok"}, {"plugins", plugins}};

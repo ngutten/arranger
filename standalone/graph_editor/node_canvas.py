@@ -1769,6 +1769,88 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
     # Store widget references for external access
     w.refresh_wired_ports = refresh_wired_ports
     w._ctrl_widgets = _ctrl_widgets
+
+    # --- Preset dropdown (inserted at row 0 so it appears above params) ---
+    # Setting each mapped widget fires its normal change signal, which calls
+    # on_change → _on_node_param_changed → writes node.params and emits the
+    # live param_changed for the audio engine. Categorical/integer ports map
+    # float preset values through int conversion. The dropdown stays on its
+    # placeholder row after selection so subsequent slider drags don't look
+    # like they're still "inside" a named preset.
+    presets = desc.get("presets", []) or []
+    if presets:
+        preset_combo = QComboBox()
+        preset_combo.setStyleSheet(STYLE_ACTIVE)
+        preset_combo.addItem("— Preset —", -1)  # placeholder
+        for i, ps in enumerate(presets):
+            preset_combo.addItem(ps.get("name", f"Preset {i + 1}"), i)
+
+        def _apply_preset(idx):
+            if idx <= 0:
+                return
+            ps = presets[idx - 1]
+            preset_values = ps.get("values", {})
+            # Start from every control input port's descriptor default,
+            # then overlay the preset's explicit values. This gives each
+            # preset full coverage without requiring every port to be
+            # listed — ports not in the preset snap back to their
+            # default, matching standard DAW preset semantics.
+            target: dict[str, float] = {}
+            for port in desc.get("ports", []):
+                if (port.get("type") == "control"
+                        and port.get("role") == "input"):
+                    pid = port.get("id")
+                    if pid:
+                        try:
+                            target[pid] = float(port.get("default", 0.0))
+                        except (TypeError, ValueError):
+                            pass
+            for port_id, val in preset_values.items():
+                try:
+                    target[port_id] = float(val)
+                except (TypeError, ValueError):
+                    continue
+            # Push through the widget + on_change for each port.
+            for port_id, fval in target.items():
+                widget = _ctrl_widgets.get(port_id)
+                if widget is None:
+                    continue
+                # Different widget classes handle silent setValue
+                # differently (SmartFloatWidget is silent by design,
+                # QComboBox/QCheckBox/QSpinBox emit on change). Block to
+                # unify behavior, then drive on_change explicitly to
+                # keep model + audio in sync.
+                blocked = widget.blockSignals(True)
+                try:
+                    if isinstance(widget, QCheckBox):
+                        widget.setChecked(fval > 0.5)
+                    elif isinstance(widget, QComboBox):
+                        widget.setCurrentIndex(
+                            max(0, min(widget.count() - 1, int(round(fval)))))
+                    elif isinstance(widget, QSpinBox):
+                        widget.setValue(int(round(fval)))
+                    elif hasattr(widget, "setValue"):
+                        widget.setValue(fval)
+                finally:
+                    widget.blockSignals(blocked)
+                on_change(node.node_id, port_id, fval)
+            # Reset to placeholder so the combo doesn't misleadingly claim
+            # the preset is still active after the user edits something.
+            preset_combo.blockSignals(True)
+            preset_combo.setCurrentIndex(0)
+            preset_combo.blockSignals(False)
+
+        preset_combo.currentIndexChanged.connect(_apply_preset)
+
+        preset_label = QLabel("Preset:")
+        preset_label.setStyleSheet("color: #aaa; font-size: 8px;")
+        if use_two_col:
+            # Put the preset control at the top of the left form; leave
+            # the right form's top row to the first regular param.
+            left_form.insertRow(0, preset_label, preset_combo)
+        else:
+            lay.insertRow(0, preset_label, preset_combo)
+
     return w
 
 

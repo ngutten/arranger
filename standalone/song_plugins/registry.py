@@ -6,7 +6,7 @@ import importlib
 import importlib.util
 import logging
 from pathlib import Path
-from typing import Dict, Type
+from typing import Dict, Optional, Type
 
 from .api import (
     PluginManifest, SongPlugin, SelectionSnapshot, Scope,
@@ -22,9 +22,35 @@ logger = logging.getLogger(__name__)
 
 #: Schemas that carry a beat-time axis and are therefore eligible to claim
 #: the broadcast band near the arranger.
-BROADCAST_ELIGIBLE_SCHEMAS: frozenset = frozenset({
+BAND_ELIGIBLE_SCHEMAS: frozenset = frozenset({
     "scalar_curve", "multi_curve", "events", "grid2d",
 })
+
+#: Schemas that target the piano-roll overlay (painted behind notes).
+OVERLAY_ELIGIBLE_SCHEMAS: frozenset = frozenset({
+    "regions", "note_tags", "placement_tags",
+})
+
+#: Schemas that any broadcaster can claim — i.e. band ∪ overlay.
+#: Retained under the old name for source compatibility with existing
+#: callers.
+BROADCAST_ELIGIBLE_SCHEMAS: frozenset = (
+    BAND_ELIGIBLE_SCHEMAS | OVERLAY_ELIGIBLE_SCHEMAS
+)
+
+
+def broadcast_target_for_schema(schema: str) -> Optional[str]:
+    """Return ``"band"``, ``"overlay"``, or ``None`` for a schema name.
+
+    Used by :class:`PluginHost` to route an active broadcaster's annotation
+    to the appropriate surface. Schemas outside both sets return ``None``
+    (not broadcastable).
+    """
+    if schema in BAND_ELIGIBLE_SCHEMAS:
+        return "band"
+    if schema in OVERLAY_ELIGIBLE_SCHEMAS:
+        return "overlay"
+    return None
 
 
 def is_broadcast_eligible(manifest: PluginManifest) -> bool:
@@ -53,7 +79,8 @@ def validate_manifest(m: PluginManifest) -> None:
             raise ValueError(f"manifest {m.id!r}: unknown capability {c!r}")
     for s in m.schemas:
         if s not in ('scalar_curve', 'multi_curve', 'grid2d', 'events',
-                     'note_tags', 'placement_tags', 'stats', 'custom'):
+                     'note_tags', 'placement_tags', 'regions',
+                     'stats', 'custom'):
             raise ValueError(f"manifest {m.id!r}: unknown schema {s!r}")
     for sc in m.scopes:
         if sc not in ('whole', 'range', 'tracks', 'selection'):

@@ -72,21 +72,97 @@ def validate_events(data: Any) -> Tuple[bool, str]:
     return True, ""
 
 
+def _validate_tag_value(v: Any) -> Tuple[bool, str]:
+    """A tag value is either a str (short label) or a dict with at least
+    ``label``. See the note_tags / placement_tags contract in api.py.
+    """
+    if isinstance(v, str):
+        return True, ""
+    if isinstance(v, dict):
+        if 'label' not in v:
+            return False, "dict tag values must include 'label'"
+        if not isinstance(v['label'], str):
+            return False, "'label' must be a string"
+        color = v.get('color')
+        if color is not None and not isinstance(color, str):
+            return False, "'color' must be a string if present"
+        priority = v.get('priority')
+        if priority is not None and not isinstance(priority, int):
+            return False, "'priority' must be an int if present"
+        return True, ""
+    return False, "tag value must be a str or dict"
+
+
 def validate_note_tags(data: Any) -> Tuple[bool, str]:
     if not isinstance(data, dict):
         return False, "note_tags must be a dict[note_id -> tag]"
-    for k in data.keys():
+    for k, v in data.items():
         if not isinstance(k, int):
             return False, "note_tags keys must be int (note_id)"
+        ok, why = _validate_tag_value(v)
+        if not ok:
+            return False, f"note_tags[{k}]: {why}"
     return True, ""
 
 
 def validate_placement_tags(data: Any) -> Tuple[bool, str]:
     if not isinstance(data, dict):
         return False, "placement_tags must be a dict[placement_id -> tag]"
-    for k in data.keys():
+    for k, v in data.items():
         if not isinstance(k, int):
             return False, "placement_tags keys must be int (placement_id)"
+        ok, why = _validate_tag_value(v)
+        if not ok:
+            return False, f"placement_tags[{k}]: {why}"
+    return True, ""
+
+
+def validate_regions(data: Any) -> Tuple[bool, str]:
+    """Regions: a list of box dicts to paint behind notes.
+
+    Each region has start_beat/end_beat (required), optional min_pitch/
+    max_pitch (int MIDI note; full-height if absent), optional note_ids
+    (sequence of ints; renderer may auto-fit extent), label (str),
+    color ("#rrggbb"), payload (any), and optional pattern_id /
+    variation_id — when set, coordinates are pattern-local and the
+    region only applies within that pattern.
+    """
+    if not isinstance(data, list):
+        return False, "regions must be a list"
+    for i, r in enumerate(data):
+        if not isinstance(r, dict):
+            return False, f"regions[{i}] must be a dict"
+        for key in ("start_beat", "end_beat"):
+            if key not in r:
+                return False, f"regions[{i}] missing '{key}'"
+            try:
+                float(r[key])
+            except (TypeError, ValueError):
+                return False, f"regions[{i}].{key} must be a number"
+        if float(r["end_beat"]) < float(r["start_beat"]):
+            return False, f"regions[{i}] has end_beat < start_beat"
+        for key in ("min_pitch", "max_pitch"):
+            if key in r and r[key] is not None:
+                if not isinstance(r[key], int):
+                    return False, f"regions[{i}].{key} must be int or None"
+        if "note_ids" in r and r["note_ids"] is not None:
+            try:
+                for nid in r["note_ids"]:
+                    if not isinstance(nid, int):
+                        return False, (f"regions[{i}].note_ids "
+                                       f"must be a sequence of ints")
+            except TypeError:
+                return False, f"regions[{i}].note_ids must be iterable"
+        for key in ("pattern_id", "variation_id"):
+            if key in r and r[key] is not None:
+                if not isinstance(r[key], int):
+                    return False, f"regions[{i}].{key} must be int or None"
+        color = r.get("color")
+        if color is not None and not isinstance(color, str):
+            return False, f"regions[{i}].color must be a string"
+        label = r.get("label")
+        if label is not None and not isinstance(label, str):
+            return False, f"regions[{i}].label must be a string"
     return True, ""
 
 
@@ -108,6 +184,7 @@ _VALIDATORS = {
     'events': validate_events,
     'note_tags': validate_note_tags,
     'placement_tags': validate_placement_tags,
+    'regions': validate_regions,
     'stats': validate_stats,
     'custom': validate_custom,
 }

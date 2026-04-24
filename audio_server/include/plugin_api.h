@@ -27,6 +27,7 @@
 
 #include <string>
 #include <vector>
+#include <map>
 #include <memory>
 #include <functional>
 #include <cstdint>
@@ -129,6 +130,14 @@ struct ConfigParam {
 // Plugin descriptor
 // ==========================================================================
 
+/// Named bundle of port values, presented as a dropdown in the UI.
+/// When the user picks a preset, each listed port value is written into
+/// the node's params — the plugin itself never sees the preset concept.
+struct Preset {
+    std::string name;
+    std::map<std::string, float> port_values;
+};
+
 struct PluginDescriptor {
     std::string   id;
     std::string   display_name;
@@ -139,6 +148,7 @@ struct PluginDescriptor {
 
     std::vector<PortDescriptor> ports;
     std::vector<ConfigParam>    config_params;
+    std::vector<Preset>         presets;
 };
 
 // ==========================================================================

@@ -1471,13 +1471,109 @@ class PianoGridWidget(QWidget):
             self._slice_hover_pos = None
             self.update()
 
+    def _paint_regions(self, painter, pat, total_h):
+        """Paint plugin-emitted region boxes behind the note grid.
+
+        Reads the broadcast overlay on the app (may be None if the
+        song-plugins subsystem isn't wired in this build). Regions are
+        scoped to the currently-edited pattern via ``pattern_id``;
+        entries without a pattern_id are treated as global and drawn on
+        every pattern.
+        """
+        app = getattr(self.parent_roll, "app", None)
+        overlay = getattr(app, "piano_roll_overlay", None)
+        if overlay is None or not overlay.has_regions():
+            return
+        # Which variation (if any) is being edited?
+        var_id = None
+        state = self.parent_roll.state
+        if self.parent_roll._is_variation_mode():
+            var_id = state.sel_variation
+        regions = overlay.regions_for_pattern(pat.id, variation_id=var_id)
+        if not regions:
+            return
+        BW = self.parent_roll.BW
+        NH = self.parent_roll.NH
+        HI = self.parent_roll.HI
+        LO = self.parent_roll.LO
+
+        # Paint larger extents first so smaller regions stack visually
+        # on top. Ties broken by declaration order for stable layering.
+        ordered = sorted(
+            enumerate(regions),
+            key=lambda iv: (
+                -((iv[1].get("end_beat", 0) - iv[1].get("start_beat", 0))
+                  * max(1,
+                        (iv[1].get("max_pitch") or 127) -
+                        (iv[1].get("min_pitch") or 0))),
+                iv[0],
+            ),
+        )
+        # A small halo around each box so tightly-fit regions (e.g. the
+        # scale-conformance hinter's one-pitch-row boxes) remain visible
+        # behind the note. For broad regions (full-pitch chord bands)
+        # the halo is imperceptible.
+        HALO = 2
+        painter.save()
+        try:
+            for _, r in ordered:
+                try:
+                    s_beat = float(r.get("start_beat", 0.0))
+                    e_beat = float(r.get("end_beat", 0.0))
+                except (TypeError, ValueError):
+                    continue
+                if e_beat <= s_beat:
+                    continue
+                min_pitch = r.get("min_pitch")
+                max_pitch = r.get("max_pitch")
+                if min_pitch is None:
+                    min_pitch = LO
+                if max_pitch is None:
+                    max_pitch = HI
+                min_pitch = max(LO, int(min_pitch))
+                max_pitch = min(HI, int(max_pitch))
+                if max_pitch < min_pitch:
+                    continue
+
+                x0 = int(s_beat * BW) - HALO
+                x1 = int(e_beat * BW) + HALO
+                y0 = (HI - max_pitch) * NH - HALO
+                y1 = (HI - min_pitch + 1) * NH + HALO
+                w = max(1, x1 - x0)
+                h = max(1, y1 - y0)
+
+                color_hex = r.get("color") or "#7ad0ff"
+                try:
+                    fill = QColor(str(color_hex))
+                except Exception:
+                    fill = QColor("#7ad0ff")
+                border = QColor(fill)
+                fill.setAlpha(60)
+                border.setAlpha(180)
+                painter.setPen(QPen(border, 1))
+                painter.setBrush(fill)
+                painter.drawRect(x0, y0, w, h)
+
+                label = r.get("label")
+                if label and w >= 20 and h >= 12:
+                    painter.setPen(QColor(230, 236, 250, 220))
+                    painter.setFont(QFont('TkDefaultFont', 7))
+                    painter.setClipRect(x0 + 3, y0, w - 6, h)
+                    painter.drawText(
+                        x0 + 4, y0 + 2, w - 8, h - 4,
+                        Qt.AlignTop | Qt.AlignLeft, str(label),
+                    )
+                    painter.setClipping(False)
+        finally:
+            painter.restore()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
         pat = self.parent_roll._get_edit_pattern()
         s = self.parent_roll.state
-        
+
         pitch_range = self.parent_roll.HI - self.parent_roll.LO + 1
         total_h = pitch_range * self.parent_roll.NH
         beats = pat.length if pat else 16
@@ -1528,6 +1624,11 @@ class PianoGridWidget(QWidget):
 
         if not pat:
             return
+
+        # Plugin-broadcast region overlays — painted behind everything so
+        # they act as coloured bands behind notes. Only drawn when a
+        # plugin broadcasting a ``regions`` schema is active.
+        self._paint_regions(painter, pat, total_h)
 
         # Background notes (other patterns) - overlay system
         bg_notes = []

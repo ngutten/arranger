@@ -81,8 +81,10 @@ class Grid2DRenderer(QWidget):
         self._hint: dict = {}
         self._beat_range: Optional[Tuple[float, float]] = None
         self._image: Optional[QImage] = None
-        self.setMinimumHeight(110)
+        self.setMinimumHeight(40)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    _COMPACT_THRESHOLD = 70
 
     def update_data(self, data, render_hint: Optional[dict] = None) -> None:
         if not isinstance(data, dict):
@@ -159,7 +161,9 @@ class Grid2DRenderer(QWidget):
     def paintEvent(self, _event):
         p = QPainter(self)
         p.setRenderHint(QPainter.SmoothPixmapTransform, False)
-        rect = self.rect().adjusted(4, 4, -4, -4)
+        compact = self.height() < self._COMPACT_THRESHOLD
+        margin = 1 if compact else 4
+        rect = self.rect().adjusted(margin, margin, -margin, -margin)
         p.fillRect(rect, QColor(18, 22, 36))
 
         if self._image is None:
@@ -168,66 +172,102 @@ class Grid2DRenderer(QWidget):
             p.end()
             return
 
-        # Row labels gutter.
+        # Row labels gutter — skipped entirely in compact mode so the
+        # heatmap gets the full width for its rows.
         row_labels = list(self._hint.get("row_labels") or [])
         gutter_w = 0.0
-        if row_labels:
+        if row_labels and not compact:
             gutter_w = 28.0
-        axis_bottom = 14.0
+        axis_bottom = 0.0 if compact else 14.0
+        top_pad = 1 if compact else 4
         plot = QRectF(
             rect.left() + gutter_w,
-            rect.top() + 4,
-            max(10.0, rect.width() - gutter_w - 4),
-            max(10.0, rect.height() - axis_bottom - 4),
+            rect.top() + top_pad,
+            max(10.0, rect.width() - gutter_w - margin),
+            max(10.0, rect.height() - axis_bottom - top_pad),
         )
 
-        # Draw the image scaled into the plot rect.
-        p.drawImage(plot, self._image)
+        # Pull the data's own beat extent from the hint; without it we
+        # can only scale the whole image across the plot rect, which
+        # misaligns columns from arranger beats when the band is
+        # showing a zoomed-in viewport.
+        full_range: Optional[Tuple[float, float]] = None
+        if "beat_range" in self._hint:
+            try:
+                fmin, fmax = self._hint["beat_range"]
+                fmin = float(fmin); fmax = float(fmax)
+                if fmax > fmin:
+                    full_range = (fmin, fmax)
+            except Exception:
+                full_range = None
 
-        # Row label gutter text.
-        if row_labels:
-            font = QFont()
-            font.setPointSize(8)
-            p.setFont(font)
-            p.setPen(QColor(170, 180, 210))
-            rh = plot.height() / max(1, self._rows)
-            for r in range(min(self._rows, len(row_labels))):
+        if self._beat_range is not None and full_range is not None:
+            vis_min, vis_max = self._beat_range
+            full_min, full_max = full_range
+            vis_span = vis_max - vis_min
+            full_span = full_max - full_min
+            # Intersection of the visible viewport and the data extent.
+            b_left = max(vis_min, full_min)
+            b_right = min(vis_max, full_max)
+            if vis_span > 0 and full_span > 0 and b_right > b_left:
+                img_w = float(self._image.width())
+                img_h = float(self._image.height())
+                sx0 = (b_left - full_min) / full_span * img_w
+                sx1 = (b_right - full_min) / full_span * img_w
+                tx0 = plot.left() + (b_left - vis_min) / vis_span * plot.width()
+                tx1 = plot.left() + (b_right - vis_min) / vis_span * plot.width()
+                src = QRectF(sx0, 0.0, sx1 - sx0, img_h)
+                tgt = QRectF(tx0, plot.top(), tx1 - tx0, plot.height())
+                p.drawImage(tgt, self._image, src)
+        else:
+            p.drawImage(plot, self._image)
+
+        if not compact:
+            # Row label gutter text.
+            if row_labels:
+                font = QFont()
+                font.setPointSize(8)
+                p.setFont(font)
+                p.setPen(QColor(170, 180, 210))
+                rh = plot.height() / max(1, self._rows)
+                for r in range(min(self._rows, len(row_labels))):
+                    p.drawText(
+                        QRectF(rect.left(), plot.top() + r * rh,
+                               gutter_w - 2, rh),
+                        Qt.AlignRight | Qt.AlignVCenter,
+                        str(row_labels[r]),
+                    )
+
+            # Beat-axis labels (if range is known).
+            x_min = None
+            x_max = None
+            if self._beat_range is not None:
+                x_min, x_max = self._beat_range
+            elif "beat_range" in self._hint:
+                try:
+                    x_min, x_max = self._hint["beat_range"]
+                    x_min = float(x_min); x_max = float(x_max)
+                except Exception:
+                    x_min = x_max = None
+            if x_min is not None and x_max is not None and x_max > x_min:
+                font = QFont()
+                font.setPointSize(8)
+                p.setFont(font)
+                p.setPen(QColor(170, 180, 210))
+                x_lab = self._hint.get("x_label", "beat")
                 p.drawText(
-                    QRectF(rect.left(), plot.top() + r * rh, gutter_w - 2, rh),
-                    Qt.AlignRight | Qt.AlignVCenter,
-                    str(row_labels[r]),
+                    QRectF(plot.left(), rect.bottom() - 12, plot.width(), 12),
+                    Qt.AlignLeft | Qt.AlignBottom,
+                    f"{x_min:.1f} {x_lab}",
+                )
+                p.drawText(
+                    QRectF(plot.left(), rect.bottom() - 12, plot.width(), 12),
+                    Qt.AlignRight | Qt.AlignBottom,
+                    f"{x_max:.1f}",
                 )
 
-        # Beat-axis labels (if range is known).
-        x_min = None
-        x_max = None
-        if self._beat_range is not None:
-            x_min, x_max = self._beat_range
-        elif "beat_range" in self._hint:
-            try:
-                x_min, x_max = self._hint["beat_range"]
-                x_min = float(x_min); x_max = float(x_max)
-            except Exception:
-                x_min = x_max = None
-        if x_min is not None and x_max is not None and x_max > x_min:
-            font = QFont()
-            font.setPointSize(8)
-            p.setFont(font)
-            p.setPen(QColor(170, 180, 210))
-            x_lab = self._hint.get("x_label", "beat")
-            p.drawText(
-                QRectF(plot.left(), rect.bottom() - 12, plot.width(), 12),
-                Qt.AlignLeft | Qt.AlignBottom,
-                f"{x_min:.1f} {x_lab}",
-            )
-            p.drawText(
-                QRectF(plot.left(), rect.bottom() - 12, plot.width(), 12),
-                Qt.AlignRight | Qt.AlignBottom,
-                f"{x_max:.1f}",
-            )
-
-        # Frame.
-        p.setPen(QPen(QColor(60, 70, 95), 1))
-        p.setBrush(Qt.NoBrush)
-        p.drawRect(plot)
+            # Frame.
+            p.setPen(QPen(QColor(60, 70, 95), 1))
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(plot)
         p.end()

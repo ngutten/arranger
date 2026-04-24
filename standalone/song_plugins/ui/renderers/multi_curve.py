@@ -35,8 +35,10 @@ class MultiCurveRenderer(QWidget):
         self._series: Dict[str, List[float]] = {}
         self._hint: dict = {}
         self._beat_range: Optional[tuple] = None
-        self.setMinimumHeight(110)
+        self.setMinimumHeight(40)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    _COMPACT_THRESHOLD = 70
 
     def update_data(self, data, render_hint: Optional[dict] = None) -> None:
         try:
@@ -77,7 +79,9 @@ class MultiCurveRenderer(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
-        rect = self.rect().adjusted(4, 4, -4, -4)
+        compact = self.height() < self._COMPACT_THRESHOLD
+        margin = 1 if compact else 4
+        rect = self.rect().adjusted(margin, margin, -margin, -margin)
         p.fillRect(rect, QColor(28, 32, 50))
 
         if not self._beats or not self._series:
@@ -86,13 +90,14 @@ class MultiCurveRenderer(QWidget):
             p.end()
             return
 
-        axis_left = 36
-        axis_bottom = 14
+        axis_left = 0 if compact else 36
+        axis_bottom = 0 if compact else 14
+        top_pad = 1 if compact else 4
         plot = QRectF(
             rect.left() + axis_left,
-            rect.top() + 4,
-            max(10.0, rect.width() - axis_left - 4),
-            max(10.0, rect.height() - axis_bottom - 4),
+            rect.top() + top_pad,
+            max(10.0, rect.width() - axis_left - margin),
+            max(10.0, rect.height() - axis_bottom - top_pad),
         )
 
         if self._beat_range is not None:
@@ -129,12 +134,13 @@ class MultiCurveRenderer(QWidget):
                 plot.bottom() - fy * plot.height(),
             )
 
-        # Axis lines.
-        pen = QPen(QColor(60, 70, 95))
-        pen.setWidth(1)
-        p.setPen(pen)
-        p.drawLine(plot.left(), plot.bottom(), plot.right(), plot.bottom())
-        p.drawLine(plot.left(), plot.top(), plot.left(), plot.bottom())
+        if not compact:
+            # Axis lines.
+            pen = QPen(QColor(60, 70, 95))
+            pen.setWidth(1)
+            p.setPen(pen)
+            p.drawLine(plot.left(), plot.bottom(), plot.right(), plot.bottom())
+            p.drawLine(plot.left(), plot.top(), plot.left(), plot.bottom())
 
         # Series polylines.
         series_items = list(self._series.items())
@@ -152,54 +158,54 @@ class MultiCurveRenderer(QWidget):
                     to_xy(self._beats[i + 1], vs[i + 1]),
                 )
 
-        # Axis labels.
-        font = QFont()
-        font.setPointSize(8)
-        p.setFont(font)
-        p.setPen(QColor(170, 180, 210))
-        x_lab = self._hint.get("x_label", "beat")
-        p.drawText(
-            QRectF(rect.left(), plot.top(), axis_left - 2, 12),
-            Qt.AlignRight | Qt.AlignTop,
-            f"{y_max:.2f}",
-        )
-        p.drawText(
-            QRectF(rect.left(), plot.bottom() - 12, axis_left - 2, 12),
-            Qt.AlignRight | Qt.AlignBottom,
-            f"{y_min:.2f}",
-        )
-        p.drawText(
-            QRectF(plot.left(), rect.bottom() - 12, plot.width(), 12),
-            Qt.AlignLeft | Qt.AlignBottom,
-            f"{x_min:.1f} {x_lab}",
-        )
-        p.drawText(
-            QRectF(plot.left(), rect.bottom() - 12, plot.width(), 12),
-            Qt.AlignRight | Qt.AlignBottom,
-            f"{x_max:.1f}",
-        )
-
-        # Legend — top-right, inside plot rect, one line per series.
-        legend_x = plot.right() - 8
-        legend_y = plot.top() + 2
-        for idx, (name, _vs) in enumerate(series_items):
-            color = self._color_for(name, idx)
-            line_pen = QPen(color)
-            line_pen.setWidthF(2.0)
-            p.setPen(line_pen)
-            p.drawLine(
-                QPointF(legend_x - 16, legend_y + 6),
-                QPointF(legend_x - 4, legend_y + 6),
-            )
-            p.setPen(QColor(210, 220, 240))
+        if not compact:
+            # Axis labels.
+            font = QFont()
+            font.setPointSize(8)
+            p.setFont(font)
+            p.setPen(QColor(170, 180, 210))
+            x_lab = self._hint.get("x_label", "beat")
             p.drawText(
-                QRectF(legend_x - 120, legend_y, 100, 12),
-                Qt.AlignRight | Qt.AlignVCenter,
-                str(name),
+                QRectF(rect.left(), plot.top(), axis_left - 2, 12),
+                Qt.AlignRight | Qt.AlignTop,
+                f"{y_max:.2f}",
             )
-            legend_y += 12
-            # Stop listing if we run out of vertical room in the plot.
-            if legend_y > plot.top() + plot.height() - 14:
-                break
+            p.drawText(
+                QRectF(rect.left(), plot.bottom() - 12, axis_left - 2, 12),
+                Qt.AlignRight | Qt.AlignBottom,
+                f"{y_min:.2f}",
+            )
+            p.drawText(
+                QRectF(plot.left(), rect.bottom() - 12, plot.width(), 12),
+                Qt.AlignLeft | Qt.AlignBottom,
+                f"{x_min:.1f} {x_lab}",
+            )
+            p.drawText(
+                QRectF(plot.left(), rect.bottom() - 12, plot.width(), 12),
+                Qt.AlignRight | Qt.AlignBottom,
+                f"{x_max:.1f}",
+            )
+
+            # Legend — top-right, inside plot rect, one line per series.
+            legend_x = plot.right() - 8
+            legend_y = plot.top() + 2
+            for idx, (name, _vs) in enumerate(series_items):
+                color = self._color_for(name, idx)
+                line_pen = QPen(color)
+                line_pen.setWidthF(2.0)
+                p.setPen(line_pen)
+                p.drawLine(
+                    QPointF(legend_x - 16, legend_y + 6),
+                    QPointF(legend_x - 4, legend_y + 6),
+                )
+                p.setPen(QColor(210, 220, 240))
+                p.drawText(
+                    QRectF(legend_x - 120, legend_y, 100, 12),
+                    Qt.AlignRight | Qt.AlignVCenter,
+                    str(name),
+                )
+                legend_y += 12
+                if legend_y > plot.top() + plot.height() - 14:
+                    break
 
         p.end()

@@ -17,7 +17,7 @@ import logging
 from typing import Callable, Dict, List, Optional, Type
 
 from ..api import SelectionSnapshot, SongPlugin
-from ..registry import load_builtin_plugins
+from ..registry import broadcast_target_for_schema, load_builtin_plugins
 from ..song_view import SongView
 from . import dep_watcher
 from .selection_provider import SelectionProvider
@@ -34,9 +34,13 @@ class PluginHost:
         self.plugins: Dict[str, Type[SongPlugin]] = {}
         # Blocks register themselves so the host can broadcast state changes.
         self._blocks: List = []
-        # Broadcast band state — wired up after construction by the app.
+        # Broadcast state — wired up after construction by the app.
+        # A broadcaster is a single block at a time (radio-button).
+        # Its annotation is routed to either the band or the piano-roll
+        # overlay based on schema — see ``broadcast_target_for_schema``.
         self._broadcaster = None
         self._broadcast_band = None
+        self._piano_roll_overlay = None
         self._reload_registry()
 
     # -- Broadcast band --------------------------------------------------
@@ -61,17 +65,63 @@ class PluginHost:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("failed to connect band.cleared: %s", exc)
 
+    def set_piano_roll_overlay(self, overlay) -> None:
+        """Wire up the :class:`PianoRollOverlay` data holder.
+
+        Analogous to :meth:`set_broadcast_band`: installed once by the
+        app at startup, reachable via the current broadcaster routing.
+        """
+        if self._piano_roll_overlay is not None:
+            try:
+                self._piano_roll_overlay.cleared.disconnect(
+                    self.clear_broadcaster
+                )
+            except (RuntimeError, TypeError):
+                pass
+        self._piano_roll_overlay = overlay
+        if overlay is not None:
+            try:
+                overlay.cleared.connect(self.clear_broadcaster)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("failed to connect overlay.cleared: %s", exc)
+
     def current_broadcaster(self):
         """Return the currently broadcasting block, or None."""
         return self._broadcaster
+
+    def _target_for_annotation(self, annotation):
+        """Return the target widget (band or overlay) for an annotation's
+        schema. Returns ``None`` if no target is wired for the schema.
+        """
+        if annotation is None:
+            return None
+        target = broadcast_target_for_schema(annotation.schema)
+        if target == "band":
+            return self._broadcast_band
+        if target == "overlay":
+            return self._piano_roll_overlay
+        return None
+
+    def _clear_all_targets(self) -> None:
+        """Tell both broadcast surfaces to drop their state. Called on
+        broadcaster handoff so we don't leave stale data in the target
+        that the new broadcaster isn't routing to.
+        """
+        for t in (self._broadcast_band, self._piano_roll_overlay):
+            if t is None:
+                continue
+            try:
+                t.clear()
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("target clear failed: %s", exc)
 
     def set_broadcaster(self, block) -> None:
         """Install ``block`` as the current broadcaster (radio-button).
 
         Unchecks the previous broadcaster's Broadcast checkbox (via the
         block's ``_on_broadcast_released`` hook) so only one block is
-        active at a time. If the block already has an annotation, pushes
-        it to the band; otherwise just updates the band header.
+        active at a time. Routes the block's latest annotation to either
+        the band or the piano-roll overlay based on the schema.
         """
         if block is self._broadcaster:
             return
@@ -82,40 +132,53 @@ class PluginHost:
                 prev._on_broadcast_released()
             except Exception as exc:  # noqa: BLE001
                 logger.exception("broadcast-release hook failed: %s", exc)
-        if self._broadcast_band is None:
-            return
+        # Clear any target the previous broadcaster populated — the new
+        # block may route to a different surface.
+        self._clear_all_targets()
         ann = getattr(block, "_last_annotation", None)
+        target = self._target_for_annotation(ann)
+        if target is None:
+            return
         try:
-            self._broadcast_band.set_broadcaster(block, ann)
+            target.set_broadcaster(block, ann)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("broadcast band set_broadcaster failed: %s", exc)
+            logger.exception("broadcast target set_broadcaster failed: %s", exc)
 
     def clear_broadcaster(self) -> None:
-        """Clear the current broadcaster and hide the band."""
-        if self._broadcaster is None:
-            if self._broadcast_band is not None:
-                self._broadcast_band.clear()
-            return
+        """Clear the current broadcaster and hide both targets."""
         prev = self._broadcaster
         self._broadcaster = None
-        try:
-            prev._on_broadcast_released()
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("broadcast-release hook failed: %s", exc)
-        if self._broadcast_band is not None:
-            self._broadcast_band.clear()
+        if prev is not None:
+            try:
+                prev._on_broadcast_released()
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("broadcast-release hook failed: %s", exc)
+        self._clear_all_targets()
 
     def broadcaster_annotation_updated(self, block, annotation) -> None:
         """Called by a block when a fresh run produces a new annotation.
 
-        Only forwards to the band if ``block`` is the current broadcaster.
+        Only forwards if ``block`` is the current broadcaster. Routing
+        is recomputed each time so a block whose schema changes between
+        runs ends up on the right surface.
         """
-        if block is not self._broadcaster or self._broadcast_band is None:
+        if block is not self._broadcaster:
+            return
+        target = self._target_for_annotation(annotation)
+        # If the target changes between runs, clear the previous one.
+        other = (self._piano_roll_overlay if target is self._broadcast_band
+                 else self._broadcast_band)
+        if target is not None and other is not None:
+            try:
+                other.clear()
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("other-target clear failed: %s", exc)
+        if target is None:
             return
         try:
-            self._broadcast_band.update_annotation(annotation)
+            target.update_annotation(annotation)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("broadcast band update failed: %s", exc)
+            logger.exception("broadcast target update failed: %s", exc)
 
     def _reload_registry(self) -> None:
         try:
@@ -141,14 +204,10 @@ class PluginHost:
     def unregister_block(self, block) -> None:
         if block in self._blocks:
             self._blocks.remove(block)
-        # If the outgoing block was our broadcaster, drop the band.
+        # If the outgoing block was our broadcaster, drop both targets.
         if block is self._broadcaster:
             self._broadcaster = None
-            if self._broadcast_band is not None:
-                try:
-                    self._broadcast_band.clear()
-                except Exception as exc:  # noqa: BLE001
-                    logger.exception("band clear on unregister failed: %s", exc)
+            self._clear_all_targets()
 
     def active_blocks(self) -> List:
         return list(self._blocks)

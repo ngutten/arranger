@@ -25,8 +25,12 @@ class ScalarCurveRenderer(QWidget):
         # When set (both not None), paintEvent uses this range for the
         # x-axis instead of deriving it from the data. See set_beat_range.
         self._beat_range: Optional[tuple] = None
-        self.setMinimumHeight(110)
+        self.setMinimumHeight(40)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    # Widget heights below this threshold use a chrome-free layout suited
+    # to the broadcast band (no axis labels, no y-gutter).
+    _COMPACT_THRESHOLD = 70
 
     def update_data(self, data, render_hint: Optional[dict] = None) -> None:
         try:
@@ -65,7 +69,9 @@ class ScalarCurveRenderer(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
 
-        rect = self.rect().adjusted(4, 4, -4, -4)
+        compact = self.height() < self._COMPACT_THRESHOLD
+        margin = 1 if compact else 4
+        rect = self.rect().adjusted(margin, margin, -margin, -margin)
         # Background
         p.fillRect(rect, QColor(28, 32, 50))
 
@@ -75,14 +81,16 @@ class ScalarCurveRenderer(QWidget):
             p.end()
             return
 
-        # Leave room for axis labels.
-        axis_left = 36
-        axis_bottom = 14
+        # Leave room for axis labels — skipped in compact mode so the
+        # curve gets the full widget width/height.
+        axis_left = 0 if compact else 36
+        axis_bottom = 0 if compact else 14
+        top_pad = 1 if compact else 4
         plot = QRectF(
             rect.left() + axis_left,
-            rect.top() + 4,
-            max(10.0, rect.width() - axis_left - 4),
-            max(10.0, rect.height() - axis_bottom - 4),
+            rect.top() + top_pad,
+            max(10.0, rect.width() - axis_left - margin),
+            max(10.0, rect.height() - axis_bottom - top_pad),
         )
 
         if self._beat_range is not None:
@@ -106,12 +114,13 @@ class ScalarCurveRenderer(QWidget):
                 plot.bottom() - fy * plot.height(),
             )
 
-        # Gridlines (just a subtle baseline + mid/top)
-        pen = QPen(QColor(60, 70, 95))
-        pen.setWidth(1)
-        p.setPen(pen)
-        p.drawLine(plot.left(), plot.bottom(), plot.right(), plot.bottom())
-        p.drawLine(plot.left(), plot.top(), plot.left(), plot.bottom())
+        if not compact:
+            # Gridlines (just a subtle baseline + mid/top)
+            pen = QPen(QColor(60, 70, 95))
+            pen.setWidth(1)
+            p.setPen(pen)
+            p.drawLine(plot.left(), plot.bottom(), plot.right(), plot.bottom())
+            p.drawLine(plot.left(), plot.top(), plot.left(), plot.bottom())
 
         # Build polygon for the filled area.
         poly = QPolygonF()
@@ -139,39 +148,40 @@ class ScalarCurveRenderer(QWidget):
                 to_xy(self._beats[i + 1], self._values[i + 1]),
             )
 
-        # Labels
-        font = QFont()
-        font.setPointSize(8)
-        p.setFont(font)
-        p.setPen(QColor(170, 180, 210))
-        y_lab = self._hint.get("y_label", "")
-        x_lab = self._hint.get("x_label", "beat")
-        p.drawText(
-            QRectF(rect.left(), plot.top(), axis_left - 2, 12),
-            Qt.AlignRight | Qt.AlignTop,
-            f"{y_max:.2f}",
-        )
-        p.drawText(
-            QRectF(rect.left(), plot.bottom() - 12, axis_left - 2, 12),
-            Qt.AlignRight | Qt.AlignBottom,
-            f"{y_min:.2f}",
-        )
-        p.drawText(
-            QRectF(plot.left(), rect.bottom() - 12, plot.width(), 12),
-            Qt.AlignLeft | Qt.AlignBottom,
-            f"{x_min:.1f} {x_lab}",
-        )
-        p.drawText(
-            QRectF(plot.left(), rect.bottom() - 12, plot.width(), 12),
-            Qt.AlignRight | Qt.AlignBottom,
-            f"{x_max:.1f}",
-        )
-        if y_lab:
+        if not compact:
+            # Labels
+            font = QFont()
+            font.setPointSize(8)
+            p.setFont(font)
+            p.setPen(QColor(170, 180, 210))
+            y_lab = self._hint.get("y_label", "")
+            x_lab = self._hint.get("x_label", "beat")
             p.drawText(
-                QRectF(rect.left(), plot.top() + plot.height() / 2 - 8,
-                       axis_left - 2, 16),
-                Qt.AlignRight | Qt.AlignVCenter,
-                y_lab,
+                QRectF(rect.left(), plot.top(), axis_left - 2, 12),
+                Qt.AlignRight | Qt.AlignTop,
+                f"{y_max:.2f}",
             )
+            p.drawText(
+                QRectF(rect.left(), plot.bottom() - 12, axis_left - 2, 12),
+                Qt.AlignRight | Qt.AlignBottom,
+                f"{y_min:.2f}",
+            )
+            p.drawText(
+                QRectF(plot.left(), rect.bottom() - 12, plot.width(), 12),
+                Qt.AlignLeft | Qt.AlignBottom,
+                f"{x_min:.1f} {x_lab}",
+            )
+            p.drawText(
+                QRectF(plot.left(), rect.bottom() - 12, plot.width(), 12),
+                Qt.AlignRight | Qt.AlignBottom,
+                f"{x_max:.1f}",
+            )
+            if y_lab:
+                p.drawText(
+                    QRectF(rect.left(), plot.top() + plot.height() / 2 - 8,
+                           axis_left - 2, 16),
+                    Qt.AlignRight | Qt.AlignVCenter,
+                    y_lab,
+                )
 
         p.end()

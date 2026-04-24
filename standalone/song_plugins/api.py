@@ -343,7 +343,7 @@ else:
 
 Schema = Literal[
     "scalar_curve", "multi_curve", "grid2d", "events",
-    "note_tags", "placement_tags", "stats", "custom",
+    "note_tags", "placement_tags", "regions", "stats", "custom",
 ]
 MetaDep = Literal["midi", "structure", "tempo", "tracks", "automation", "beat"]
 
