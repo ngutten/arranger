@@ -35,6 +35,10 @@ struct SchedEvent {
     float     value;       // used by Control events
     std::string node_id;   // target node
     std::string lyric;     // NoteOn only: per-note lyric syllable for singing plugins
+    std::string port_id;   // Control events only: if non-empty, value is delivered via
+                           // set_param(port_id, value) instead of push_control(). Used
+                           // to automate a specific named parameter on a node (e.g.,
+                           // mixer gain_N) without wiring a control_source.
 };
 
 // ---------------------------------------------------------------------------

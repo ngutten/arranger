@@ -187,6 +187,9 @@ class AutomationTrackDialog(QDialog):
         target_layout.addWidget(QLabel('Target:'))
         self.target_combo = QComboBox()
         self.target_combo.addItems(['None', 'Tempo'])
+        # Output-gain targets — one per channel on the output mixer.
+        for label, _t in self._output_gain_targets():
+            self.target_combo.addItem(label)
         target_layout.addWidget(self.target_combo)
         layout.addLayout(target_layout)
 
@@ -194,7 +197,8 @@ class AutomationTrackDialog(QDialog):
         info_label = QLabel(
             'Create an automation track, then create a Control Source node\n'
             'in the Graph Editor and select this track from its settings.\n'
-            'Set Target to "Tempo" to use this track as a BPM automation lane.'
+            'Set Target to "Tempo" to drive BPM, or "Output Gain N" to\n'
+            'automate the volume on channel N of the output mixer.'
         )
         info_label.setStyleSheet('color: #888; font-size: 10px;')
         info_label.setWordWrap(True)
@@ -215,13 +219,55 @@ class AutomationTrackDialog(QDialog):
 
         layout.addLayout(btn_layout)
 
+    def _output_gain_targets(self):
+        """Available output-gain target options.
+
+        Reads the output node's channel_count from the signal graph; falls
+        back to a single channel if no graph is loaded.
+        """
+        count = 1
+        sg = getattr(self.state, 'signal_graph', None)
+        if sg is not None:
+            for node in sg.nodes:
+                if node.node_type == 'output':
+                    count = max(1, int(node.params.get('channel_count', 1)))
+                    break
+        return [(f'Output Gain {n + 1}', f'output_gain:{n}') for n in range(count)]
+
+    def _target_string_to_text(self, target: str) -> str:
+        if target == 'tempo':
+            return 'Tempo'
+        if target and target.startswith('output_gain:'):
+            for label, t in self._output_gain_targets():
+                if t == target:
+                    return label
+            # Target points to a channel that isn't in the current graph.
+            # Keep the user's value by adding an ad-hoc entry.
+            try:
+                n = int(target.split(':', 1)[1])
+                label = f'Output Gain {n + 1}'
+                if self.target_combo.findText(label) < 0:
+                    self.target_combo.addItem(label)
+                return label
+            except ValueError:
+                return 'None'
+        return 'None'
+
+    def _target_text_to_string(self, text: str):
+        if text == 'Tempo':
+            return 'tempo'
+        if text.startswith('Output Gain '):
+            try:
+                n = int(text.split(' ')[-1]) - 1
+                return f'output_gain:{n}'
+            except ValueError:
+                return None
+        return None
+
     def _load_track(self, track):
         """Load existing track data into fields."""
         self.name_edit.setText(track.name)
-        if track.target == 'tempo':
-            self.target_combo.setCurrentText('Tempo')
-        else:
-            self.target_combo.setCurrentText('None')
+        self.target_combo.setCurrentText(self._target_string_to_text(track.target))
 
     def _on_ok(self):
         """Validate and accept."""
@@ -230,8 +276,7 @@ class AutomationTrackDialog(QDialog):
             QMessageBox.warning(self, 'Invalid Name', 'Track name cannot be empty.')
             return
 
-        target_text = self.target_combo.currentText()
-        target = 'tempo' if target_text == 'Tempo' else None
+        target = self._target_text_to_string(self.target_combo.currentText())
 
         # Validate: only one tempo track allowed
         if target == 'tempo':
@@ -241,6 +286,15 @@ class AutomationTrackDialog(QDialog):
                     'A tempo automation track already exists. '
                     'Only one track can target tempo.')
                 return
+
+        # Validate: only one track per output gain channel.
+        if target and target.startswith('output_gain:'):
+            for t in self.state.automation_tracks:
+                if t.target == target and (not self.track or t.id != self.track.id):
+                    QMessageBox.warning(self, 'Duplicate Output Gain Target',
+                        f'Another automation track already targets {self.target_combo.currentText()}. '
+                        'Only one track can drive each output-gain channel.')
+                    return
 
         if self.track:
             # Editing existing

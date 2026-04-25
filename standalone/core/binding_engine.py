@@ -268,6 +268,44 @@ def _build_server_schedule(state) -> list[dict]:
                             "pitch": inst.pitch, "velocity": 0, "value": 0.0,
                         })
 
+    # --- Output-mixer gain automation ---
+    # Automation tracks with target "output_gain:<N>" drive the output
+    # mixer's gain_N parameter directly, bypassing the control_source
+    # routing. Events carry a port_id so the C++ dispatcher delivers them
+    # via set_param(port_id, value) on the "mixer" node.
+    from ..core.curve_utils import interpolate_curve as _interp
+    for auto_track in state.automation_tracks:
+        target = (auto_track.target or '')
+        if not target.startswith('output_gain:'):
+            continue
+        try:
+            channel = int(target.split(':', 1)[1])
+        except (ValueError, IndexError):
+            continue
+        port_id = f'gain_{channel}'
+        for ap in state.automation_placements:
+            if ap.track_id != auto_track.id:
+                continue
+            pattern = state.find_automation_pattern(ap.pattern_id)
+            if not pattern or not pattern.points:
+                continue
+            curve_points = [(p.time, p.value, p.curve) for p in pattern.points]
+            repeats = ap.repeats or 1
+            for rep in range(repeats):
+                offset = ap.time + rep * pattern.length
+                num_samples = max(16, int(pattern.length * 16))
+                for i in range(num_samples + 1):
+                    t = (i / num_samples) * pattern.length if num_samples > 0 else 0.0
+                    norm = _interp(curve_points, t, pattern.length, 0.0)
+                    norm = max(0.0, min(1.0, norm))
+                    scaled = pattern.min_value + norm * (pattern.max_value - pattern.min_value)
+                    events.append({
+                        "beat": offset + t, "type": "control",
+                        "node_id": "mixer", "port_id": port_id,
+                        "channel": 0, "pitch": 0, "velocity": 0,
+                        "value": scaled,
+                    })
+
     # --- Automation tracks ---
     # Iterate ControlSource nodes in the signal graph to find which automation
     # tracks are being used, then generate control events from their placements.

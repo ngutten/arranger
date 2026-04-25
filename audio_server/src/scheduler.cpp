@@ -30,6 +30,7 @@ std::unique_ptr<Schedule> Schedule::from_json(const std::string& j_str, std::str
         evt.value    = je.value("value", 0.0f);
         evt.node_id  = je.value("node_id", "");
         evt.lyric    = je.value("lyric", "");
+        evt.port_id  = je.value("port_id", "");
 
         // Setup events from the Python client have beat = -1 (program/volume
         // changes that must fire before any note-ons). Clamp to 0.0 so they
@@ -157,7 +158,10 @@ void Dispatcher::dispatch(double start_beat, double end_beat, Graph* graph) {
                         node->pitch_bend(e.channel, e.pitch | (e.velocity << 7));
                         break;
                     case EventType::Control:
-                        node->push_control(e.beat, e.value);
+                        if (!e.port_id.empty())
+                            node->set_param(e.port_id, e.value);
+                        else
+                            node->push_control(e.beat, e.value);
                         break;
                     case EventType::NoteTune:
                         node->note_tune(e.channel, e.pitch, e.value);

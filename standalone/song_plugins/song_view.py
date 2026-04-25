@@ -317,6 +317,7 @@ class SongView:
                         source_id=source_id,
                         source_kind=source_kind,
                         repeat_index=r,
+                        tags=dict(n.tags) if n.tags else {},
                     )
 
     def placements_in(self, scope: Scope) -> Iterator[PlacementView]:

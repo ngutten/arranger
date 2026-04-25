@@ -294,8 +294,9 @@ class NoteClipboard:
             return
             
         # Import here to avoid circular imports
+        import copy as _copy
         from .state import Note
-        
+
         self.notes = [
             Note(
                 pitch=n.pitch,
@@ -304,24 +305,26 @@ class NoteClipboard:
                 velocity=n.velocity,
                 bend=[list(p) for p in n.bend] if n.bend else [],
                 lyric=n.lyric,
+                tags=_copy.deepcopy(n.tags) if n.tags else {},
             ) for n in notes
         ]
-        
+
         print(f"[NOTE CLIPBOARD] Copied {len(self.notes)} notes")
-        
+
     def paste(self):
         """Get clipboard contents as new Note objects.
-        
+
         Returns:
             List of Note objects (copies of clipboard contents)
         """
         if not self.notes:
             print("[NOTE CLIPBOARD] Nothing to paste")
             return []
-            
+
         # Import here to avoid circular imports
+        import copy as _copy
         from .state import Note
-        
+
         # Return copies so clipboard is not modified
         copied = [
             Note(
@@ -331,6 +334,7 @@ class NoteClipboard:
                 velocity=n.velocity,
                 bend=[list(p) for p in n.bend] if n.bend else [],
                 lyric=n.lyric,
+                tags=_copy.deepcopy(n.tags) if n.tags else {},
             ) for n in self.notes
         ]
         

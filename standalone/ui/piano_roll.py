@@ -4,15 +4,39 @@ import time
 
 from PySide6.QtWidgets import (QFrame, QWidget, QScrollArea, QLabel, QPushButton,
                                 QComboBox, QSlider, QVBoxLayout, QHBoxLayout,
-                                QLineEdit)
+                                QLineEdit, QMenu)
 from PySide6.QtCore import Qt, QRect, QPoint, QPointF, QRectF
 from PySide6.QtGui import (QPainter, QColor, QPen, QBrush, QFont, QKeyEvent,
-                            QPainterPath, QCursor)
+                            QPainterPath, QCursor, QAction, QActionGroup)
 
 from ..state import NOTE_NAMES, scale_set, vel_color, Note
 from ..clipboard import NoteClipboard
 from ..core.curve_utils import interpolate_curve
 from ..ops.variations import resolve_variation, compute_split_baselines
+from ..song_plugins.analysis.chord_voicings import (
+    QUALITIES, TIER3_EXTENSIONS, TIER4_ALTERATIONS,
+    chord_label as cv_chord_label, roman_label as cv_roman_label,
+    default_spec,
+)
+from ..song_plugins.builtin.chordify import (
+    CHORD_ROOT_TAG, CHORD_VOICING_TAG, ChordifyPlugin,
+)
+
+
+def _state_has_chord_roots(state) -> bool:
+    """True if any note in any pattern or variation carries a chord_root tag.
+
+    Cheap O(N) walk; used to skip chordify cost when no roots exist.
+    """
+    for pat in state.patterns:
+        for n in pat.notes:
+            if n.tags and CHORD_ROOT_TAG in n.tags:
+                return True
+    for var in state.variations:
+        for a in var.additions:
+            if a.tags and CHORD_ROOT_TAG in a.tags:
+                return True
+    return False
 
 class PianoRoll(QFrame):
     """Piano roll editor with piano keys, note grid, and velocity lane."""
@@ -1276,6 +1300,12 @@ class PianoRoll(QFrame):
             if self._is_variation_mode():
                 self._persist_variation_edits()
             self.state.notify('note_edit')
+            # Edit-completed hook: if any chord roots exist and one of
+            # them was (directly or otherwise) affected by this edit,
+            # regenerate voicings. The plugin is idempotent so we don't
+            # need to pinpoint "was a root touched?" — the cheap state
+            # walk in _maybe_run_chordify_live is enough.
+            self._maybe_run_chordify_live()
 
         self._drag_note = None
         self._resize_note = None
@@ -1341,6 +1371,202 @@ class PianoRoll(QFrame):
                 self._selected = delete_note_at(pat, i, self._selected)
             self.refresh()
             self.state.notify('note_edit')
+
+    # ------------------------------------------------------------------
+    # Chord-root interaction (middle-click)
+    # ------------------------------------------------------------------
+
+    def _on_middle_click(self, event):
+        """Open the chord-root quality menu for the note under the cursor."""
+        pat = self._get_edit_pattern()
+        if not pat:
+            return
+        x, y = self._xy(event)
+        n, _, _ = self._hit_note(x, y)
+        if n is None:
+            return
+        if CHORD_VOICING_TAG in (n.tags or {}):
+            # Middle-clicking a generated voicing shouldn't reroot it.
+            return
+        global_pos = event.globalPosition().toPoint() if hasattr(event, 'globalPosition') \
+            else event.globalPos()
+        menu = self._build_chord_root_menu(n, pat)
+        menu.exec(global_pos)
+
+    def _build_chord_root_menu(self, note, pat) -> QMenu:
+        """Menu that edits ``note.tags['chord_root']`` and reruns chordify."""
+        current_spec = (note.tags or {}).get(CHORD_ROOT_TAG)
+        current_quality = current_spec.get('quality') if current_spec else None
+        current_extras = tuple(current_spec.get('extras') or ()) if current_spec else ()
+
+        menu = QMenu(self)
+        header_text = cv_roman_label(note.pitch, pat.key, pat.scale, current_spec) \
+            if current_spec else '(none)'
+        header = menu.addAction(f'Current: {header_text}')
+        header.setEnabled(False)
+        menu.addSeparator()
+
+        un = menu.addAction('Not a chord root')
+        un.setCheckable(True)
+        un.setChecked(current_spec is None)
+        un.triggered.connect(lambda: self._apply_chord_root(note, None))
+        menu.addSeparator()
+
+        # Tier 1: diatonic dispatch.
+        for qid, qlabel in (('diatonic', 'Diatonic'),
+                            ('diatonic7', 'Diatonic 7th')):
+            spec = dict(default_spec()); spec['quality'] = qid
+            label = cv_chord_label(note.pitch, pat.key, pat.scale, spec)
+            act = menu.addAction(f'{qlabel} ({label})')
+            act.setCheckable(True)
+            act.setChecked(current_quality == qid)
+            act.triggered.connect(
+                lambda _=False, q=qid: self._apply_chord_root_quality(note, q))
+
+        menu.addSeparator()
+
+        # Tier 2: common concrete qualities.
+        tier2_main = (('maj', 'Major'), ('min', 'Minor'),
+                      ('dim', 'Diminished'), ('aug', 'Augmented'),
+                      ('sus2', 'Sus2'), ('sus4', 'Sus4'))
+        for qid, qlabel in tier2_main:
+            spec = dict(default_spec()); spec['quality'] = qid
+            label = cv_chord_label(note.pitch, pat.key, pat.scale, spec)
+            act = menu.addAction(f'{qlabel} ({label})')
+            act.setCheckable(True)
+            act.setChecked(current_quality == qid)
+            act.triggered.connect(
+                lambda _=False, q=qid: self._apply_chord_root_quality(note, q))
+
+        # Submenu: 7ths & 6ths.
+        sevenths = menu.addMenu('Seventh chords')
+        for qid, qlabel in (('maj7', 'Major 7'), ('m7', 'Minor 7'),
+                            ('dom7', 'Dominant 7'),
+                            ('m7b5', 'Half-diminished (m7b5)'),
+                            ('dim7', 'Diminished 7'),
+                            ('minMaj7', 'Minor-Major 7'),
+                            ('maj6', '6 (major 6)'),
+                            ('min6', 'm6 (minor 6)')):
+            spec = dict(default_spec()); spec['quality'] = qid
+            label = cv_chord_label(note.pitch, pat.key, pat.scale, spec)
+            act = sevenths.addAction(f'{qlabel} ({label})')
+            act.setCheckable(True)
+            act.setChecked(current_quality == qid)
+            act.triggered.connect(
+                lambda _=False, q=qid: self._apply_chord_root_quality(note, q))
+
+        # Submenu: extensions.
+        ext_menu = menu.addMenu('Extensions')
+        for qid in TIER3_EXTENSIONS:
+            spec = dict(default_spec()); spec['quality'] = qid
+            label = cv_chord_label(note.pitch, pat.key, pat.scale, spec)
+            act = ext_menu.addAction(f'{qid} ({label})')
+            act.setCheckable(True)
+            act.setChecked(current_quality == qid)
+            act.triggered.connect(
+                lambda _=False, q=qid: self._apply_chord_root_quality(note, q))
+
+        # Submenu: alterations (toggles on current spec's extras list).
+        alt_menu = menu.addMenu('Alterations')
+        alt_menu.setEnabled(current_spec is not None)
+        for alt in TIER4_ALTERATIONS:
+            act = alt_menu.addAction(alt)
+            act.setCheckable(True)
+            act.setChecked(alt in current_extras)
+            act.triggered.connect(
+                lambda _=False, a=alt: self._toggle_chord_root_alteration(note, a))
+
+        return menu
+
+    def _apply_chord_root(self, note, spec):
+        """Set or clear chord_root on ``note`` and rerun chordify."""
+        if spec is None:
+            if note.tags:
+                note.tags.pop(CHORD_ROOT_TAG, None)
+        else:
+            if not note.tags:
+                note.tags = {}
+            note.tags[CHORD_ROOT_TAG] = spec
+        self._run_chordify()
+        self.state.notify('note_edit')
+        self.refresh()
+
+    def _apply_chord_root_quality(self, note, quality):
+        spec = dict(note.tags.get(CHORD_ROOT_TAG) or default_spec()) \
+            if note.tags else default_spec()
+        spec['quality'] = quality
+        spec.setdefault('extras', [])
+        spec.setdefault('inversion', 'root')
+        self._apply_chord_root(note, spec)
+
+    def _toggle_chord_root_alteration(self, note, alt):
+        spec = dict((note.tags or {}).get(CHORD_ROOT_TAG) or default_spec())
+        extras = list(spec.get('extras') or [])
+        if alt in extras:
+            extras.remove(alt)
+        else:
+            extras.append(alt)
+        spec['extras'] = extras
+        spec.setdefault('quality', 'diatonic')
+        spec.setdefault('inversion', 'root')
+        self._apply_chord_root(note, spec)
+
+    def _run_chordify(self):
+        """Run the chordify plugin in-process and apply its ops.
+
+        Scoped to 'whole' — the plugin itself decides what to do per-root
+        based on tags present in the state. Re-entrant calls during a run
+        (e.g. via notify cascades) are suppressed.
+        """
+        if getattr(self, '_chordify_running', False):
+            return
+        try:
+            from ..song_plugins.song_view import SongView
+            from ..song_plugins.api import SelectionSnapshot
+            from ..song_plugins.apply_ops import apply_ops
+        except Exception:
+            return  # song-plugin machinery not available in this build
+
+        sel = SelectionSnapshot(
+            notes=frozenset(), placements=frozenset(), primary='none',
+            current_pattern_id=None, current_variation_id=None,
+            current_beat_pattern_id=None, current_auto_pattern_id=None,
+        )
+        view = SongView(self.app.state, sel)
+
+        class _Progress:
+            cancelled = False
+            def phase(self, _): pass
+            def update(self, _f, _m=None): pass
+
+        self._chordify_running = True
+        try:
+            plugin = ChordifyPlugin()
+            result = plugin.run(view, {}, _Progress())
+            if not result.operations:
+                return
+            try:
+                apply_ops(result.operations, self.app, 'chordify')
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception('chordify failed')
+                return
+            if hasattr(self.app, 'engine') and hasattr(self.app.engine, 'mark_dirty'):
+                self.app.engine.mark_dirty()
+        finally:
+            self._chordify_running = False
+
+    def _maybe_run_chordify_live(self):
+        """Fast path for post-edit regeneration.
+
+        Cheap early-out when no chord roots exist anywhere in the state
+        so most piano-roll edits never pay plugin-run cost.
+        """
+        if getattr(self, '_chordify_running', False):
+            return
+        if not _state_has_chord_roots(self.app.state):
+            return
+        self._run_chordify()
 
 
 class PianoKeysWidget(QWidget):
@@ -1429,6 +1655,8 @@ class PianoGridWidget(QWidget):
             self.parent_roll._on_click(event)
         elif event.button() == Qt.RightButton:
             self.parent_roll._on_right_click(event)
+        elif event.button() == Qt.MiddleButton:
+            self.parent_roll._on_middle_click(event)
 
     def mouseMoveEvent(self, event):
         roll = self.parent_roll
@@ -1793,15 +2021,43 @@ class PianoGridWidget(QWidget):
             color = QColor(vel_color(n.velocity))
 
             border_color = self.parent_roll._note_border_color(n)
+            # Dashed outline for live (untouched) voicings — see chordify
+            # plugin docstring. Edited voicings render solid so the user
+            # can tell at a glance which notes the plugin will regenerate.
+            is_voicing = CHORD_VOICING_TAG in (n.tags or {})
+            is_live_voicing = False
+            if is_voicing:
+                vtag = n.tags[CHORD_VOICING_TAG]
+                if isinstance(vtag, dict) and vtag.get('gen_pitch') is not None:
+                    is_live_voicing = (
+                        vtag.get('gen_pitch') == n.pitch
+                        and abs((vtag.get('gen_start') or 0.0) - n.start) < 1e-6
+                        and abs((vtag.get('gen_dur') or 0.0) - n.duration) < 1e-6
+                        and int(vtag.get('gen_vel') or 0) == int(n.velocity)
+                    )
+            pen_style = Qt.DashLine if is_live_voicing else Qt.SolidLine
+
             if sel:
-                painter.setPen(QPen(QColor('#fff'), 2))
+                painter.setPen(QPen(QColor('#fff'), 2, pen_style))
             elif border_color:
-                painter.setPen(QPen(border_color, 2))
+                painter.setPen(QPen(border_color, 2, pen_style))
             else:
-                painter.setPen(QPen(QColor(pat.color), 1))
+                painter.setPen(QPen(QColor(pat.color), 1, pen_style))
 
             painter.setBrush(color)
             painter.drawRect(int(x), y + 1, int(w - 1), self.parent_roll.NH - 2)
+
+            # Chord-root label above the note — roman-numeral form by
+            # default. Always visible so the user can see which notes
+            # are rooted at a glance.
+            tags = n.tags or {}
+            if CHORD_ROOT_TAG in tags:
+                label = cv_roman_label(
+                    n.pitch, pat.key, pat.scale, tags[CHORD_ROOT_TAG])
+                if label:
+                    painter.setPen(QColor('#ffcc66'))
+                    painter.setFont(QFont('TkDefaultFont', 7, QFont.Bold))
+                    painter.drawText(int(x + 2), y - 1, label)
 
             # Resize handle — width matches the hit zone so the visual cue is
             # honest about where the handle starts.

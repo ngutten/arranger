@@ -35,6 +35,7 @@ def resolve_variation(state, variation_id) -> list:
             velocity=n.velocity,
             bend=[list(p) for p in n.bend] if n.bend else [],
             lyric=n.lyric, note_id=n.note_id,
+            tags=copy.deepcopy(n.tags) if n.tags else {},
         )
 
     # Keep original parent notes for reference-note positioning
@@ -91,6 +92,7 @@ def resolve_variation(state, variation_id) -> list:
             velocity=added.velocity,
             bend=[list(p) for p in added.bend] if added.bend else [],
             lyric=added.lyric, note_id=added.note_id,
+            tags=copy.deepcopy(added.tags) if added.tags else {},
         )
 
         if added.ref_note_id:
@@ -175,6 +177,8 @@ def _apply_delta(note, delta):
         note.bend = [list(p) for p in delta.bend] if delta.bend else []
     if delta.lyric is not None:
         note.lyric = delta.lyric
+    if delta.tags is not None:
+        note.tags = copy.deepcopy(delta.tags)
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +413,8 @@ def variation_modify_note(var, note_id, **kwargs):
     If *note_id* belongs to a split, the delta is stored on the SplitOp
     (left_delta or right_delta) instead of var.modifications.
 
-    kwargs can include: d_start, d_duration, d_pitch, d_velocity, bend, lyric
+    kwargs can include: d_start, d_duration, d_pitch, d_velocity, bend,
+    lyric, tags.
     """
     sp, side = _find_split_for_note(var, note_id)
     if sp is not None:

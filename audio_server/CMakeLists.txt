@@ -399,6 +399,8 @@ plugin_library(reverb          SOURCES plugins/builtin/reverb_plugin.cpp)
 plugin_library(audio_delay_line  SOURCES plugins/builtin/audio_delay_line_plugin.cpp)
 plugin_library(tape_stop  SOURCES plugins/builtin/tape_stop_plugin.cpp)
 plugin_library(flanger  SOURCES plugins/builtin/flanger_plugin.cpp)
+plugin_library(compressor  SOURCES plugins/builtin/compressor_plugin.cpp)
+plugin_library(eq  SOURCES plugins/builtin/eq_plugin.cpp)
 
 plugin_library(pattern_stamper  SOURCES plugins/builtin/pattern_stamper_plugin.cpp)
 
@@ -448,6 +450,8 @@ add_dependencies(audio_server_lib
     arranger_plugin_audio_delay_line
     arranger_plugin_tape_stop
     arranger_plugin_flanger
+    arranger_plugin_compressor
+    arranger_plugin_eq
     arranger_plugin_amp
     arranger_plugin_filter
     arranger_plugin_pitch_shift

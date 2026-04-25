@@ -125,6 +125,61 @@ class TestResolveVariation:
         modified = next(n for n in notes if n.note_id == nid)
         assert modified.velocity == 127
 
+    def test_parent_tags_inherited_by_default(self, var_state):
+        s = var_state
+        pat = s.patterns[0]
+        pat.notes[0].tags = {'chord_root': {'quality': 'maj'}}
+        var = create_variation(s, pat.id)
+        notes = resolve_variation(s, var.id)
+        modified = next(n for n in notes if n.note_id == pat.notes[0].note_id)
+        assert modified.tags == {'chord_root': {'quality': 'maj'}}
+
+    def test_modification_tags_override_parent(self, var_state):
+        s = var_state
+        pat = s.patterns[0]
+        pat.notes[0].tags = {'chord_root': {'quality': 'maj'}}
+        var = create_variation(s, pat.id)
+        nid = pat.notes[0].note_id
+        variation_modify_note(var, nid, tags={'chord_root': {'quality': 'dom7'}})
+        notes = resolve_variation(s, var.id)
+        modified = next(n for n in notes if n.note_id == nid)
+        assert modified.tags == {'chord_root': {'quality': 'dom7'}}
+
+    def test_empty_tags_override_clears(self, var_state):
+        """Delta with tags={} wipes inherited tags in the variation."""
+        s = var_state
+        pat = s.patterns[0]
+        pat.notes[0].tags = {'chord_root': {'quality': 'maj'}}
+        var = create_variation(s, pat.id)
+        nid = pat.notes[0].note_id
+        variation_modify_note(var, nid, tags={})
+        notes = resolve_variation(s, var.id)
+        modified = next(n for n in notes if n.note_id == nid)
+        assert modified.tags == {}
+
+    def test_variation_does_not_mutate_parent_tags(self, var_state):
+        """Variation resolution must deepcopy tags so edits don't leak."""
+        s = var_state
+        pat = s.patterns[0]
+        pat.notes[0].tags = {'chord_root': {'quality': 'maj'}}
+        var = create_variation(s, pat.id)
+        notes = resolve_variation(s, var.id)
+        modified = next(n for n in notes if n.note_id == pat.notes[0].note_id)
+        # Mutating the resolved copy should not touch the parent tags.
+        modified.tags['chord_root']['quality'] = 'min'
+        modified.tags['new'] = 'x'
+        assert pat.notes[0].tags == {'chord_root': {'quality': 'maj'}}
+
+    def test_added_note_tags_roundtrip(self, var_state):
+        s = var_state
+        pat = s.patterns[0]
+        var = create_variation(s, pat.id)
+        added = variation_add_note(s, var, pitch=72, start=3.0, duration=0.5)
+        added.tags = {'chord_voicing': {'root_id': 42}}
+        notes = resolve_variation(s, var.id)
+        resolved = next(n for n in notes if n.note_id == added.note_id)
+        assert resolved.tags == {'chord_voicing': {'root_id': 42}}
+
 
 class TestResolveplacementNotes:
     def test_regular_placement(self, var_state):

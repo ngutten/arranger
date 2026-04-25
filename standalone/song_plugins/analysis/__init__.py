@@ -12,6 +12,7 @@ Modules:
 - ``key_fit``: Krumhansl-Kessler fit scores per window per key.
 - ``chord_regions``: root + quality detection over time.
 - ``romans``: chord-root-and-quality + key → roman numeral label.
+- ``chord_voicings``: root + spec → chord pitches + labels (generative).
 """
 
 from .pitch_class import (
@@ -26,6 +27,11 @@ from .chord_regions import (
 from .romans import (
     roman_numeral, roman_numeral_with_alternates,
 )
+from .chord_voicings import (
+    QUALITIES, CYCLE_ORDER, TIER3_EXTENSIONS, TIER4_ALTERATIONS,
+    scale_degree, resolve_quality, build_voicing,
+    chord_label, roman_label, cycle_quality, default_spec, with_quality,
+)
 
 
 __all__ = [
@@ -34,4 +40,8 @@ __all__ = [
     "KS_MAJOR", "KS_MINOR", "key_fit_scores", "best_key",
     "ChordRegion", "detect_chord_regions", "chord_quality_templates",
     "roman_numeral", "roman_numeral_with_alternates",
+    "QUALITIES", "CYCLE_ORDER", "TIER3_EXTENSIONS", "TIER4_ALTERATIONS",
+    "scale_degree", "resolve_quality", "build_voicing",
+    "chord_label", "roman_label", "cycle_quality",
+    "default_spec", "with_quality",
 ]

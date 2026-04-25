@@ -223,6 +223,9 @@ class ResolvedNote:
     source_id: int
     source_kind: Literal["pattern", "variation"]
     repeat_index: int
+    # Tags attached to the underlying Note (copy; treat as read-only).
+    # Empty dict if the note has no tags.
+    tags: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

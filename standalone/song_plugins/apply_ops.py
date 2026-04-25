@@ -277,6 +277,12 @@ def _v_set_track_vol(s, op, i):
 def _v_create_auto_track(s, op, i):
     if op.target == 'tempo' and s.find_tempo_track() is not None:
         raise OperationError(i, op, "a tempo automation track already exists")
+    if op.target and op.target.startswith('output_gain:'):
+        for t in s.automation_tracks:
+            if t.target == op.target:
+                raise OperationError(
+                    i, op,
+                    f"another automation track already targets {op.target}")
 
 
 def _v_delete_auto_track(s, op, i):
@@ -475,6 +481,7 @@ def _h_add_note(app, op):
         velocity=op.velocity, lyric=op.lyric,
         bend=[list(b) for b in op.bend],
         note_id=app.state.new_id(),
+        tags=dict(op.tags) if op.tags else {},
     )
     pat.notes.append(n)
     return n.note_id
@@ -635,6 +642,8 @@ def _h_var_add_note(app, op):
         app.state, var, pitch=op.pitch, start=op.start,
         duration=op.duration, velocity=op.velocity, lyric=op.lyric,
     )
+    if op.tags:
+        added.tags = dict(op.tags)
     return added.note_id
 
 

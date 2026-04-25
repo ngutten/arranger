@@ -27,6 +27,7 @@ class AddNote:
     velocity: int = 100
     lyric: str = ''
     bend: Tuple[Tuple[float, float], ...] = ()
+    tags: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -188,6 +189,7 @@ class VariationAddNote:
     duration: float
     velocity: int = 100
     lyric: str = ''
+    tags: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

@@ -5,7 +5,9 @@
 // delay line utility for time-alignment, lookahead processing, or routing tricks.
 //
 // Parameters:
-//   delay_ms — Delay time in milliseconds [0, 2000]
+//   delay_ms    — Delay time in milliseconds [0, 2000]
+//   beat_sync   — Toggle: when on, use delay_beats and current BPM instead of delay_ms
+//   delay_beats — Delay time in beats [0, 4]; only read when beat_sync is on
 
 #include "plugin_api.h"
 #include <cmath>
@@ -25,17 +27,25 @@ public:
                          "feedback or filtering — useful for lookahead processing, speaker alignment, "
                          "or creative routing. Range: 0-2000 ms.";
         d.author       = "builtin";
-        d.version      = 1;
+        d.version      = 2;
 
         d.ports = {
             { "audio_in",  "Audio In",  "Stereo audio input",
               PluginPortType::AudioStereo, PortRole::Input },
             { "audio_out", "Audio Out", "Delayed stereo output",
               PluginPortType::AudioStereo, PortRole::Output },
-            
-            { "delay_ms", "Delay (ms)", "Delay time in milliseconds",
+
+            { "delay_ms", "Delay (ms)", "Delay time in milliseconds (used when Beat Sync is off)",
               PluginPortType::Control, PortRole::Input,
               ControlHint::Continuous, 100.0f, 0.0f, 2000.0f },
+            { "beat_sync", "Beat Sync",
+              "When on, the delay is measured in beats and follows the project tempo.",
+              PluginPortType::Control, PortRole::Input,
+              ControlHint::Toggle, 0.0f, 0.0f, 1.0f },
+            { "delay_beats", "Delay (beats)",
+              "Delay in beats (used when Beat Sync is on). 0.25 = 1/16, 0.5 = 1/8, 1.0 = 1/4, etc.",
+              PluginPortType::Control, PortRole::Input,
+              ControlHint::Continuous, 0.5f, 0.0f, 4.0f },
         };
 
         return d;
@@ -62,15 +72,32 @@ public:
         auto* out = buffers.audio.get("audio_out");
         if (!in || !out) return;
 
-        auto* delay_ctl = buffers.control.get("delay_ms");
-        bool  ps_delay  = delay_ctl && delay_ctl->samples;
-        float const_delay_ms = std::clamp(
-            delay_ctl ? delay_ctl->value : 100.0f, 0.0f, 2000.0f);
+        auto* ms_ctl    = buffers.control.get("delay_ms");
+        auto* beats_ctl = buffers.control.get("delay_beats");
+        auto* sync_ctl  = buffers.control.get("beat_sync");
+        bool  beat_sync = sync_ctl && sync_ctl->value > 0.5f;
+        bool  ps_ms     = ms_ctl    && ms_ctl->samples;
+        bool  ps_beats  = beats_ctl && beats_ctl->samples;
+        float const_ms    = std::clamp(
+            ms_ctl ? ms_ctl->value : 100.0f, 0.0f, 2000.0f);
+        float const_beats = std::clamp(
+            beats_ctl ? beats_ctl->value : 0.5f, 0.0f, 4.0f);
+        // When beat-sync is on, delay_ms is computed from delay_beats and
+        // the block's tempo. We don't track tempo changes at per-sample
+        // resolution inside the block; tempo is sampled once here.
+        float bpm = ctx.bpm > 0.0f ? ctx.bpm : 120.0f;
 
         int buf_size = static_cast<int>(delay_buf_[0].size());
 
         for (int i = 0; i < ctx.block_size; ++i) {
-            float dm = ps_delay ? delay_ctl->samples[i] : const_delay_ms;
+            float dm;
+            if (beat_sync) {
+                float db = ps_beats ? beats_ctl->samples[i] : const_beats;
+                db = std::clamp(db, 0.0f, 4.0f);
+                dm = db * 60000.0f / bpm;   // beats → ms at current bpm
+            } else {
+                dm = ps_ms ? ms_ctl->samples[i] : const_ms;
+            }
             dm = std::clamp(dm, 0.0f, 2000.0f);
             float delay_samples = dm * sample_rate_ / 1000.0f;
 

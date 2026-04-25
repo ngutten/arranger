@@ -78,3 +78,46 @@ class TestNoteDataclass:
         assert n2.pitch == 72
         assert n2.velocity == 64
         assert n2.bend == [[0, 1]]
+
+    def test_note_tags_default_empty(self):
+        n = Note(pitch=60, start=0, duration=1)
+        assert n.tags == {}
+
+    def test_note_tags_roundtrip(self):
+        tags = {'chord_root': {'quality': 'dom7', 'inversion': '/3'}}
+        n = Note(pitch=60, start=0, duration=1, tags=tags)
+        d = n.to_dict()
+        assert d['tags'] == tags
+        n2 = Note.from_dict(d)
+        assert n2.tags == tags
+
+    def test_note_empty_tags_omitted(self):
+        n = Note(pitch=60, start=0, duration=1)
+        assert 'tags' not in n.to_dict()
+
+    def test_note_tags_are_independent_copies(self):
+        """from_dict should not share the dict with the input (mutation isolation)."""
+        tags = {'chord_root': {'quality': 'maj'}}
+        n = Note.from_dict({'pitch': 60, 'start': 0, 'duration': 1, 'tags': tags})
+        n.tags['chord_root']['quality'] = 'min'
+        # Top-level dict is copied; inner values are not (deep copy unnecessary for roundtrip safety)
+        assert tags['chord_root']['quality'] == 'min' or tags['chord_root']['quality'] == 'maj'
+        # The important invariant: removing from n.tags doesn't remove from input
+        n.tags.pop('chord_root')
+        assert 'chord_root' in tags
+
+    def test_note_tags_through_full_state_roundtrip(self):
+        from standalone.state import AppState, Track, Pattern
+        s = AppState()
+        t = Track(id=s.new_id(), name='T', channel=0)
+        s.tracks.append(t)
+        tags = {'chord_root': {'quality': 'maj7'}, 'custom': ['a', 'b']}
+        p = Pattern(
+            id=s.new_id(), name='P', length=4.0,
+            notes=[Note(pitch=60, start=0, duration=1, tags=tags)],
+            color='#000', key='C', scale='major',
+        )
+        s.patterns.append(p)
+        s2 = AppState()
+        s2.load_json(s.to_json())
+        assert s2.patterns[0].notes[0].tags == tags

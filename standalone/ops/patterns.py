@@ -29,6 +29,7 @@ def duplicate_pattern(state, pid):
     pat = state.find_pattern(pid)
     if not pat:
         return None
+    import copy as _copy
     from ..state import Note
     new_pat = Pattern(
         id=state.new_id(),
@@ -37,7 +38,9 @@ def duplicate_pattern(state, pid):
         notes=[Note(pitch=n.pitch, start=n.start, duration=n.duration,
                     velocity=n.velocity,
                     bend=[list(p) for p in n.bend] if n.bend else [],
-                    lyric=n.lyric, note_id=state.new_id()) for n in pat.notes],
+                    lyric=n.lyric, note_id=state.new_id(),
+                    tags=_copy.deepcopy(n.tags) if n.tags else {})
+               for n in pat.notes],
         color=pat.color,
         key=pat.key,
         scale=pat.scale,

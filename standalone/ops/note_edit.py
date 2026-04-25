@@ -6,6 +6,8 @@ these functions take them as arguments and return results rather
 than mutating widget state directly.
 """
 
+import copy
+
 from ..state import Note
 
 
@@ -63,6 +65,7 @@ def duplicate_notes(pat, selected, clipboard_notes, offset_beats):
             velocity=note.velocity,
             bend=[list(p) for p in note.bend] if note.bend else [],
             lyric=note.lyric,
+            tags=copy.deepcopy(note.tags) if note.tags else {},
         )
         pat.notes.append(new_note)
         new_indices.append(len(pat.notes) - 1)
@@ -101,6 +104,7 @@ def commit_ghost_notes(pat, ghost_notes, beat, pitch, snap_fn,
             velocity=note.velocity,
             bend=[list(p) for p in note.bend] if note.bend else [],
             lyric=note.lyric,
+            tags=copy.deepcopy(note.tags) if note.tags else {},
         )
         pat.notes.append(new_note)
         new_indices.append(len(pat.notes) - 1)

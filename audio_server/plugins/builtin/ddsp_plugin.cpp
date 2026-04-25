@@ -289,7 +289,7 @@ public:
         PluginDescriptor d;
         d.id           = "builtin.ddsp";
         d.display_name = "DDSP Synth";
-        d.category     = "Synthesizer";
+        d.category     = "Synth";
         d.doc          = "Neural synthesizer using DDSP (Differentiable Digital Signal "
                          "Processing). A small ONNX neural network converts MIDI input "
                          "into parameters for an additive oscillator bank and filtered "

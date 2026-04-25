@@ -202,6 +202,9 @@ class Note:
     lyric: str = ''
     # Stable identity for variation diff tracking. 0 = unassigned.
     note_id: int = 0
+    # Free-form metadata keyed by namespace. Values must be JSON-serialisable.
+    # Descriptive only — never load-bearing for playback.
+    tags: dict = field(default_factory=dict)
 
     def to_dict(self):
         d = {'pitch': self.pitch, 'start': self.start,
@@ -212,6 +215,8 @@ class Note:
             d['lyric'] = self.lyric
         if self.note_id:
             d['noteId'] = self.note_id
+        if self.tags:
+            d['tags'] = self.tags
         return d
 
     @staticmethod
@@ -220,7 +225,8 @@ class Note:
                     duration=d['duration'], velocity=d.get('velocity', 100),
                     bend=d.get('bend', []),
                     lyric=d.get('lyric', ''),
-                    note_id=d.get('noteId', 0))
+                    note_id=d.get('noteId', 0),
+                    tags=dict(d.get('tags', {})))
 
 
 @dataclass
@@ -479,7 +485,12 @@ class AutomationTrack:
     ControlSource nodes in the signal graph reference automation tracks by ID.
     This is the inverse of the old design where tracks referenced nodes.
 
-    target: Optional special routing. "tempo" makes this track drive BPM.
+    target: Optional special routing.
+        "tempo"            — drives project BPM.
+        "output_gain:<N>"  — drives gain_N on the output mixer (N = 0-based
+                             audio input channel index).
+        None (default)     — track feeds control_source nodes in the graph
+                             that reference it by automation_track_id.
     """
     id: int
     name: str
@@ -537,6 +548,7 @@ class NoteDelta:
     d_velocity: int = 0
     bend: list = None      # None = inherit parent; list = override
     lyric: str = None       # None = inherit parent; str = override
+    tags: dict = None       # None = inherit parent; dict = full replacement
 
     def to_dict(self):
         d = {'noteId': self.note_id}
@@ -546,6 +558,7 @@ class NoteDelta:
         if self.d_velocity: d['dVelocity'] = self.d_velocity
         if self.bend is not None: d['bend'] = self.bend
         if self.lyric is not None: d['lyric'] = self.lyric
+        if self.tags is not None: d['tags'] = self.tags
         return d
 
     @staticmethod
@@ -558,6 +571,7 @@ class NoteDelta:
             d_velocity=d.get('dVelocity', 0),
             bend=d.get('bend'),
             lyric=d.get('lyric'),
+            tags=d.get('tags'),
         )
 
 
@@ -577,6 +591,7 @@ class AddedNote:
     ref_pitch_offset: int = None
     ref_start_offset: float = None
     ref_dur_offset: float = None
+    tags: dict = field(default_factory=dict)
 
     def to_dict(self):
         d = {'noteId': self.note_id, 'pitch': self.pitch, 'start': self.start,
@@ -588,6 +603,7 @@ class AddedNote:
         if self.ref_pitch_offset is not None: d['refPitchOffset'] = self.ref_pitch_offset
         if self.ref_start_offset is not None: d['refStartOffset'] = self.ref_start_offset
         if self.ref_dur_offset is not None: d['refDurOffset'] = self.ref_dur_offset
+        if self.tags: d['tags'] = self.tags
         return d
 
     @staticmethod
@@ -601,6 +617,7 @@ class AddedNote:
             ref_pitch_offset=d.get('refPitchOffset'),
             ref_start_offset=d.get('refStartOffset'),
             ref_dur_offset=d.get('refDurOffset'),
+            tags=dict(d.get('tags', {})),
         )
 
 
