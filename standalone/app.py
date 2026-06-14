@@ -22,6 +22,7 @@ from .ops import playback as play_ops
 from .ops import project_io
 from .core.sf2 import SF2Info, scan_directory
 from .core.midi import create_midi
+from .core.midi_load import import_midi as midi_import
 from .core.audio import render_fluidsynth, render_basic, AudioPlayer
 from .core.settings import Settings
 
@@ -447,6 +448,10 @@ class App(QMainWindow):
         open_act.setShortcut(QKeySequence.Open)  # Ctrl+O
         open_act.triggered.connect(self.load_project)
         file_menu.addAction(open_act)
+
+        imp_midi = QAction("&Import MIDI...", self)
+        imp_midi.triggered.connect(self.import_midi)
+        file_menu.addAction(imp_midi)
 
         save_act = QAction("&Save", self)
         save_act.setShortcut(QKeySequence.Save)  # Ctrl+S
@@ -1550,6 +1555,36 @@ class App(QMainWindow):
                 self._refresh_all()
             except Exception as e:
                 QMessageBox.critical(self, 'Error', f'Failed to load project: {e}')
+
+    def import_midi(self):
+        path, _ = QFileDialog.getOpenFileName(
+            None, 'Import MIDI', self.settings.get_recent_dir('project'),
+            'MIDI files (*.mid *.midi);;All files (*.*)',
+            options=QFileDialog.DontUseNativeDialog)
+        if not path:
+            return
+        self.settings.set_recent_dir('project', path)
+        try:
+            stats = midi_import(self.state, path, segment=True)
+        except Exception as e:
+            QMessageBox.critical(self, 'Error', f'Failed to import MIDI: {e}')
+            return
+        # Drop the loaded project path so the next Save prompts for a name.
+        self.state._project_path = None
+        self.piano_roll.clear_selection()
+        self.topbar.refresh()
+        self._ensure_graph_model()
+        if self._graph_editor_window is not None:
+            self._graph_editor_window._canvas.set_model(self.state.signal_graph)
+            self._graph_editor_window._canvas.frame_all()
+        self._refresh_all()
+        QMessageBox.information(
+            self, 'MIDI imported',
+            f"Loaded {stats['tracks']} track(s), "
+            f"{stats['patterns']} pattern(s), "
+            f"{stats['placements']} placement(s). "
+            f"Segmentation found repeats in {stats['segmented_tracks']} track(s).",
+        )
 
     def closeEvent(self, event):
         """Clean up audio engine on window close."""
