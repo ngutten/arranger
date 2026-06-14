@@ -99,6 +99,8 @@ public:
               ControlHint::Continuous, 1.0f, 0.0f, 1.0f, 0.0f, {}, "", false },
         };
 
+        d.note_attrs = { standard_attack_attr() };
+        d.config_params = { standard_attr_remap_param() };
         return d;
     }
 
@@ -117,6 +119,14 @@ public:
 
     void note_off(int channel, int pitch) override {
         vm_.release_note(channel, pitch);
+    }
+
+    void note_attr(int channel, int note, const std::string& id, float value) override {
+        vm_.set_pending_attr(channel, note, id.c_str(), value);
+    }
+
+    void configure(const std::string& key, const std::string& value) override {
+        if (key == "attr_remap") vm_.configure_attr_remap(value);
     }
 
     void all_notes_off(int channel) override {

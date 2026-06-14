@@ -280,6 +280,33 @@ def plugin_id_for_type(type_name: str) -> Optional[str]:
     return _legacy_type_to_plugin_id.get(type_name)
 
 
+def note_attrs_for_type(type_or_id: str) -> list[dict]:
+    """Per-note attribute declarations advertised by a node type's plugin.
+
+    Returns the list of {id, display_name, hint, default, min, max, choices?}
+    dicts, or [] for non-synth / unknown nodes.
+    """
+    desc = get_plugin_descriptor(type_or_id)
+    return list(desc.get("note_attrs", [])) if desc else []
+
+
+def note_attrs_in_graph(model) -> list[dict]:
+    """Union of note-attr declarations across every node in *model*'s graph.
+
+    This is what the piano roll offers as editable lanes: an attribute appears
+    if any synth in the current signal graph consumes it.  Deduplicated by id,
+    preserving first-seen order.  Returns [] if model is None.
+    """
+    if model is None:
+        return []
+    seen: dict[str, dict] = {}
+    for node in getattr(model, "nodes", []):
+        for na in note_attrs_for_type(node.node_type):
+            if na["id"] not in seen:
+                seen[na["id"]] = na
+    return list(seen.values())
+
+
 def _plugin_ports_from_descriptor(desc: dict, params: dict) -> list["PortDef"]:
     """Derive PortDef list from a plugin descriptor dict.
 

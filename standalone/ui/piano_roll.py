@@ -1,6 +1,7 @@
 """Piano roll editor - note editing on a pitch/time grid."""
 
 import time
+import math
 
 from PySide6.QtWidgets import (QFrame, QWidget, QScrollArea, QLabel, QPushButton,
                                 QComboBox, QSlider, QVBoxLayout, QHBoxLayout,
@@ -67,6 +68,12 @@ class PianoRoll(QFrame):
         # Bend tool state
         self._bend_drag_note = None   # Note currently being edited in bend mode
         self._bend_drag_point_idx = None  # index of control point being dragged, or None
+
+        # Bottom-lane mode: 'velocity' or a note-attr id (e.g. 'attack').
+        # The set of available attr lanes is derived from the synths present in
+        # the current signal graph (see _refresh_lane_options).
+        self._active_lane = 'velocity'
+        self._active_attr_decl = None  # decl dict for the active attr lane, if any
 
         # MIDI recording state
         self._rec_midi_in = None       # rtmidi.MidiIn instance while armed/recording
@@ -204,6 +211,7 @@ class PianoRoll(QFrame):
                         a.start = n.start
                         a.duration = n.duration
                         a.velocity = n.velocity
+                        a.attrs = dict(n.attrs or {})
                         # Update binding offsets relative to current resolved ref
                         if a.ref_note_id:
                             ref = next((rn for rn in notes if rn.note_id == a.ref_note_id), None)
@@ -244,6 +252,10 @@ class PianoRoll(QFrame):
                     variation_modify_note(var, n.note_id,
                                           d_start=d_start, d_duration=d_duration,
                                           d_pitch=d_pitch, d_velocity=d_velocity)
+                # Per-note attrs: store an override delta when they diverge
+                # from the parent (None on the delta = inherit).
+                if (n.attrs or {}) != (pn.attrs or {}):
+                    variation_modify_note(var, n.note_id, attrs=dict(n.attrs or {}))
 
     def _build(self):
         layout = QVBoxLayout(self)
@@ -307,6 +319,14 @@ class PianoRoll(QFrame):
         self.vel_label = QLabel('100')
         self.vel_label.setMinimumWidth(30)
         hdr_layout.addWidget(self.vel_label)
+
+        # Bottom-lane selector: Velocity (default) or a per-note attribute lane
+        # advertised by a synth in the current signal graph.
+        hdr_layout.addWidget(QLabel('Lane'))
+        self.lane_cb = QComboBox()
+        self.lane_cb.setMinimumWidth(90)
+        self.lane_cb.currentIndexChanged.connect(self._on_lane_change)
+        hdr_layout.addWidget(self.lane_cb)
 
         # MIDI record button
         self.rec_btn = QPushButton('Rec')
@@ -380,9 +400,54 @@ class PianoRoll(QFrame):
         )
 
         self.setFocusPolicy(Qt.StrongFocus)
-        
+        self._refresh_lane_options()
+
     def _on_note_len(self, text):
         self.state.note_len = text
+
+    # -- Bottom-lane (velocity / note-attr) handling ----------------------
+
+    def _refresh_lane_options(self):
+        """Rebuild the lane dropdown from the synths in the current graph.
+
+        Always offers 'Velocity'; appends one entry per per-note attribute any
+        synth in the signal graph consumes. Preserves the active lane if it's
+        still available, else falls back to velocity.
+        """
+        try:
+            from ..graph_editor import note_attrs_in_graph
+            attrs = note_attrs_in_graph(getattr(self.state, 'signal_graph', None))
+        except Exception:
+            attrs = []
+        # Skip the rebuild (and its signal churn) when the lane set is unchanged.
+        sig = tuple(a['id'] for a in attrs)
+        if sig == getattr(self, '_lane_sig', None):
+            return
+        self._lane_sig = sig
+        self._lane_attrs = {a['id']: a for a in attrs}
+
+        cb = self.lane_cb
+        cb.blockSignals(True)
+        cb.clear()
+        cb.addItem('Velocity', 'velocity')
+        for a in attrs:
+            cb.addItem(a.get('display_name', a['id']), a['id'])
+        # Restore selection if still present
+        want = self._active_lane
+        idx = cb.findData(want)
+        if idx < 0:
+            idx = 0
+            self._active_lane = 'velocity'
+            self._active_attr_decl = None
+        cb.setCurrentIndex(idx)
+        self._active_attr_decl = self._lane_attrs.get(self._active_lane)
+        cb.blockSignals(False)
+
+    def _on_lane_change(self, _idx):
+        self._active_lane = self.lane_cb.currentData() or 'velocity'
+        self._active_attr_decl = getattr(self, '_lane_attrs', {}).get(self._active_lane)
+        if hasattr(self, 'vel_widget'):
+            self.vel_widget.update()
 
     def _set_tool(self, tool):
         self.state.tool = tool
@@ -546,7 +611,8 @@ class PianoRoll(QFrame):
             self.name_label.setText('No pattern')
 
         self._update_tool_buttons()
-        
+        self._refresh_lane_options()
+
         # Update widget sizes
         pitch_range = self.HI - self.LO + 1
         total_h = pitch_range * self.NH
@@ -2352,78 +2418,163 @@ class PianoGridWidget(QWidget):
         painter.drawLine(int(ax), int(ay - 6), int(ax), int(ay + 6))
 
 
+# Distinct swatch colors for categorical note-attr choices (cycled by index).
+_ATTR_CHOICE_COLORS = ['#4d96ff', '#e84393', '#00b894', '#fdcb6e',
+                       '#a29bfe', '#ff7675', '#55efc4', '#fab1a0']
+
+
+def _attr_log_norm(decl, value):
+    """Map a continuous attr value to [0,1] in log space around its range."""
+    lo = max(1e-4, float(decl.get('min', 0.125)))
+    hi = max(lo * 1.0001, float(decl.get('max', 8.0)))
+    v = min(hi, max(lo, float(value)))
+    return (math.log(v) - math.log(lo)) / (math.log(hi) - math.log(lo))
+
+
+def _attr_value_from_norm(decl, norm):
+    """Inverse of _attr_log_norm: [0,1] → value in the decl's range."""
+    lo = max(1e-4, float(decl.get('min', 0.125)))
+    hi = max(lo * 1.0001, float(decl.get('max', 8.0)))
+    norm = min(1.0, max(0.0, norm))
+    return math.exp(math.log(lo) + norm * (math.log(hi) - math.log(lo)))
+
+
 class VelocityWidget(QWidget):
-    """Velocity lane at bottom."""
+    """Bottom lane: edits velocity, or a per-note attribute when one is the
+    active lane (selected via the piano roll's Lane dropdown)."""
 
     def __init__(self, parent):
         super().__init__(parent)
         self.parent_roll = parent
         self._vel_dragging = False
 
+    # -- input -----------------------------------------------------------
+
     def mousePressEvent(self, event):
+        if event.button() == Qt.RightButton:
+            # Right-click clears a note-attr override (back to synth default).
+            if self.parent_roll._active_lane != 'velocity':
+                self._clear_attr_at(event)
+            return
         if event.button() == Qt.LeftButton:
             self._vel_dragging = True
-            self._set_vel_at(event)
+            self._edit_at(event, is_press=True)
 
     def mouseMoveEvent(self, event):
         if self._vel_dragging:
-            self._set_vel_at(event)
+            self._edit_at(event, is_press=False)
 
     def mouseReleaseEvent(self, event):
         self._vel_dragging = False
+
+    def _target_indices(self, notes, event):
+        """Note indices to edit: the selection if any, else the nearest note."""
+        if self.parent_roll._selected:
+            return [i for i in self.parent_roll._selected if 0 <= i < len(notes)]
+        scroll_off = self.parent_roll.scroll_area.horizontalScrollBar().value()
+        beat = (event.pos().x() + scroll_off) / self.parent_roll.BW
+        best, best_dist = -1, float('inf')
+        for i, n in enumerate(notes):
+            d = abs(beat - n.start)
+            if d < best_dist and d < 0.5:
+                best_dist, best = d, i
+        return [best] if best >= 0 else []
+
+    def _edit_at(self, event, is_press):
+        lane = self.parent_roll._active_lane
+        if lane == 'velocity':
+            self._set_vel_at(event)
+        else:
+            self._set_attr_at(event, is_press)
 
     def _set_vel_at(self, event):
         notes = self.parent_roll._get_edit_notes()
         if not notes:
             return
-
-        x = event.pos().x()
-        y = event.pos().y()
-        vel = max(1, min(127, int((1 - y / 48) * 127)))
-
-        # If notes are selected, update all of them
-        if self.parent_roll._selected:
-            for idx in self.parent_roll._selected:
-                if 0 <= idx < len(notes):
-                    notes[idx].velocity = vel
-            if self.parent_roll._is_variation_mode():
-                self.parent_roll._persist_variation_edits()
-            self.parent_roll.vel_slider.setValue(vel)
-            self.parent_roll.refresh()
+        vel = max(1, min(127, int((1 - event.pos().y() / 48) * 127)))
+        targets = self._target_indices(notes, event)
+        if not targets:
             return
+        for idx in targets:
+            notes[idx].velocity = vel
+        if self.parent_roll._is_variation_mode():
+            self.parent_roll._persist_variation_edits()
+        if self.parent_roll._selected:
+            self.parent_roll.vel_slider.setValue(vel)
+        self.parent_roll.refresh()
 
-        # Otherwise, find nearest note
-        scroll_off = self.parent_roll.scroll_area.horizontalScrollBar().value()
-        beat = (x + scroll_off) / self.parent_roll.BW
+    def _set_attr_at(self, event, is_press):
+        decl = self.parent_roll._active_attr_decl
+        if not decl:
+            return
+        notes = self.parent_roll._get_edit_notes()
+        if not notes:
+            return
+        targets = self._target_indices(notes, event)
+        if not targets:
+            return
+        attr_id = decl['id']
+        is_categorical = decl.get('hint') == 'categorical'
 
-        best = -1
-        best_dist = float('inf')
-        for i, n in enumerate(notes):
-            d = abs(beat - n.start)
-            if d < best_dist and d < 0.5:
-                best_dist = d
-                best = i
+        if is_categorical:
+            # Click cycles to the next choice; drag does nothing further.
+            if not is_press:
+                return
+            n_choices = max(1, len(decl.get('choices', [])))
+            for idx in targets:
+                cur = notes[idx].attrs.get(attr_id)
+                nxt = 0 if cur is None else (int(round(cur)) + 1) % n_choices
+                notes[idx].attrs[attr_id] = float(nxt)
+        else:
+            value = _attr_value_from_norm(decl, 1 - event.pos().y() / 48)
+            default = float(decl.get('default', 1.0))
+            # Snap to neutral near the default and drop the key entirely.
+            neutral = abs(math.log(max(1e-4, value)) - math.log(max(1e-4, default))) < 0.04
+            for idx in targets:
+                if neutral:
+                    notes[idx].attrs.pop(attr_id, None)
+                else:
+                    notes[idx].attrs[attr_id] = value
 
-        if best >= 0:
-            notes[best].velocity = vel
+        if self.parent_roll._is_variation_mode():
+            self.parent_roll._persist_variation_edits()
+        self.parent_roll.refresh()
+
+    def _clear_attr_at(self, event):
+        decl = self.parent_roll._active_attr_decl
+        if not decl:
+            return
+        notes = self.parent_roll._get_edit_notes()
+        if not notes:
+            return
+        targets = self._target_indices(notes, event)
+        changed = False
+        for idx in targets:
+            if notes[idx].attrs.pop(decl['id'], None) is not None:
+                changed = True
+        if changed:
             if self.parent_roll._is_variation_mode():
                 self.parent_roll._persist_variation_edits()
             self.parent_roll.refresh()
+
+    # -- paint -----------------------------------------------------------
 
     def paintEvent(self, event):
         painter = QPainter(self)
-
         pat = self.parent_roll._get_edit_pattern()
-        beats = pat.length if pat else 16
         total_w = self.width()
-
         painter.fillRect(self.rect(), QColor('#12121f'))
         painter.setPen(QPen(QColor('#2a2a4a'), 0.5))
         painter.drawLine(0, 25, total_w, 25)
-
         if not pat:
             return
 
+        if self.parent_roll._active_lane == 'velocity':
+            self._paint_velocity(painter)
+        else:
+            self._paint_attr(painter)
+
+    def _paint_velocity(self, painter):
         notes = self.parent_roll._get_edit_notes()
         bw = max(3, self.parent_roll.state.snap * self.parent_roll.BW * 0.6)
         scroll_off = self.parent_roll.scroll_area.horizontalScrollBar().value()
@@ -2431,9 +2582,55 @@ class VelocityWidget(QWidget):
             x = n.start * self.parent_roll.BW + 2 - scroll_off
             h = n.velocity / 127 * 46
             color = QColor('#fff') if i in self.parent_roll._selected else QColor(vel_color(n.velocity))
-            
             painter.setPen(Qt.NoPen)
             painter.setBrush(color)
             painter.drawRect(int(x), int(48 - h), int(bw), int(h))
+
+    def _paint_attr(self, painter):
+        decl = self.parent_roll._active_attr_decl
+        if not decl:
+            return
+        attr_id = decl['id']
+        is_categorical = decl.get('hint') == 'categorical'
+        choices = decl.get('choices', [])
+        notes = self.parent_roll._get_edit_notes()
+        bw = max(3, self.parent_roll.state.snap * self.parent_roll.BW * 0.6)
+        scroll_off = self.parent_roll.scroll_area.horizontalScrollBar().value()
+
+        # Neutral reference line for continuous lanes (the default multiplier).
+        if not is_categorical:
+            nh = _attr_log_norm(decl, float(decl.get('default', 1.0))) * 46
+            painter.setPen(QPen(QColor('#3a3a5a'), 1, Qt.DashLine))
+            painter.drawLine(0, int(48 - nh), self.width(), int(48 - nh))
+
+        font = QFont('Segoe UI', 6)
+        painter.setFont(font)
+        for i, n in enumerate(notes):
+            x = n.start * self.parent_roll.BW + 2 - scroll_off
+            val = n.attrs.get(attr_id)
+            sel = i in self.parent_roll._selected
+            if is_categorical:
+                if val is None:
+                    # Unset → faint outline (note uses the synth's param default).
+                    painter.setPen(QPen(QColor('#444'), 1))
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawRect(int(x), 30, int(bw), 14)
+                    continue
+                ci = int(round(val)) % max(1, len(_ATTR_CHOICE_COLORS))
+                col = QColor(_ATTR_CHOICE_COLORS[ci])
+                painter.setPen(QPen(QColor('#fff'), 1) if sel else Qt.NoPen)
+                painter.setBrush(col)
+                painter.drawRect(int(x), 12, int(bw), 32)
+                if int(bw) >= 10 and 0 <= int(round(val)) < len(choices):
+                    painter.setPen(QPen(QColor('#000')))
+                    painter.drawText(int(x) + 1, 40, choices[int(round(val))][:3])
+            else:
+                if val is None:
+                    continue  # neutral — nothing drawn (uses default)
+                h = _attr_log_norm(decl, val) * 46
+                col = QColor('#fff') if sel else QColor('#4d96ff')
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(col)
+                painter.drawRect(int(x), int(48 - h), int(bw), int(h))
 
 

@@ -212,6 +212,9 @@ void TrackSourceNode::channel_volume(int channel, int volume) {
 void TrackSourceNode::note_tune(int channel, int note, float semitones) {
     for (auto* n : downstream_) n->note_tune(channel, note, semitones);
 }
+void TrackSourceNode::note_attr(int channel, int note, const std::string& id, float value) {
+    for (auto* n : downstream_) n->note_attr(channel, note, id, value);
+}
 void TrackSourceNode::all_notes_off(int channel) {
     for (auto* n : downstream_) n->all_notes_off(channel);
 }

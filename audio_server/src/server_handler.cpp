@@ -324,6 +324,27 @@ json ServerHandler::dispatch(const std::string& cmd, const json& req) {
             }
             jp["config_params"] = config_params;
 
+            json note_attrs = json::array();
+            for (auto& na : desc->note_attrs) {
+                json jna;
+                jna["id"]           = na.id;
+                jna["display_name"] = na.display_name;
+                jna["doc"]          = na.doc;
+                switch (na.hint) {
+                    case ControlHint::Categorical: jna["hint"] = "categorical"; break;
+                    case ControlHint::Toggle:      jna["hint"] = "toggle";      break;
+                    case ControlHint::Integer:     jna["hint"] = "integer";     break;
+                    default:                       jna["hint"] = "continuous";  break;
+                }
+                jna["default"] = na.default_value;
+                jna["min"]     = na.min_value;
+                jna["max"]     = na.max_value;
+                if (!na.choices.empty())
+                    jna["choices"] = na.choices;
+                note_attrs.push_back(jna);
+            }
+            jp["note_attrs"] = note_attrs;
+
             json presets = json::array();
             for (auto& ps : desc->presets) {
                 json jps;

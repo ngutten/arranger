@@ -205,6 +205,11 @@ class Note:
     # Free-form metadata keyed by namespace. Values must be JSON-serialisable.
     # Descriptive only — never load-bearing for playback.
     tags: dict = field(default_factory=dict)
+    # Per-note attributes (load-bearing): {attr_id: float}. Onset-latched values
+    # delivered to the synth as NoteAttr events. Continuous attrs (e.g. 'attack')
+    # multiply the synth param (neutral 1.0); categorical attrs (e.g. 'excitation')
+    # override it. Absent attr = synth default. See note_attr_latch.h (C++ side).
+    attrs: dict = field(default_factory=dict)
 
     def to_dict(self):
         d = {'pitch': self.pitch, 'start': self.start,
@@ -217,6 +222,8 @@ class Note:
             d['noteId'] = self.note_id
         if self.tags:
             d['tags'] = self.tags
+        if self.attrs:
+            d['attrs'] = self.attrs
         return d
 
     @staticmethod
@@ -226,7 +233,8 @@ class Note:
                     bend=d.get('bend', []),
                     lyric=d.get('lyric', ''),
                     note_id=d.get('noteId', 0),
-                    tags=dict(d.get('tags', {})))
+                    tags=dict(d.get('tags', {})),
+                    attrs=dict(d.get('attrs', {})))
 
 
 @dataclass
@@ -549,6 +557,7 @@ class NoteDelta:
     bend: list = None      # None = inherit parent; list = override
     lyric: str = None       # None = inherit parent; str = override
     tags: dict = None       # None = inherit parent; dict = full replacement
+    attrs: dict = None      # None = inherit parent; dict = full replacement
 
     def to_dict(self):
         d = {'noteId': self.note_id}
@@ -559,6 +568,7 @@ class NoteDelta:
         if self.bend is not None: d['bend'] = self.bend
         if self.lyric is not None: d['lyric'] = self.lyric
         if self.tags is not None: d['tags'] = self.tags
+        if self.attrs is not None: d['attrs'] = self.attrs
         return d
 
     @staticmethod
@@ -572,6 +582,7 @@ class NoteDelta:
             bend=d.get('bend'),
             lyric=d.get('lyric'),
             tags=d.get('tags'),
+            attrs=d.get('attrs'),
         )
 
 
@@ -592,6 +603,7 @@ class AddedNote:
     ref_start_offset: float = None
     ref_dur_offset: float = None
     tags: dict = field(default_factory=dict)
+    attrs: dict = field(default_factory=dict)
 
     def to_dict(self):
         d = {'noteId': self.note_id, 'pitch': self.pitch, 'start': self.start,
@@ -604,6 +616,7 @@ class AddedNote:
         if self.ref_start_offset is not None: d['refStartOffset'] = self.ref_start_offset
         if self.ref_dur_offset is not None: d['refDurOffset'] = self.ref_dur_offset
         if self.tags: d['tags'] = self.tags
+        if self.attrs: d['attrs'] = self.attrs
         return d
 
     @staticmethod
@@ -618,6 +631,7 @@ class AddedNote:
             ref_start_offset=d.get('refStartOffset'),
             ref_dur_offset=d.get('refDurOffset'),
             tags=dict(d.get('tags', {})),
+            attrs=dict(d.get('attrs', {})),
         )
 
 

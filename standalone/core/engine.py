@@ -229,6 +229,7 @@ EVT_PROGRAM = 2
 EVT_VOLUME = 3
 EVT_BEND = 4      # pitch bend; pitch=14-bit value (0-16383, center=8192)
 EVT_NOTE_TUNE = 6  # per-note pitch offset; pitch=note number, value=semitones (float)
+EVT_NOTE_ATTR = 7  # per-note attribute; pitch=note, attr=attr id, value=float
 
 @dataclass(slots=True)
 class SchedEvent:
@@ -242,9 +243,11 @@ class SchedEvent:
     #   PROGRAM:    pitch=program, velocity=bank
     #   VOLUME:     pitch=volume, velocity=0
     #   NOTE_TUNE:  pitch=note number, value=semitones (float)
+    #   NOTE_ATTR:  pitch=note number, attr=attr id, value=float
     pitch: int = 0
     velocity: int = 0
     value: float = 0.0
+    attr: str = ''
 
 
 _BEND_CENTER = 8192
@@ -488,6 +491,11 @@ def build_schedule(state) -> list[SchedEvent]:
                 events.append(SchedEvent(beat=off_beat, event_type=EVT_NOTE_OFF,
                                          channel=note_ch, pitch=p))
 
+                for attr_id, attr_val in (n.attrs or {}).items():
+                    events.append(SchedEvent(beat=on_beat, event_type=EVT_NOTE_ATTR,
+                                             channel=note_ch, pitch=p,
+                                             value=float(attr_val), attr=attr_id))
+
     # Beat placements (no bend support — drums don't bend)
     for bp in state.beat_placements:
         bt = state.find_beat_track(bp.track_id)
@@ -515,7 +523,7 @@ def build_schedule(state) -> list[SchedEvent]:
 
     # Sort: by beat, then: note-offs, tune/bend/prog/vol, note-ons
     _order = {EVT_NOTE_OFF: 0, EVT_NOTE_TUNE: 1, EVT_BEND: 1,
-              EVT_PROGRAM: 1, EVT_VOLUME: 1, EVT_NOTE_ON: 2}
+              EVT_PROGRAM: 1, EVT_VOLUME: 1, EVT_NOTE_ATTR: 1, EVT_NOTE_ON: 2}
     events.sort(key=lambda e: (e.beat, _order.get(e.event_type, 1)))
     return events
 

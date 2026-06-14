@@ -45,6 +45,7 @@ std::unique_ptr<Schedule> Schedule::from_json(const std::string& j_str, std::str
         else if (type_str == "bend")     evt.type = EventType::Bend;
         else if (type_str == "control")    evt.type = EventType::Control;
         else if (type_str == "note_tune")  evt.type = EventType::NoteTune;
+        else if (type_str == "note_attr")  evt.type = EventType::NoteAttr;
         else {
             err = "Unknown event type: " + type_str;
             return nullptr;
@@ -63,6 +64,7 @@ std::unique_ptr<Schedule> Schedule::from_json(const std::string& j_str, std::str
             case EventType::Volume:   return 1;
             case EventType::Control:  return 1;
             case EventType::NoteTune: return 1;
+            case EventType::NoteAttr: return 1;   // before NoteOn so it latches first
             case EventType::NoteOn:   return 2;
             default:                  return 1;
         }
@@ -165,6 +167,9 @@ void Dispatcher::dispatch(double start_beat, double end_beat, Graph* graph) {
                         break;
                     case EventType::NoteTune:
                         node->note_tune(e.channel, e.pitch, e.value);
+                        break;
+                    case EventType::NoteAttr:
+                        node->note_attr(e.channel, e.pitch, e.port_id, e.value);
                         break;
                 }
             }

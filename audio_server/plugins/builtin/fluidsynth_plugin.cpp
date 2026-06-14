@@ -9,6 +9,7 @@
 #ifdef AS_ENABLE_SF2
 
 #include "plugin_api.h"
+#include "note_attr_latch.h"
 #include <fluidsynth.h>
 #include <algorithm>
 #include <cmath>
@@ -174,13 +175,17 @@ public:
             { "force_octave", "Force 2/1 Octave",
               "Force octave repetition at 2/1 (1200 cents) even if the scale specifies otherwise.",
               ConfigType::Bool, "true" },
+            standard_attr_remap_param(),
         };
 
+        d.note_attrs = { standard_attack_attr() };
         return d;
     }
 
     void configure(const std::string& key, const std::string& value) override {
-        if (key == "sf2_path") {
+        if (key == "attr_remap") {
+            attr_remap_.parse(value);
+        } else if (key == "sf2_path") {
             sf2_path_ = value;
             if (fs_) reload_sf2();
         } else if (key == "scl_path") {
@@ -228,8 +233,29 @@ public:
 
     void deactivate() override { teardown(); }
 
+    void note_attr(int ch, int note, const std::string& id, float value) override {
+        pending_attrs_.set(ch, note, attr_remap_.apply(id.c_str()), value);
+    }
+
     void note_on(int ch, int pitch, int vel) override {
-        if (fs_) fluid_synth_noteon(fs_, ch, pitch, vel);
+        if (!fs_) return;
+
+        // Apply any latched note-attrs for this (ch,pitch) just before the
+        // note triggers.  "attack" is a multiplier on the instrument's
+        // designed attack; SoundFont attack lives in timecents (logarithmic
+        // time), so multiplying time == adding timecents:
+        //   offset_tc = 1200*log2(mul).  0 = neutral (use the preset value).
+        // set_gen also nudges already-sounding voices, but they are past their
+        // attack phase so the change is inaudible.
+        if (ch >= 0 && ch < 16) {
+            NoteAttrSet attrs;
+            pending_attrs_.take(ch, pitch, attrs);
+            float mul = attrs.get_or("attack", 1.0f);
+            float tc  = (mul > 0.0f) ? 1200.0f * std::log2(mul) : 0.0f;
+            fluid_synth_set_gen(fs_, ch, GEN_VOLENVATTACK, tc);
+        }
+
+        fluid_synth_noteon(fs_, ch, pitch, vel);
     }
 
     void note_off(int ch, int pitch) override {
@@ -318,6 +344,10 @@ private:
 
     // Per-note, per-channel bend offset in cents (from note_tune events)
     double bend_cents_[16][128] = {};
+
+    // Note-attrs awaiting their note-on (see note_attr_latch.h).
+    PendingAttrStore pending_attrs_;
+    AttrRemap        attr_remap_;
 
     // ---------------------------------------------------------------------------
     // Scale / tuning helpers

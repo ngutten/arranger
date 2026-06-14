@@ -24,6 +24,8 @@ enum class EventType : uint8_t {
     Bend        = 4,   // pitch=14-bit bend value (8192=center)
     Control     = 5,   // value=normalized 0..1, delivered to control_source node
     NoteTune    = 6,   // per-note pitch offset; channel=ch, pitch=note, value=semitones (float)
+    NoteAttr    = 7,   // per-note attribute; channel=ch, pitch=note, port_id=attr id, value=float.
+                       // Latched at note-on by the consuming synth (see note_attr_latch.h).
 };
 
 struct SchedEvent {

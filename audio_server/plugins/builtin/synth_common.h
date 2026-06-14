@@ -10,6 +10,7 @@
 //   - VoiceManager<Ext> : 32-voice polyphony with stealing, pitch-delta computation
 
 #include "adsr.h"
+#include "note_attr_latch.h"
 
 #include <algorithm>
 #include <cassert>
@@ -59,6 +60,10 @@ struct SynthVoice {
 
     // Tremolo phase for pitch-delta oscillation
     double tremolo_phase = 0.0;
+
+    // Per-note attributes latched at note-on (see note_attr_latch.h).
+    // Continuous attrs multiply a param; categorical attrs override one.
+    NoteAttrSet attrs;
 
     // Plugin-specific extension
     VoiceExt ext;
@@ -112,6 +117,20 @@ public:
     float last_note_pitch[16] = {};
     bool  has_last_note[16]   = {};
 
+    // Note-attrs that have arrived but whose note-on has not yet fired.
+    PendingAttrStore pending_attrs_;
+
+    // Optional re-targeting of incoming attr ids (from the "attr_remap" config).
+    AttrRemap attr_remap_;
+    void configure_attr_remap(const std::string& spec) { attr_remap_.parse(spec); }
+
+    // Record an incoming note_attr event.  Call from the plugin's
+    // note_attr() override; it is drained into the voice at trigger().
+    // The id is re-targeted through attr_remap_ first (no-op by default).
+    void set_pending_attr(int channel, int pitch, const char* id, float value) {
+        pending_attrs_.set(channel, pitch, attr_remap_.apply(id), value);
+    }
+
     // -----------------------------------------------------------------------
     // Lifecycle
     // -----------------------------------------------------------------------
@@ -124,6 +143,7 @@ public:
             last_note_pitch[i] = 0.0f;
             has_last_note[i] = false;
         }
+        pending_attrs_.clear();
     }
 
     // -----------------------------------------------------------------------
@@ -249,7 +269,17 @@ public:
         last_note_pitch[ch] = p;
         has_last_note[ch] = true;
 
-        v->env.trigger(sample_rate, attack, decay, sustain, release);
+        // Drain any note-attrs that arrived just before this note-on.
+        pending_attrs_.take(channel, pitch, v->attrs);
+
+        // "attack" is the universal continuous attr: a multiplier (neutral 1.0)
+        // on the synth's configured/control-driven attack.  Composes as
+        // effective = base_attack * note_attr, matching the FluidSynth path.
+        float eff_attack = attack;
+        if (const float* m = v->attrs.get("attack"))
+            eff_attack = std::max(0.0001f, attack * (*m));
+
+        v->env.trigger(sample_rate, eff_attack, decay, sustain, release);
 
         return v;
     }

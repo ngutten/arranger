@@ -138,6 +138,48 @@ struct Preset {
     std::map<std::string, float> port_values;
 };
 
+/// Declares a per-note attribute the plugin consumes (see note_attr_latch.h).
+/// Advertised so the UI can offer an editing lane and the right control type.
+/// Composition is implied by `hint`:
+///   Continuous  -> the attr value MULTIPLIES the bound param (neutral 1.0).
+///   Categorical -> the attr value OVERRIDES the bound param (one-of choices).
+struct NoteAttrDecl {
+    std::string id;            ///< Matches Note.attrs key / NoteAttr port_id.
+    std::string display_name;
+    std::string doc;
+    ControlHint hint          = ControlHint::Continuous;
+    float       default_value = 1.0f;   ///< Neutral value (1.0 for multipliers).
+    float       min_value     = 0.25f;
+    float       max_value     = 4.0f;
+    std::vector<std::string> choices;   ///< Labels for Categorical attrs.
+};
+
+/// The standard "attack" attribute: a multiplier on the synth's configured
+/// attack, shared by every ADSR-based synth.  Range is symmetric in log space
+/// around the neutral 1.0 (×0.125 .. ×8).
+inline NoteAttrDecl standard_attack_attr() {
+    return NoteAttrDecl{
+        "attack", "Attack",
+        "Per-note multiplier on the instrument's attack time (1.0 = unchanged).",
+        ControlHint::Continuous, 1.0f, 0.125f, 8.0f, {}
+    };
+}
+
+/// Standard config param for re-targeting note attributes onto the slots a
+/// synth consumes (name-based binding + optional remap).  Format: a comma list
+/// of "src:dst" rules, e.g. "swell:attack" feeds a 'swell' lane into 'attack'.
+inline ConfigParam standard_attr_remap_param() {
+    ConfigParam cp;
+    cp.id            = "attr_remap";
+    cp.display_name  = "Attr Remap";
+    cp.doc           = "Re-target note attributes, e.g. 'swell:attack'. "
+                       "Comma-separated src:dst rules.";
+    cp.type          = ConfigType::String;
+    cp.default_value = "";
+    cp.advanced      = true;
+    return cp;
+}
+
 struct PluginDescriptor {
     std::string   id;
     std::string   display_name;
@@ -146,9 +188,10 @@ struct PluginDescriptor {
     std::string   author;
     int           version = 1;
 
-    std::vector<PortDescriptor> ports;
-    std::vector<ConfigParam>    config_params;
-    std::vector<Preset>         presets;
+    std::vector<PortDescriptor>  ports;
+    std::vector<ConfigParam>     config_params;
+    std::vector<Preset>          presets;
+    std::vector<NoteAttrDecl>    note_attrs;   ///< Per-note attributes consumed.
 };
 
 // ==========================================================================
@@ -305,6 +348,14 @@ public:
     virtual void control_change(int channel, int cc, int value) { (void)channel; (void)cc; (void)value; }
     virtual void channel_volume(int channel, int volume) { (void)channel; (void)volume; }
     virtual void note_tune(int channel, int note, float semitones) { (void)channel; (void)note; (void)semitones; }
+
+    /// Per-note attribute, delivered just before the matching note_on.
+    /// `id` names the attribute (e.g. "attack", "excitation").  The plugin
+    /// should stash it (keyed by channel,pitch) and latch it onto the voice
+    /// triggered by the following note_on.  See note_attr_latch.h.
+    virtual void note_attr(int channel, int note, const std::string& id, float value) {
+        (void)channel; (void)note; (void)id; (void)value;
+    }
 
     virtual void on_transport_stop() {}
 

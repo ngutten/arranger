@@ -31,6 +31,7 @@ public:
     void pitch_bend(int channel, int value) override;
     void channel_volume(int channel, int volume) override;
     void note_tune(int channel, int note, float semitones) override;
+    void note_attr(int channel, int note, const std::string& id, float value) override;
     void push_control(double beat, float normalized_value) override;
 
     Plugin* plugin() { return plugin_.get(); }

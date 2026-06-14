@@ -82,6 +82,13 @@ def _build_schedule_from_arr(arr: dict, fallback_node_id: str) -> List[dict]:
                         "channel": ch, "pitch": p, "velocity": 0, "value": 0.0,
                     })
 
+                    for attr_id, attr_val in (n.get("attrs") or {}).items():
+                        events.append({
+                            "beat": on_beat, "type": "note_attr", "node_id": node_id,
+                            "channel": ch, "pitch": p, "velocity": 0,
+                            "value": float(attr_val), "port_id": attr_id,
+                        })
+
                     bend = n.get("bend")
                     if bend:
                         tune_sched: list[SchedEvent] = []
@@ -212,6 +219,17 @@ def _build_server_schedule(state) -> list[dict]:
                     "node_id": node_id, "channel": ch,
                     "pitch": p, "velocity": 0, "value": 0.0,
                 })
+
+                # Per-note attributes — onset-latched; the scheduler sorts these
+                # ahead of the note_on at the same beat so the synth latches them
+                # before triggering the voice. port_id carries the attr id.
+                for attr_id, attr_val in (n.attrs or {}).items():
+                    events.append({
+                        "beat": on_beat, "type": "note_attr",
+                        "node_id": node_id, "channel": ch,
+                        "pitch": p, "velocity": 0, "value": float(attr_val),
+                        "port_id": attr_id,
+                    })
 
                 if n.bend:
                     # Emit per-note tune events — FluidSynth applies them

@@ -68,6 +68,9 @@ struct WaveguideExt {
     // Excitation
     int   exc_remaining = 0;
     float exc_level = 1.0f;
+    // Per-note excitation override from the "excitation" note-attr:
+    // 0=Pluck, 1=Strike, -1=use the block-level Excitation param.
+    int   excitation_mode = -1;
 
     // Excitation comb buffer for pick-position effect
     float exc_buf[EXC_BUF_SIZE] = {};
@@ -169,6 +172,13 @@ public:
               ControlHint::Continuous, 0.15f, 0.001f, 0.5f, 0.0f, {}, "", false },
         };
 
+        d.note_attrs = {
+            standard_attack_attr(),
+            NoteAttrDecl{ "excitation", "Excitation",
+                "Per-note excitation; overrides the Excitation param for this note.",
+                ControlHint::Categorical, 0.0f, 0.0f, 1.0f, {"Pluck", "Strike"} },
+        };
+        d.config_params = { standard_attr_remap_param() };
         return d;
     }
 
@@ -215,10 +225,25 @@ public:
         // Seed RNG uniquely per note
         v->ext.rng = 12345u ^ (static_cast<uint32_t>(pitch) * 65537u)
                    ^ (static_cast<uint32_t>(velocity) * 2654435761u);
+
+        // Per-note excitation override (categorical attr): the note picks
+        // Pluck/Strike if present, else -1 falls back to the Excitation param.
+        if (const float* e = v->attrs.get("excitation"))
+            v->ext.excitation_mode = static_cast<int>(*e);
+        else
+            v->ext.excitation_mode = -1;
     }
 
     void note_off(int channel, int pitch) override {
         vm_.release_note(channel, pitch);
+    }
+
+    void note_attr(int channel, int note, const std::string& id, float value) override {
+        vm_.set_pending_attr(channel, note, id.c_str(), value);
+    }
+
+    void configure(const std::string& key, const std::string& value) override {
+        if (key == "attr_remap") vm_.configure_attr_remap(value);
     }
 
     void all_notes_off(int channel) override {
@@ -404,7 +429,10 @@ public:
                 if (v.ext.exc_remaining > 0) {
                     float noise = xorshift_float(v.ext.rng);
                     float exc_raw;
-                    if (excitation_type == 0) {
+                    // Per-note override wins; -1 falls back to the block param.
+                    int et = v.ext.excitation_mode >= 0 ? v.ext.excitation_mode
+                                                        : excitation_type;
+                    if (et == 0) {
                         // Pluck: filtered noise burst
                         exc_raw = noise * v.ext.exc_level * v.velocity;
                     } else {

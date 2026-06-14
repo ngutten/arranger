@@ -80,6 +80,10 @@ public:
     virtual void pitch_bend(int channel, int value) {}
     virtual void channel_volume(int channel, int volume) {}
     virtual void note_tune(int channel, int note, float semitones) {}
+    /// Per-note attribute, delivered just before the matching note_on.
+    /// `id` names the attribute (e.g. "attack", "excitation"); the consuming
+    /// node latches it onto the voice being triggered.  See note_attr_latch.h.
+    virtual void note_attr(int channel, int note, const std::string& id, float value) {}
     virtual void all_notes_off(int channel = -1) {}
     virtual void push_control(double beat, float normalized_value) {}
 
