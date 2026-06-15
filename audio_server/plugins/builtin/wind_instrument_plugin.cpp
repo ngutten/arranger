@@ -3,10 +3,9 @@
 // Wind Instrument — physical modeling synthesizer (digital waveguide)
 // ==========================================================================
 //
-// Polyphonic, MIDI-driven physical model of single-reed (clarinet/sax),
-// air-jet (flute), and lip-reed (brass) wind instruments, built on the
-// McIntyre-Schumacher-Woodhouse single-delay-loop formulation used by the
-// STK ClariNet / Flute / Brass / Saxofony classes.
+// Polyphonic, MIDI-driven digital-waveguide wind synth (clarinet, sax, flute,
+// brass), built on the McIntyre-Schumacher-Woodhouse single-delay-loop /
+// nonlinear-reed formulation (STK-style).
 //
 // Each voice is one acoustic feedback loop:
 //
@@ -18,9 +17,17 @@
 //          |                                                           |
 //          +----------[ loss filter ] <--- [ reflection ] <------------+
 //
-//   - Single reed: EXCITER = nonlinear reed table  (reflection = -g, inverting)
-//   - Flute:       EXCITER = jet delay + cubic (x^3 - x) (reflection lowpass)
-//   - Brass:       EXCITER = 2nd-order lip resonator + area^2 valve
+// IMPORTANT: every model is driven by the SAME inverting single-reed exciter
+// (nonlinear reed table, inverting closed-open bore, quarter-wave delay).  It
+// is the only self-oscillator that stays in tune across the whole range — the
+// non-inverting "conical" reed (sax/brass) overblows / runs sharp, the air-jet
+// (flute) period-doubles an octave low, and the lip-reed (brass) collapsed to a
+// low mode above G4.  Each instrument's timbre is therefore made at the OUTPUT
+// stage, not by a distinct exciter:
+//   - Clarinet: light loop loss -> sparse odd harmonics, hollow.
+//   - Sax:      gentle asymmetric waveshaper -> reedy even harmonics.
+//   - Flute:    heavy f0-tracking low-pass -> pure, near-sine.
+//   - Brass:    ~1.4 kHz formant + asymmetric saturator -> bright/edgy.
 //
 // References:
 //   McIntyre, Schumacher & Woodhouse, "On the oscillations of musical
@@ -55,10 +62,6 @@
 static constexpr int MAX_BORE  = 8192;
 static constexpr int BORE_MASK = MAX_BORE - 1;
 
-// Jet (convective) delay is short — a couple of ms is plenty.
-static constexpr int MAX_JET   = 512;
-static constexpr int JET_MASK  = MAX_JET - 1;
-
 // Instrument model selector.
 enum WindModel { MODEL_CLARINET = 0, MODEL_SAX = 1, MODEL_FLUTE = 2, MODEL_BRASS = 3 };
 
@@ -81,10 +84,6 @@ struct WindExt {
     // --- Loop loss / reflection filter (1-pole / 1-zero) ---
     float loss_z1 = 0.0f;
 
-    // --- Jet delay (flute only) ---
-    float jet[MAX_JET] = {};
-    int   jet_write = 0;
-    float jet_delay = 30.0f;
 
     // --- Lip resonator (brass only): 2nd-order bandpass biquad ---
     float lip_x1 = 0.0f, lip_x2 = 0.0f;
@@ -184,7 +183,7 @@ public:
 
             { "noise", "Breath Noise", "Turbulence noise injected into the breath.",
               PluginPortType::Control, PortRole::Input,
-              ControlHint::Continuous, 0.06f, 0.0f, 0.5f },
+              ControlHint::Continuous, 0.025f, 0.0f, 0.5f },
 
             { "vibrato_rate", "Vibrato Rate", "Vibrato/tremolo frequency (Hz).",
               PluginPortType::Control, PortRole::Input,
@@ -202,9 +201,6 @@ public:
             { "reed_stiffness", "Reed Stiffness", "Reed-table slope magnitude.",
               PluginPortType::Control, PortRole::Input,
               ControlHint::Continuous, 0.55f, 0.1f, 1.0f, 0.0f, {}, "", false },
-            { "jet_ratio", "Jet Ratio", "Flute jet delay as a fraction of bore delay.",
-              PluginPortType::Control, PortRole::Input,
-              ControlHint::Continuous, 0.5f, 0.1f, 1.0f, 0.0f, {}, "", false },
             { "lip_q", "Lip Q", "Brass lip resonator quality factor.",
               PluginPortType::Control, PortRole::Input,
               ControlHint::Continuous, 4.0f, 1.0f, 12.0f, 0.0f, {}, "", false },
@@ -216,11 +212,11 @@ public:
         d.presets = {
             { "Clarinet",   {{"model",0},{"breath",0.9f},{"embouchure",0.55f},
                              {"brightness",0.45f},{"reed_stiffness",0.55f}} },
-            { "Alto Sax",   {{"model",1},{"breath",1.0f},{"embouchure",0.6f},
+            { "Alto Sax",   {{"model",1},{"breath",0.9f},{"embouchure",0.55f},
                              {"brightness",0.6f},{"reed_stiffness",0.5f}} },
             { "Flute",      {{"model",2},{"breath",0.85f},{"embouchure",0.5f},
-                             {"brightness",0.7f},{"noise",0.12f},{"jet_ratio",0.5f}} },
-            { "Trumpet",    {{"model",3},{"breath",1.05f},{"embouchure",0.6f},
+                             {"brightness",0.7f},{"noise",0.05f}} },
+            { "Trumpet",    {{"model",3},{"breath",0.9f},{"embouchure",0.55f},
                              {"brightness",0.65f},{"lip_q",5.0f}} },
         };
 
@@ -261,8 +257,7 @@ public:
 
         // Clear loop state.
         std::memset(e.bore, 0, sizeof(e.bore));
-        std::memset(e.jet,  0, sizeof(e.jet));
-        e.bore_write = e.jet_write = 0;
+        e.bore_write = 0;
         e.bore_last = e.ap_z1 = e.ap_prev = e.loss_z1 = 0.0f;
         e.lip_x1 = e.lip_x2 = e.lip_y1 = e.lip_y2 = 0.0f;
         e.dc_x1  = e.dc_y1 = 0.0f;
@@ -344,12 +339,11 @@ public:
         const float br_attack    = std::max(0.001f, ctrl("breath_attack", 0.02f));
         const float br_release   = std::max(0.001f, ctrl("breath_release", 0.06f));
         const float brightness   = std::clamp(ctrl("brightness", 0.5f), 0.0f, 1.0f);
-        const float noise_amt    = ctrl("noise", 0.06f);
+        const float noise_amt    = ctrl("noise", 0.025f);
         const float vib_rate     = ctrl("vibrato_rate", 5.5f);
         const float vib_depth    = ctrl("vibrato_depth", 0.04f);
         const int   register_blk = (int)ctrl("register", 0.0f);
         const float reed_stiff   = std::clamp(ctrl("reed_stiffness", 0.55f), 0.1f, 1.0f);
-        const float jet_ratio    = std::clamp(ctrl("jet_ratio", 0.5f), 0.1f, 1.0f);
         const float lip_q        = std::clamp(ctrl("lip_q", 4.0f), 1.0f, 12.0f);
         const float glide        = std::clamp(ctrl("glide", 0.05f), 0.0f, 1.0f);
 
@@ -378,47 +372,30 @@ public:
 
         // --- Bore reflection sign / loss: single reeds invert (cylindrical,
         // closed-open), flute & brass do not. Brightness sets the 1-pole loss. ---
-        const bool  is_reed     = (model == MODEL_CLARINET || model == MODEL_SAX);
-        // Clarinet (cylindrical, closed-open) inverts at the open end → ODD
-        // harmonics only + 12th overblow.  Saxophone (conical) behaves like an
-        // open bore → ALL harmonics + octave overblow, so it does NOT invert —
-        // this is what makes the sax brighter and reedier than the clarinet.
-        const bool  invert_refl = (model == MODEL_CLARINET);
+        // Clarinet, sax AND brass are all driven by the single-reed exciter
+        // (reliable self-oscillation in tune across the whole range).  Brass's
+        // brass-ness comes from a bright bore + output formant + saturation,
+        // not a lip-reed feedback model (that collapsed to a low mode above G4).
+        //
+        // EVERY model now uses the inverting (cylindrical closed-open) reed
+        // bore — the only self-oscillator that stays in tune across the whole
+        // range.  The non-inverting configs all period-double / overblow at
+        // high f0: the conical reed (sax/brass) ran sharp / collapsed, and the
+        // air-jet flute dropped an octave at most pitches.  So the flute's jet
+        // model is replaced by the inverting bore + a heavy output low-pass
+        // that yields a pure, near-sine flute.  Each model's distinct timbre
+        // comes from the output stage (low-pass / waveshaper / formant).
         // Loop gain just below 1; brighter = less high-frequency loss.
         float loss_pole   = 0.05f + 0.55f * (1.0f - brightness); // 1-pole LP coeff
         float loop_gain   = 0.985f + 0.012f * brightness;        // < 1 for stability
-        // Brass is a lip-reed: the lip resonator (not a lossy bore) selects the
-        // pitch, and the exciter's 0.85 bore-reflection is the dominant loss
-        // (per STK Brass).  Stacking the cylindrical-bore loss filter on top
-        // over-damps the loop so it can't bootstrap — so keep the brass bore
-        // nearly lossless and let the lip filter + 0.85 reflection shape it.
-        if (model == MODEL_BRASS) {
-            loss_pole = 0.02f + 0.08f * (1.0f - brightness);
-            loop_gain = 0.999f;
-        }
-        // Flute: a real flute is the PUREST of the family (near-sinusoidal).
-        // The air-jet cubic injects a rich harmonic series, so damp the bore
-        // loop harder (stronger 1-pole lowpass) to roll the upper harmonics
-        // off and keep the flute darker than the reeds, not brighter.
-        if (model == MODEL_FLUTE)
-            loss_pole = std::max(loss_pole, 0.68f + 0.20f * (1.0f - brightness));
-        // Clarinet: very light loop low-pass so its sparse ODD harmonics
-        // survive — this makes it read as reedy/hollow rather than pure/flutey.
-        // (The sax keeps the default, heavier loop loss: its conical bore makes
-        // ALL harmonics, so a light loss there would be a harsh buzzy sawtooth;
-        // the moderate loss rolls off the very top into a natural reedy tone
-        // that's still brighter than the flute.)
+        // Clarinet: very light loop low-pass so its sparse ODD harmonics survive
+        // → bright, hollow, reedy (rather than pure/flutey).
         if (model == MODEL_CLARINET)
             loss_pole = std::min(loss_pole, 0.04f + 0.06f * (1.0f - brightness));
-
-        // --- Flute jet nonlinearity gain ---
-        // Kept modest: driving the cubic jet hard pushes the oscillator through
-        // a period-doubling bifurcation (a strong f0/2 subharmonic that makes
-        // the flute sound an octave low from ~C4 up).
-        const float jet_drive = 0.3f + 0.3f * embouchure;
-
-        // --- Brass lip resonator: tuned slightly above f0, Q from control. ---
-        // (coefficients are recomputed per-voice below since f0 differs.)
+        // Sax & brass use the default loop loss (inverting bore → clean, in-tune
+        // oscillation); their even harmonics + brightness come from the output
+        // waveshaper.  Flute also uses the default loss: a heavy loop low-pass
+        // pushed the jet into period-doubling (an octave-low f0/2 subharmonic).
 
         for (int vi = 0; vi < SYNTH_MAX_VOICES; ++vi) {
             auto& v = vm_.voices[vi];
@@ -427,42 +404,24 @@ public:
 
             const int reg = (e.register_mode >= 0) ? e.register_mode : register_blk;
 
-            // Precompute brass lip biquad (bandpass) for this voice's pitch.
-            // Lip frequency tracks the note; overblow pushes it up an octave.
-            float lip_f = e.f0 * (reg ? 2.0f : 1.0f);
-            // Embouchure nudges the lip resonance for "lipping" / bend feel.
-            lip_f *= (0.95f + 0.1f * embouchure);
-            // Brass: the lip resonator (with its DC-blocking zero) actually
-            // SETS the played pitch, and the zero pushes its effective peak up
-            // ~14%.  Pre-detune the lip so the note plays in tune.
-            if (model == MODEL_BRASS) lip_f *= 0.877f;
-            float lw0  = 2.0f * (float)M_PI * std::min(lip_f, 0.45f * sr) / sr;
-            // Lip = 2-pole resonator (STK BiQuad::setResonance, NON-normalized).
-            // The large resonant gain of a high pole radius is what bootstraps
-            // the lip oscillation; a normalized (unity-peak) bandpass cannot.
-            // lip_q nudges the radius toward 1 (STK uses 0.997).
-            //
-            // KNOWN LIMITATION: the brass lip-reed model does not yet reach a
-            // clean pitched limit cycle.  With a high resonant gain the squared
-            // valve term (area = y*y) saturates fully open and the tone is a
-            // weak, off-mode rumble; with low gain it never bootstraps.  A
-            // correct fix needs the relaxation-oscillator coupling between the
-            // lip resonance and the bore standing wave to be balanced (cf. STK
-            // Brass + Cook's meta-wind model).  Clarinet/Sax/Flute are working.
-            float lrad = std::clamp(1.0f - 0.012f / lip_q, 0.90f, 0.997f);
-            float lc1  = 2.0f * lrad * std::cos(lw0);   // y[n-1] coefficient
-            float lc2  = lrad * lrad;                   // y[n-2] coefficient
+            // Brass output formant: a fixed resonant band-pass (~1.4 kHz — the
+            // "brass formant" from the bore flare / bell) applied to the brass
+            // OUTPUT for its metallic colour.  Brass is driven by the same
+            // robust reed exciter as the sax (reliable pitch across the whole
+            // range — the lip-reed feedback model collapsed to a low mode above
+            // ~G4); the formant + output saturation are what make it read as
+            // brass rather than a bright sax.  lip_q sets the formant sharpness.
+            float fc1 = 0.0f, fc2 = 0.0f;
+            if (model == MODEL_BRASS) {
+                float fw0  = 2.0f * (float)M_PI * std::min(1400.0f, 0.45f * sr) / sr;
+                float frad = std::clamp(0.85f + 0.01f * lip_q, 0.80f, 0.97f);
+                fc1 = 2.0f * frad * std::cos(fw0);
+                fc2 = frad * frad;
+            }
 
             // Per-voice breath-attack coefficient (scaled by the "attack" attr).
             const float v_atk_c = 1.0f - std::exp(
                 -1.0f / (std::max(0.001f, br_attack * e.attack_mul) * sr));
-
-            // Per-voice flute jet drive, rolled off in the high register where
-            // the short bore drives the cubic into period-doubling.  The bore
-            // round-trip is `cur_delay` samples; below ~150 samples (~C5) the
-            // drive is progressively reduced so the oscillator stays period-1.
-            float jet_drive_v = jet_drive *
-                std::clamp(e.cur_delay / 150.0f, 0.72f, 1.0f);
 
             for (int i = 0; i < N; ++i) {
                 float amp = v.env.next();
@@ -496,23 +455,10 @@ public:
                     f0 *= 2.0f;                          // conical sax: octave
                 e.f0 = f0;
 
-                // Cylindrical reed bores (clarinet/sax) are closed-open: the
-                // inverting reed reflection makes a HALF-period delay sound at
-                // f0 (quarter-wave resonance), matching STK's sr/(2f).  Open
-                // bores (flute) and the lip-driven brass use the full period.
+                // All models use the inverting bore → quarter-wave at f0.
                 // The -1 subtracts the loop-filter + allpass group delay.
                 float period = sr / f0;
-                float target_delay;
-                if (model == MODEL_BRASS)
-                    // Bore aligned with the lip resonance; the 1.12 factor trims
-                    // a uniform ~12% sharpness so the note plays in tune.
-                    target_delay = 1.12f * period - 1.0f;
-                else if (invert_refl)
-                    // Cylindrical reed bore (closed-open): quarter-wave at f0.
-                    target_delay = 0.25f * period - 1.0f;
-                else
-                    // Open bore (flute): half-wave at f0.
-                    target_delay = period - 1.0f;
+                float target_delay = 0.25f * period - 1.0f;
                 target_delay = std::clamp(target_delay, 4.0f, (float)(MAX_BORE - 4));
 
                 // Slew toward target (glide=0 → fast; glide=1 → slow).
@@ -537,62 +483,15 @@ public:
                 float bore_in = 0.0f;
 
                 // ============================================================
-                //  EXCITER
+                //  EXCITER — single-reed nonlinear scattering (MSW / Scavone),
+                //  inverting bore, shared by every model.  Per-model timbre is
+                //  applied at the output stage below.
                 // ============================================================
-                if (is_reed) {
-                    // ---- Single-reed nonlinear scattering (MSW / Scavone) ----
-                    // Clarinet inverts the returning wave (cylindrical, odd
-                    // harmonics); sax does not (conical → all harmonics).
-                    float r  = invert_refl ? -refl : refl;
-                    float dp = r - breath;                       // diff. pressure
-                    // Reed reflection coefficient (clamped affine table).
-                    float Rt = reed_offset + reed_slope * dp;
-                    Rt = std::clamp(Rt, -1.0f, 1.0f);
-                    bore_in = breath + dp * Rt;
-
-                } else if (model == MODEL_FLUTE) {
-                    // ---- Air-jet drive (Verge/Fabre, STK Flute) ----
-                    // Jet delay tracks ~ fraction of the bore length, modulated
-                    // by breath (faster breath -> shorter jet delay).
-                    float jr = jet_ratio * e.cur_delay /
-                               (0.5f + 0.5f * std::max(0.05f, breath));
-                    e.jet_delay = std::clamp(jr, 2.0f, (float)(MAX_JET - 2));
-
-                    float pdiff = breath - 0.5f * refl;          // jet reflection ~0.5
-                    // Push through the convective jet delay (linear interp).
-                    int   jid = (int)e.jet_delay;
-                    float jfr = e.jet_delay - (float)jid;
-                    int   j0  = (e.jet_write - jid)     & JET_MASK;
-                    int   j1  = (e.jet_write - jid - 1) & JET_MASK;
-                    float jd  = e.jet[j0] * (1.0f - jfr) + e.jet[j1] * jfr;
-                    e.jet[e.jet_write] = pdiff;
-                    e.jet_write = (e.jet_write + 1) & JET_MASK;
-
-                    // Cubic jet nonlinearity x^3 - x (saturated), DC-blocked.
-                    float x  = std::clamp(jet_drive_v * jd, -1.0f, 1.0f);
-                    float nl = x * (x * x - 1.0f);
-                    nl = dc_block(nl, e.dc_x1, e.dc_y1);
-                    bore_in = nl + refl;                         // + end reflection
-
-                } else { // MODEL_BRASS
-                    // ---- Lip-reed resonator + outward-striking valve ----
-                    float mouth = 0.3f * breath;
-                    float bore  = 0.92f * refl;      // low loss so the bore builds
-                    float dpr   = mouth - bore;
-                    // Lip resonator with a DC-blocking zero (1 - z^-1): the lip
-                    // DISPLACEMENT oscillates around zero.  (A plain all-pole
-                    // resonator has huge DC gain that pins the valve fully open
-                    // on the steady mouth pressure, so it never oscillates.)
-                    float y = (dpr - e.lip_x1) + lc1 * e.lip_y1 - lc2 * e.lip_y2;
-                    e.lip_x1 = dpr;
-                    e.lip_y2 = e.lip_y1; e.lip_y1 = y;
-                    // Outward-striking lip: the opening modulates around a rest
-                    // point (linear, clamped) rather than slamming via y^2.
-                    float area = std::clamp(0.45f + 3.0f * y, 0.0f, 1.0f);
-                    // Flow scattering across the lip valve.
-                    float s = area * mouth + (1.0f - area) * bore;
-                    bore_in = dc_block(s, e.dc_x1, e.dc_y1);
-                }
+                float r  = -refl;                            // inverting bore
+                float dp = r - breath;                        // diff. pressure
+                float Rt = reed_offset + reed_slope * dp;     // reed table
+                Rt = std::clamp(Rt, -1.0f, 1.0f);
+                bore_in = breath + dp * Rt;
 
                 // Stability clamp on loop state.
                 bore_in = std::clamp(bore_in, -4.0f, 4.0f);
@@ -601,19 +500,42 @@ public:
                 e.bore[e.bore_write] = bore_in;
                 e.bore_write = (e.bore_write + 1) & BORE_MASK;
 
-                // --- Output: tap the bore OUTPUT (the standing-wave pressure
-                // radiated at the bell), not the raw exciter drive.  Tapping
-                // the flute's jet drive (bore_in) injected the cubic
-                // nonlinearity's full harmonic series directly, making the
-                // flute too bright/reedy ("brassy"); the bore output is the
-                // smoother, more sinusoidal radiated tone a flute should have.
-                // Per-model output gains: the steep reed runs at a much lower
-                // oscillation amplitude than the flute jet, so the reeds get a
-                // large make-up gain to bring the family into level balance.
+                // --- Output stage: each model shapes the (stable, odd-harmonic)
+                // bore output into its timbre.  Tap bore_out (the radiated
+                // standing wave), not the raw exciter drive.
                 float sig;
-                if (model == MODEL_FLUTE)      sig = 0.22f * bore_out;
-                else if (model == MODEL_BRASS) sig = 2.2f  * bore_out;   // low osc. amplitude → make-up gain
-                else                           sig = 0.45f * bore_out;   // clarinet/sax
+                if (model == MODEL_FLUTE) {
+                    // Flute: a heavy 1-pole low-pass tracking ~1.5*f0 strips the
+                    // odd harmonics down to a near-sine, pure flute tone (lip_y1
+                    // is the LP state).  Breath noise (above) supplies the air.
+                    float fcut = std::min(0.45f, 1.5f * e.f0 / sr);
+                    float fcoef = 1.0f - std::exp(-2.0f * (float)M_PI * fcut);
+                    e.lip_y1 += fcoef * (bore_out - e.lip_y1);
+                    sig = 0.9f * e.lip_y1;
+                } else if (model == MODEL_BRASS) {
+                    // The inverting reed gives a stable, in-tune but odd-only
+                    // (clarinet-like) tone.  Turn it into brass: boost the
+                    // ~1.4 kHz brass formant (resonant band-pass, reusing the
+                    // lip state), then an ASYMMETRIC saturator adds the even
+                    // harmonics and the bright brassy "blat" (a symmetric shaper
+                    // on an odd signal stays odd, hence the bias).  DC-blocked.
+                    float bf = (bore_out - e.lip_x1) + fc1 * e.lip_y1 - fc2 * e.lip_y2;
+                    e.lip_x1 = bore_out;
+                    e.lip_y2 = e.lip_y1; e.lip_y1 = bf;
+                    float pre = bore_out + 0.8f * bf;
+                    // Asymmetric drive (bias -> even harmonics) for the brassy
+                    // edge, level-matched to the rest of the family.
+                    float shaped = std::tanh(3.0f * pre + 0.4f);
+                    sig = 0.42f * dc_block(shaped, e.dc_x1, e.dc_y1);
+                } else if (model == MODEL_SAX) {
+                    // Sax: the inverting reed is odd-harmonic (clarinet-like); a
+                    // gentle asymmetric waveshaper fills in even harmonics for a
+                    // fuller, reedier tone — milder than brass, no bright formant.
+                    float shaped = std::tanh(2.2f * bore_out + 0.3f);
+                    sig = 0.4f * dc_block(shaped, e.dc_x1, e.dc_y1);
+                } else {
+                    sig = 0.45f * bore_out;   // clarinet
+                }
 
                 float sample = sig * amp * gain;
                 L[i] += sample;
