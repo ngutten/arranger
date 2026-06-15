@@ -3,19 +3,33 @@
 // DDSP (Differentiable Digital Signal Processing) Neural Synthesizer
 // ==========================================================================
 //
-// Realtime neural synthesis: a small ONNX network converts MIDI features
-// (f0, loudness) into parameters for an additive oscillator bank + filtered
-// noise.  A helper thread runs inference at frame rate (~100fps); the audio
-// thread interpolates parameters and synthesises at sample rate.
+// Standardised to the acids-ircam/ddsp_pytorch model (and compatible forks,
+// e.g. hugggof/violin-ddsp). A small ONNX decoder, exported by
+// scripts/convert_ddsp.py, converts a per-frame (pitch, loudness) pair into
+// synthesis parameters; C++ reproduces the harmonic + filtered-noise synthesis
+// exactly as ddsp.realtime_forward.
 //
-// Architecture:
-//   [Helper thread]                     [Audio thread]
-//     Read voice state (f0, loudness)     Read DDSPFrames from ring buffers
-//     Run ONNX decoder per voice          Interpolate between frames
-//     Push DDSPFrames to SPSC rings       Additive oscillator bank (harmonics)
-//     Sleep until next 10ms frame         FFT-based filtered noise
-//                                         ADSR envelope, mix to output
+//   ONNX decoder (per frame):
+//     in : pitch[1,1,1] (Hz), loudness[1,1,1] (raw; z-score baked in),
+//          cache_in[1,1,H] (GRU state)
+//     out: amplitudes[1,n_harm]   (nyquist-removed, renormalised, x total_amp)
+//          noise_param[1,n_bands] (band magnitudes for the noise FIR)
+//          cache_out[1,1,H]       (GRU state for the next frame)
 //
+// Inference is driven by the AUDIO clock, not wall-clock: a new frame is
+// inferred synchronously each time the frame phase crosses a boundary (~one
+// small GRU step per block). This keeps offline rendering correct (it runs
+// faster than realtime, so a wall-clock helper thread would starve) and the
+// GRU cache + oscillator phase advance deterministically.
+//
+//   - Harmonics: oscillator bank at host SR (amplitudes are SR-independent and
+//     already nyquist-filtered by the model).
+//   - Noise: amp_to_impulse_response + a direct causal FIR at model SR
+//     (algebraically identical to fft_convolve(noise,impulse)[block:]),
+//     resampled to host SR via the frame phase.
+//
+// The model is monophonic (a single stateful pitch/loudness contour), matching
+// both the reference design and the instruments it models.
 // ==========================================================================
 
 #include "plugin_api.h"
@@ -24,17 +38,11 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
-#include <atomic>
-#include <cassert>
-#include <chrono>
 #include <cmath>
-#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
-#include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 #ifdef AS_ENABLE_DDSP
@@ -52,13 +60,10 @@
 // Constants
 // ==========================================================================
 
-static constexpr int MAX_HARMONICS   = 100;
-static constexpr int MAX_NOISE_BANDS = 65;
-static constexpr int MAX_VOICES      = 8;
-static constexpr int RING_CAPACITY   = 8;   // frames per voice (~80ms @ 100fps)
+static constexpr int MAX_HARMONICS   = 128;
+static constexpr int MAX_NOISE_BANDS = 128;
+static constexpr int MAX_BLOCK       = 2048;  // model-rate noise block ceiling
 static constexpr int SIN_TABLE_SIZE  = 1024;
-static constexpr int NOISE_FFT_SIZE  = 1024;
-static constexpr int NOISE_HOP_SIZE  = NOISE_FFT_SIZE / 2;  // 50% overlap
 
 // ==========================================================================
 // Wavetable sine lookup
@@ -84,202 +89,39 @@ static inline float fast_sin(float phase) {
 }
 
 // ==========================================================================
-// Radix-2 FFT (reused from sampler_plugin pattern)
-// ==========================================================================
-
-static void fft_complex_inplace(float* data, int N, bool inverse) {
-    // Bit-reversal permutation
-    for (int i = 1, j = 0; i < N; ++i) {
-        int bit = N >> 1;
-        for (; j & bit; bit >>= 1) j ^= bit;
-        j ^= bit;
-        if (i < j) {
-            std::swap(data[2 * i],     data[2 * j]);
-            std::swap(data[2 * i + 1], data[2 * j + 1]);
-        }
-    }
-    float sign = inverse ? 1.0f : -1.0f;
-    for (int len = 2; len <= N; len <<= 1) {
-        float ang = sign * 2.0f * static_cast<float>(M_PI) / len;
-        float wR = std::cos(ang), wI = std::sin(ang);
-        for (int i = 0; i < N; i += len) {
-            float curR = 1.0f, curI = 0.0f;
-            for (int j = 0; j < len / 2; ++j) {
-                int u = i + j, v = u + len / 2;
-                float tR = curR * data[2 * v] - curI * data[2 * v + 1];
-                float tI = curR * data[2 * v + 1] + curI * data[2 * v];
-                data[2 * v]     = data[2 * u]     - tR;
-                data[2 * v + 1] = data[2 * u + 1] - tI;
-                data[2 * u]     += tR;
-                data[2 * u + 1] += tI;
-                float nR = curR * wR - curI * wI;
-                curI = curR * wI + curI * wR;
-                curR = nR;
-            }
-        }
-    }
-    if (inverse) {
-        float inv = 1.0f / static_cast<float>(N);
-        for (int i = 0; i < 2 * N; ++i) data[i] *= inv;
-    }
-}
-
-// ==========================================================================
-// Hann window (pre-computed)
-// ==========================================================================
-
-static float g_hann_window[NOISE_FFT_SIZE];
-
-static void init_hann_window() {
-    static bool done = false;
-    if (done) return;
-    for (int i = 0; i < NOISE_FFT_SIZE; ++i)
-        g_hann_window[i] = 0.5f * (1.0f - std::cos(2.0f * static_cast<float>(M_PI) * i / NOISE_FFT_SIZE));
-    done = true;
-}
-
-// ==========================================================================
-// DDSPFrame — per-voice parameter snapshot from inference
+// DDSPFrame — per-frame parameter snapshot from inference
 // ==========================================================================
 
 struct DDSPFrame {
-    float f0          = 0.0f;                         // Hz
-    float amplitude   = 0.0f;                         // linear
-    float harmonic_amps[MAX_HARMONICS] = {};           // linear amplitudes
-    float noise_mags[MAX_NOISE_BANDS]  = {};           // linear magnitudes
-    int   num_harmonics   = 0;
-    int   num_noise_bands = 0;
-    bool  valid           = false;
+    float amplitudes[MAX_HARMONICS]    = {};  // per-harmonic linear amplitude
+    float noise_param[MAX_NOISE_BANDS] = {};  // band magnitudes for the FIR
+    int   n_harm  = 0;
+    int   n_bands = 0;
+    bool  valid   = false;
 };
 
 // ==========================================================================
-// SPSCRingBuffer — lock-free single-producer single-consumer ring
-// ==========================================================================
-
-template <typename T, int Cap>
-class SPSCRingBuffer {
-public:
-    SPSCRingBuffer() = default;
-
-    void reset() {
-        write_pos_.store(0, std::memory_order_relaxed);
-        read_pos_.store(0, std::memory_order_relaxed);
-    }
-
-    bool push(const T& item) {
-        uint32_t w = write_pos_.load(std::memory_order_relaxed);
-        uint32_t r = read_pos_.load(std::memory_order_acquire);
-        if (w - r >= Cap) return false;  // full
-        buf_[w % Cap] = item;
-        write_pos_.store(w + 1, std::memory_order_release);
-        return true;
-    }
-
-    bool pop(T& item) {
-        uint32_t r = read_pos_.load(std::memory_order_relaxed);
-        uint32_t w = write_pos_.load(std::memory_order_acquire);
-        if (r == w) return false;  // empty
-        item = buf_[r % Cap];
-        read_pos_.store(r + 1, std::memory_order_release);
-        return true;
-    }
-
-    int available() const {
-        uint32_t w = write_pos_.load(std::memory_order_acquire);
-        uint32_t r = read_pos_.load(std::memory_order_relaxed);
-        return static_cast<int>(w - r);
-    }
-
-private:
-    T buf_[Cap] = {};
-    std::atomic<uint32_t> write_pos_{0};
-    std::atomic<uint32_t> read_pos_{0};
-};
-
-// ==========================================================================
-// DDSPVoice — per-voice state
-// ==========================================================================
-
-struct DDSPVoice {
-    // --- Written by audio thread, read by helper ---
-    std::atomic<bool> active{false};
-    std::atomic<bool> releasing{false};
-    int      channel  = 0;
-    int      pitch    = 0;
-    int      velocity = 0;
-    float    f0_hz    = 0.0f;
-    float    tune_semitones = 0.0f;   // from note_tune
-
-    // --- Audio thread only ---
-    float    harmonic_phase[MAX_HARMONICS] = {};  // phase accumulators [0,1)
-    DDSPFrame last_frame;
-    DDSPFrame cur_frame;
-    float    frame_phase   = 0.0f;    // interpolation position [0,1)
-    float    frame_advance = 0.0f;    // per-sample advance rate
-    ADSREnvelope env;
-    float    vel_gain = 1.0f;
-
-    // Noise OLA state
-    float    noise_ola_buf[NOISE_FFT_SIZE] = {};
-    float    noise_fft_scratch[2 * NOISE_FFT_SIZE] = {};
-    float    noise_out_buf[NOISE_FFT_SIZE] = {};
-    int      noise_ola_pos = 0;  // position within current OLA window
-    bool     noise_buf_ready = false;
-
-    // --- Shared: helper writes, audio reads ---
-    SPSCRingBuffer<DDSPFrame, RING_CAPACITY> ring;
-
-    void reset() {
-        active.store(false, std::memory_order_relaxed);
-        releasing.store(false, std::memory_order_relaxed);
-        channel = pitch = velocity = 0;
-        f0_hz = 0.0f;
-        tune_semitones = 0.0f;
-        std::memset(harmonic_phase, 0, sizeof(harmonic_phase));
-        last_frame = DDSPFrame{};
-        cur_frame  = DDSPFrame{};
-        frame_phase = 0.0f;
-        frame_advance = 0.0f;
-        env = ADSREnvelope{};
-        vel_gain = 1.0f;
-        std::memset(noise_ola_buf, 0, sizeof(noise_ola_buf));
-        std::memset(noise_fft_scratch, 0, sizeof(noise_fft_scratch));
-        std::memset(noise_out_buf, 0, sizeof(noise_out_buf));
-        noise_ola_pos = 0;
-        noise_buf_ready = false;
-        ring.reset();
-    }
-};
-
-// ==========================================================================
-// RNG — simple xorshift for noise generation on audio thread
+// RNG — xorshift for white noise
 // ==========================================================================
 
 struct XorShift32 {
-    uint32_t state = 12345;
-    float next() {
+    uint32_t state = 0x9e3779b9u;
+    float next() {  // [-1, 1)
         state ^= state << 13;
         state ^= state >> 17;
         state ^= state << 5;
-        // Map to [-1, 1)
         return static_cast<float>(static_cast<int32_t>(state)) / 2147483648.0f;
     }
 };
 
 // ==========================================================================
-// DDSPPlugin
+// DDSPPlugin (monophonic)
 // ==========================================================================
 
 class DDSPPlugin : public Plugin {
 public:
-    DDSPPlugin() {
-        init_sin_table();
-        init_hann_window();
-    }
-
-    ~DDSPPlugin() override {
-        stop_helper_thread();
-    }
+    DDSPPlugin() { init_sin_table(); }
+    ~DDSPPlugin() override = default;
 
     // ------------------------------------------------------------------
     // Descriptor
@@ -290,12 +132,13 @@ public:
         d.id           = "builtin.ddsp";
         d.display_name = "DDSP Synth";
         d.category     = "Synth";
-        d.doc          = "Neural synthesizer using DDSP (Differentiable Digital Signal "
-                         "Processing). A small ONNX neural network converts MIDI input "
-                         "into parameters for an additive oscillator bank and filtered "
-                         "noise, producing expressive timbres in realtime.";
+        d.doc          = "Monophonic neural synthesizer using the acids-ircam DDSP "
+                         "model (and compatible forks). An ONNX decoder maps pitch + "
+                         "loudness to a harmonic oscillator bank and a filtered-noise "
+                         "band, reproducing the modelled instrument. Convert models "
+                         "with scripts/convert_ddsp.py.";
         d.author       = "builtin";
-        d.version      = 1;
+        d.version      = 2;
 
         d.ports = {
             { "events_in", "Events In", "MIDI event input.",
@@ -304,28 +147,44 @@ public:
               PluginPortType::AudioStereo, PortRole::Output },
             { "gain", "Gain", "Output gain multiplier. 1.0 = unity.",
               PluginPortType::Control, PortRole::Input,
-              ControlHint::Continuous, 1.0f, 0.0f, 2.0f },
-            { "expression", "Expression", "Loudness expression control (0-1).",
+              ControlHint::Continuous, 1.0f, 0.0f, 4.0f },
+            { "expression", "Expression",
+              "Loudness expression (0-1), scales the loudness fed to the model.",
               PluginPortType::Control, PortRole::Input,
               ControlHint::Continuous, 1.0f, 0.0f, 1.0f },
-            { "brightness", "Brightness",
-              "Harmonic brightness control. Higher values emphasize upper harmonics.",
+            { "noise_gain", "Noise Gain",
+              "Scales the filtered-noise (breath/bow) component. 1.0 = as modelled; "
+              "lower to tame noise when driving the model with static MIDI notes.",
               PluginPortType::Control, PortRole::Input,
-              ControlHint::Continuous, 0.5f, 0.0f, 1.0f },
+              ControlHint::Continuous, 1.0f, 0.0f, 2.0f },
             { "attack", "Attack",
-              "Envelope attack time in seconds.",
+              "Attack time in seconds. Ramps the loudness fed to the model (the "
+              "swell that produces a natural onset) and the output gain.",
               PluginPortType::Control, PortRole::Input,
-              ControlHint::Continuous, 0.01f, 0.001f, 2.0f },
+              ControlHint::Continuous, 0.05f, 0.001f, 2.0f },
             { "release", "Release",
-              "Envelope release time in seconds.",
+              "Output envelope release time in seconds.",
               PluginPortType::Control, PortRole::Input,
               ControlHint::Continuous, 0.1f, 0.001f, 5.0f },
         };
 
         d.config_params = {
             { "model_dir", "Model Directory",
-              "Path to DDSP model directory containing decoder.onnx and config.json.",
+              "DDSP model directory containing decoder.onnx and config.json "
+              "(produced by scripts/convert_ddsp.py).",
               ConfigType::DirPath, "" },
+            { "use_expression", "Use Expression Model",
+              "When on, the model's bundled expression network (if any) drives "
+              "loudness (and pitch). Turn off to use the simple "
+              "velocity/expression -> loudness mapping below.",
+              ConfigType::Bool, "true" },
+            { "loud_floor_db", "Loudness Floor (dB)",
+              "Raw loudness (model units) at velocity/expression = 0. Calibrate "
+              "to the model's training loudness range.",
+              ConfigType::Float, "-60", "", false, true },
+            { "loud_ceil_db", "Loudness Ceiling (dB)",
+              "Raw loudness (model units) at full velocity/expression.",
+              ConfigType::Float, "0", "", false, true },
         };
 
         return d;
@@ -339,32 +198,25 @@ public:
         if (key == "model_dir") {
             pending_model_dir_ = value;
             model_dirty_ = true;
+            maybe_load_model();   // configure() runs on the control thread, not audio
+        } else if (key == "use_expression") {
+            use_expression_ = (value == "true" || value == "1" || value == "True");
+        } else if (key == "loud_floor_db") {
+            if (!value.empty()) { try { loud_floor_db_ = std::stof(value); loud_floor_user_ = true; } catch (...) {} }
+        } else if (key == "loud_ceil_db") {
+            if (!value.empty()) { try { loud_ceil_db_ = std::stof(value); loud_ceil_user_ = true; } catch (...) {} }
         }
     }
 
     void activate(float sample_rate, int /*max_block_size*/) override {
-        sample_rate_ = sample_rate;
-
-        for (auto& v : voices_) v.reset();
-
-        if (model_dirty_) {
-            load_model(pending_model_dir_);
-            model_dirty_ = false;
-        }
-
-        // Compute frame advance: how fast to interpolate between inference frames
-        if (model_frame_rate_ > 0)
-            frame_advance_per_sample_ = static_cast<float>(model_frame_rate_) / sample_rate_;
-        else
-            frame_advance_per_sample_ = 100.0f / sample_rate_;  // default 100fps
-
-        start_helper_thread();
+        host_sr_ = sample_rate;
+        activated_ = true;
+        reset_voice();
+        maybe_load_model();       // config may have arrived before activation
+        recompute_frame_advance();
     }
 
-    void deactivate() override {
-        stop_helper_thread();
-        for (auto& v : voices_) v.reset();
-    }
+    void deactivate() override { reset_voice(); }
 
     // ------------------------------------------------------------------
     // MIDI events (audio thread)
@@ -372,72 +224,48 @@ public:
 
     void note_on(int channel, int pitch, int velocity) override {
         if (velocity == 0) { note_off(channel, pitch); return; }
-
-        // Steal oldest voice if all active
-        int slot = -1;
-        for (int i = 0; i < MAX_VOICES; ++i) {
-            if (!voices_[i].active.load(std::memory_order_relaxed)) {
-                slot = i;
-                break;
-            }
-        }
-        if (slot < 0) slot = 0;  // steal voice 0
-
-        auto& v = voices_[slot];
-        v.reset();
-        v.channel  = channel;
-        v.pitch    = pitch;
-        v.velocity = velocity;
-        v.vel_gain = velocity / 127.0f;
-        v.f0_hz    = 440.0f * std::pow(2.0f, (pitch - 69) / 12.0f);
-        v.frame_advance = frame_advance_per_sample_;
-
-        // Set up initial hardcoded frame (used before ONNX frames arrive)
-        make_default_frame(v.cur_frame, v.f0_hz, num_harmonics_, num_noise_bands_);
-        v.last_frame = v.cur_frame;
-        v.frame_phase = 0.0f;
-
-        // Envelope
-        v.env.trigger(sample_rate_, attack_time_, 0.05f, 0.8f, release_time_);
-
-        v.active.store(true, std::memory_order_release);
-
-        // Wake helper thread
-        wake_helper();
+        held_.push_back({channel, pitch, velocity});
+        start_note(channel, pitch, velocity);
     }
 
     void note_off(int channel, int pitch) override {
-        for (auto& v : voices_) {
-            if (v.active.load(std::memory_order_relaxed) &&
-                v.channel == channel && v.pitch == pitch &&
-                !v.releasing.load(std::memory_order_relaxed)) {
-                v.releasing.store(true, std::memory_order_release);
-                v.env.release();
+        for (auto it = held_.begin(); it != held_.end(); ++it) {
+            if (it->ch == channel && it->pitch == pitch) {
+                bool was_top = (it + 1 == held_.end());
+                held_.erase(it);
+                if (was_top) {
+                    if (!held_.empty()) {
+                        auto& n = held_.back();
+                        start_note(n.ch, n.pitch, n.vel);  // fall back, retrigger
+                    } else {
+                        v_.releasing = true;
+                        v_.env.release();
+                        expr_gate_ = false;          // expression model: enter release
+                        expr_t_rel_sec_ = 0.0f;
+                    }
+                }
                 break;
             }
         }
     }
 
     void all_notes_off(int /*channel*/) override {
-        for (auto& v : voices_) {
-            if (v.active.load(std::memory_order_relaxed)) {
-                v.releasing.store(true, std::memory_order_release);
-                v.env.release();
-            }
-        }
+        held_.clear();
+        v_.releasing = true;
+        v_.env.release();
+        expr_gate_ = false;
+        expr_t_rel_sec_ = 0.0f;
     }
 
     void note_tune(int /*channel*/, int note, float semitones) override {
-        for (auto& v : voices_) {
-            if (v.active.load(std::memory_order_relaxed) && v.pitch == note) {
-                v.tune_semitones = semitones;
-                v.f0_hz = 440.0f * std::pow(2.0f, (v.pitch + semitones - 69) / 12.0f);
-            }
+        if (v_.active && v_.pitch == note) {
+            v_.tune_semitones = semitones;
+            v_.f0_hz = midi_to_hz(v_.pitch + semitones);
         }
     }
 
     // ------------------------------------------------------------------
-    // Process (audio thread)
+    // Process (audio thread) — inference is driven here, synchronously
     // ------------------------------------------------------------------
 
     void process(const PluginProcessContext& ctx, PluginBuffers& buffers) override {
@@ -451,110 +279,87 @@ public:
         std::memset(L, 0, N * sizeof(float));
         if (out->right) std::memset(R, 0, N * sizeof(float));
 
-        // Read control ports
         auto ctrl = [&](const char* id, float fallback) -> float {
             auto* p = buffers.control.get(id);
             return p ? p->value : fallback;
         };
         float gain       = ctrl("gain", 1.0f);
         float expression = ctrl("expression", 1.0f);
-        float brightness = ctrl("brightness", 0.5f);
-        attack_time_     = ctrl("attack", 0.01f);
+        float noise_gain = ctrl("noise_gain", 1.0f);
+        attack_time_     = ctrl("attack", 0.05f);
         release_time_    = ctrl("release", 0.1f);
 
-        // Per-sample ADSR detection
-        auto* att_ctl = buffers.control.get("attack");
-        auto* rel_ctl = buffers.control.get("release");
-        bool ps_adsr = (att_ctl && att_ctl->samples) || (rel_ctl && rel_ctl->samples);
+        // Target loudness level [0,1] from velocity + expression. The actual
+        // loudness fed to the model is this scaled by the attack/release envelope
+        // (below), so the model sees a SWELL into the note rather than a step —
+        // that rising-loudness cue is what makes it render a natural (breathy /
+        // bowed) attack instead of slamming out full harmonics on frame one.
+        cur_level_ = std::clamp((v_.velocity / 127.0f) * expression, 0.0f, 1.0f);
 
-        for (auto& v : voices_) {
-            if (!v.active.load(std::memory_order_relaxed)) continue;
+        if (!v_.active) return;
 
-            // Consume new frames from ring buffer
-            DDSPFrame new_frame;
-            while (v.ring.pop(new_frame)) {
-                v.last_frame = v.cur_frame;
-                v.cur_frame  = new_frame;
-                v.frame_phase = 0.0f;
+        const int block = std::max(1, std::min(block_size_, MAX_BLOCK));
+
+        for (int i = 0; i < N; ++i) {
+            // Infer a new frame each time the phase crosses a boundary.
+            while (v_.frame_phase >= 1.0f) {
+                DDSPFrame nf;
+                // Pitch expression (vibrato/scoop) bends f0 for BOTH the decoder
+                // inference (nyquist-correct amplitudes) and the oscillator.
+                if (has_f0_expr_ && use_expression_) {
+                    float midi = static_cast<float>(v_.pitch) + v_.tune_semitones;
+                    v_.f0_hz = midi_to_hz(midi + f0_dev_for_frame());
+                }
+                float loud_db = loudness_for_frame();
+                if (!infer_frame(v_.f0_hz, loud_db, nf))
+                    make_default_frame(nf);
+                // Advance the causal note timers once per frame (shared by both
+                // expression models), regardless of which are present.
+                expr_t_onset_sec_ += frame_sec_;
+                if (!expr_gate_) expr_t_rel_sec_ += frame_sec_;
+                v_.last_frame = v_.cur_frame;
+                v_.cur_frame  = nf;
+                v_.frame_phase -= 1.0f;
+                rebuild_noise_block(block);
             }
 
-            // Determine effective f0 (may have been updated by note_tune)
-            float eff_f0 = v.f0_hz;
-            int n_harm = v.cur_frame.valid ? v.cur_frame.num_harmonics :
-                         std::min(num_harmonics_, MAX_HARMONICS);
-            int n_noise = v.cur_frame.valid ? v.cur_frame.num_noise_bands :
-                          std::min(num_noise_bands_, MAX_NOISE_BANDS);
+            float env_val = v_.env.next();
+            if (v_.env.is_off()) { v_.active = false; break; }
 
-            float last_att = attack_time_, last_rel = release_time_;
+            float t = std::min(v_.frame_phase, 1.0f);
 
-            // --- Additive synthesis ---
-            for (int i = 0; i < N; ++i) {
-                // Per-sample ADSR update
-                if (ps_adsr) {
-                    float a = att_ctl && att_ctl->samples ? att_ctl->samples[i] : attack_time_;
-                    float r = rel_ctl && rel_ctl->samples ? rel_ctl->samples[i] : release_time_;
-                    if (a != last_att || r != last_rel) {
-                        v.env.update(sample_rate_, a, 0.05f, 0.8f, r);
-                        last_att = a; last_rel = r;
-                    }
-                }
-
-                float t = std::min(v.frame_phase, 1.0f);
-                float env_val = v.env.next();
-
-                if (v.env.is_off()) {
-                    v.active.store(false, std::memory_order_relaxed);
-                    break;
-                }
-
-                // Interpolate amplitude
-                float amp = v.last_frame.amplitude * (1.0f - t) +
-                            v.cur_frame.amplitude * t;
-
-                // Accumulate harmonics
-                float sample = 0.0f;
-                float phase_inc_base = eff_f0 / sample_rate_;
-
-                for (int h = 0; h < n_harm; ++h) {
-                    // Interpolate per-harmonic amplitude
-                    float h_amp = v.last_frame.harmonic_amps[h] * (1.0f - t) +
-                                  v.cur_frame.harmonic_amps[h] * t;
-
-                    // Apply brightness: attenuate higher harmonics when brightness < 0.5,
-                    // boost when > 0.5
-                    float h_frac = static_cast<float>(h) / std::max(1, n_harm - 1);
-                    float bright_scale = std::pow(h_frac + 0.01f, -(brightness - 0.5f) * 2.0f);
-                    h_amp *= bright_scale;
-
-                    float phase = v.harmonic_phase[h];
-                    sample += h_amp * fast_sin(phase);
-
-                    // Advance phase for harmonic (h+1) * f0
-                    phase += phase_inc_base * (h + 1);
-                    phase -= std::floor(phase);
-                    v.harmonic_phase[h] = phase;
-                }
-
-                sample *= amp * env_val * expression * v.vel_gain * gain;
-                L[i] += sample;
-                R[i] += sample;
-
-                v.frame_phase += v.frame_advance;
+            // --- Harmonic oscillator bank (host SR) ---
+            float s = 0.0f;
+            const float base_inc = v_.f0_hz / host_sr_;
+            int nh = v_.cur_frame.valid ? v_.cur_frame.n_harm : 0;
+            for (int h = 0; h < nh; ++h) {
+                float a = v_.last_frame.amplitudes[h] * (1.0f - t) +
+                          v_.cur_frame.amplitudes[h] * t;
+                s += a * fast_sin(v_.harmonic_phase[h]);
+                float ph = v_.harmonic_phase[h] + base_inc * (h + 1);
+                v_.harmonic_phase[h] = ph - std::floor(ph);
             }
 
-            // --- Filtered noise (per block) ---
-            if (v.active.load(std::memory_order_relaxed) && n_noise > 0) {
-                render_noise_block(v, N, n_noise, brightness, expression, gain);
-                for (int i = 0; i < N; ++i) {
-                    float env_approx = v.env.level;  // use current level for noise
-                    float ns = v.noise_out_buf[i] * env_approx * v.vel_gain;
-                    L[i] += ns;
-                    R[i] += ns;
-                }
+            // --- Filtered noise (model SR block, resampled via frame phase) ---
+            float ns = 0.0f;
+            if (v_.noise_valid) {
+                float nidx = t * block;
+                int i0 = static_cast<int>(nidx);
+                float fr = nidx - i0;
+                if (i0 < 0) i0 = 0;
+                if (i0 > block - 1) i0 = block - 1;
+                int i1 = std::min(i0 + 1, block - 1);
+                ns = (v_.noise_block[i0] * (1.0f - fr) + v_.noise_block[i1] * fr) * noise_gain;
             }
+
+            float smp = (s + ns) * env_val * gain;
+            L[i] += smp;
+            if (out->right) R[i] += smp;
+
+            v_.frame_phase += frame_advance_per_sample_;
         }
 
-        // Soft clip output
+        // Soft clip.
         for (int i = 0; i < N; ++i) {
             auto sc = [](float x) { return (x > 0.95f || x < -0.95f) ? std::tanh(x) : x; };
             L[i] = sc(L[i]);
@@ -563,333 +368,297 @@ public:
     }
 
 private:
-    // ------------------------------------------------------------------
-    // Noise synthesis (audio thread, per block)
-    // ------------------------------------------------------------------
+    struct HeldNote { int ch, pitch, vel; };
 
-    void render_noise_block(DDSPVoice& v, int block_size, int n_noise,
-                            float brightness, float expression, float gain) {
-        // Generate noise and filter via FFT + magnitude shaping + IFFT
-        // with 50% overlap-add for smooth transitions
-
-        int remaining = block_size;
-        int out_pos = 0;
-
-        while (remaining > 0) {
-            if (v.noise_ola_pos >= NOISE_HOP_SIZE || !v.noise_buf_ready) {
-                // Need to synthesise a new noise frame
-                synthesise_noise_frame(v, n_noise, brightness, expression, gain);
-                v.noise_ola_pos = 0;
-                v.noise_buf_ready = true;
-            }
-
-            int avail = NOISE_HOP_SIZE - v.noise_ola_pos;
-            int to_copy = std::min(remaining, avail);
-
-            // Read from OLA buffer at current position
-            std::memcpy(v.noise_out_buf + out_pos,
-                        v.noise_ola_buf + v.noise_ola_pos,
-                        to_copy * sizeof(float));
-
-            v.noise_ola_pos += to_copy;
-            out_pos += to_copy;
-            remaining -= to_copy;
-        }
-    }
-
-    void synthesise_noise_frame(DDSPVoice& v, int n_noise,
-                                float brightness, float expression, float gain) {
-        float* scratch = v.noise_fft_scratch;
-
-        // Generate windowed white noise in complex format
-        for (int i = 0; i < NOISE_FFT_SIZE; ++i) {
-            float noise = rng_.next() * g_hann_window[i];
-            scratch[2 * i]     = noise;
-            scratch[2 * i + 1] = 0.0f;
-        }
-
-        // Forward FFT
-        fft_complex_inplace(scratch, NOISE_FFT_SIZE, false);
-
-        // Apply noise magnitude filter
-        // Map n_noise bands to NOISE_FFT_SIZE/2+1 bins
-        int n_bins = NOISE_FFT_SIZE / 2 + 1;
-        float t = std::min(v.frame_phase, 1.0f);
-
-        for (int k = 0; k < n_bins; ++k) {
-            // Map bin to noise band index
-            int band = (n_noise > 0) ? (k * n_noise / n_bins) : 0;
-            if (band >= n_noise) band = n_noise - 1;
-
-            float mag = v.last_frame.noise_mags[band] * (1.0f - t) +
-                        v.cur_frame.noise_mags[band] * t;
-
-            // Apply brightness: boost/attenuate high-frequency noise
-            float k_frac = static_cast<float>(k) / std::max(1, n_bins - 1);
-            float bright_scale = std::pow(k_frac + 0.01f, -(brightness - 0.5f) * 2.0f);
-            mag *= bright_scale * expression * gain;
-
-            scratch[2 * k]     *= mag;
-            scratch[2 * k + 1] *= mag;
-        }
-
-        // Restore Hermitian symmetry
-        for (int k = 1; k < NOISE_FFT_SIZE / 2; ++k) {
-            scratch[2 * (NOISE_FFT_SIZE - k)]     =  scratch[2 * k];
-            scratch[2 * (NOISE_FFT_SIZE - k) + 1] = -scratch[2 * k + 1];
-        }
-
-        // Inverse FFT
-        fft_complex_inplace(scratch, NOISE_FFT_SIZE, true);
-
-        // Overlap-add into OLA buffer
-        // Shift old buffer left by NOISE_HOP_SIZE, add new frame
-        std::memmove(v.noise_ola_buf, v.noise_ola_buf + NOISE_HOP_SIZE,
-                     NOISE_HOP_SIZE * sizeof(float));
-        // Zero the second half (will be filled by current frame)
-        std::memset(v.noise_ola_buf + NOISE_HOP_SIZE, 0, NOISE_HOP_SIZE * sizeof(float));
-
-        // Add windowed IFFT output
-        for (int i = 0; i < NOISE_FFT_SIZE; ++i) {
-            int ola_idx = i - NOISE_HOP_SIZE;  // map into OLA buffer
-            if (ola_idx >= 0 && ola_idx < NOISE_FFT_SIZE) {
-                v.noise_ola_buf[ola_idx] += scratch[2 * i] * g_hann_window[i];
-            }
-        }
+    static inline float midi_to_hz(float note) {
+        return 440.0f * std::pow(2.0f, (note - 69.0f) / 12.0f);
     }
 
     // ------------------------------------------------------------------
-    // Default frame (hardcoded harmonic series for use before ONNX loads)
+    // Note lifecycle
     // ------------------------------------------------------------------
 
-    static void make_default_frame(DDSPFrame& f, float f0, int n_harm, int n_noise) {
-        f.f0 = f0;
-        f.amplitude = 0.3f;
-        f.num_harmonics = std::min(n_harm, MAX_HARMONICS);
-        f.num_noise_bands = std::min(n_noise, MAX_NOISE_BANDS);
-        f.valid = true;
+    void start_note(int channel, int pitch, int velocity) {
+        v_.channel  = channel;
+        v_.pitch    = pitch;
+        v_.velocity = velocity;
+        v_.tune_semitones = 0.0f;
+        v_.f0_hz    = midi_to_hz(static_cast<float>(pitch));
+        v_.frame_phase = 1.0f;          // force inference on the first sample
+        v_.noise_valid = false;
+        std::memset(v_.harmonic_phase, 0, sizeof(v_.harmonic_phase));
 
-        // Decaying harmonic series: amplitude ∝ 1/(h+1)
-        for (int h = 0; h < f.num_harmonics; ++h)
-            f.harmonic_amps[h] = 1.0f / (h + 1);
+        // Reset the GRU caches so a new note starts from a clean recurrent state.
+        std::fill(cache_.begin(), cache_.end(), 0.0f);
+        std::fill(expr_cache_.begin(), expr_cache_.end(), 0.0f);
+        std::fill(f0_expr_cache_.begin(), f0_expr_cache_.end(), 0.0f);
 
-        // Normalize harmonic amplitudes
+        // Expression-model note state (causal: onset now, no lookahead).
+        expr_gate_ = true;
+        expr_t_onset_sec_ = 0.0f;
+        expr_t_rel_sec_ = 0.0f;
+        f0_prev_dev_ = 0.0f;
+
+        make_default_frame(v_.cur_frame);   // immediate sound before first infer
+        v_.last_frame = v_.cur_frame;
+
+        // When the expression model owns the musical attack, the output ADSR is
+        // just a short declick; otherwise it carries the attack swell itself.
+        float atk = has_expr_ ? std::min(attack_time_, 0.005f) : attack_time_;
+        v_.env.trigger(host_sr_, atk, 0.0f, 1.0f, release_time_);
+        v_.releasing = false;
+        v_.active = true;
+    }
+
+    void reset_voice() {
+        v_ = Voice{};
+        std::fill(cache_.begin(), cache_.end(), 0.0f);
+        std::fill(expr_cache_.begin(), expr_cache_.end(), 0.0f);
+        std::fill(f0_expr_cache_.begin(), f0_expr_cache_.end(), 0.0f);
+        expr_gate_ = false;
+        expr_t_onset_sec_ = 0.0f;
+        expr_t_rel_sec_ = 0.0f;
+        f0_prev_dev_ = 0.0f;
+        held_.clear();
+    }
+
+    void recompute_frame_advance() {
+        float fps = (block_size_ > 0)
+                        ? (static_cast<float>(model_sr_) / block_size_)
+                        : 100.0f;
+        frame_advance_per_sample_ = (host_sr_ > 0) ? (fps / host_sr_) : 0.0f;
+        frame_sec_ = (fps > 0.0f) ? (1.0f / fps) : 0.01f;   // seconds per model frame
+    }
+
+    // ------------------------------------------------------------------
+    // Noise synthesis: amp_to_impulse_response + causal FIR (== reference
+    // fft_convolve(noise, impulse)[block:]).
+    // ------------------------------------------------------------------
+
+    void rebuild_noise_block(int block) {
+        if (!v_.cur_frame.valid || v_.cur_frame.n_bands < 2) {
+            v_.noise_valid = false;
+            return;
+        }
+        const int n_bands = v_.cur_frame.n_bands;
+        const int F = 2 * (n_bands - 1);           // filter_size (irfft length)
+        if (F < 2 || F > block) { v_.noise_valid = false; return; }
+
+        const float* param = v_.cur_frame.noise_param;
+        const float two_pi = 2.0f * static_cast<float>(M_PI);
+
+        // irfft of the real magnitude spectrum (imag = 0) -> F real taps.
+        float tmp[MAX_BLOCK];
+        for (int n = 0; n < F; ++n) {
+            float acc = param[0];
+            for (int k = 1; k < F / 2; ++k)
+                acc += 2.0f * param[k] * std::cos(two_pi * k * n / F);
+            acc += param[F / 2] * std::cos(static_cast<float>(M_PI) * n);  // k = F/2
+            tmp[n] = acc / F;
+        }
+
+        // roll right by F/2, Hann window, pad to block, roll left by F/2.
+        const int half = F / 2;
+        float rolled[MAX_BLOCK];
+        for (int i = 0; i < F; ++i) {
+            int src = ((i - half) % F + F) % F;
+            float win = 0.5f * (1.0f - std::cos(two_pi * i / F));  // hann(F), periodic
+            rolled[i] = tmp[src] * win;
+        }
+        float impulse[MAX_BLOCK];
+        for (int i = 0; i < block; ++i) {
+            int src = (i + half) % block;            // roll(-half) on length block
+            impulse[i] = (src < F) ? rolled[src] : 0.0f;
+        }
+
+        // Causal convolution of a fresh white-noise block with the impulse.
+        float white[MAX_BLOCK];
+        for (int i = 0; i < block; ++i) white[i] = rng_.next();
+        for (int p = 0; p < block; ++p) {
+            float acc = 0.0f;
+            for (int j = 0; j <= p; ++j) acc += white[p - j] * impulse[j];
+            v_.noise_block[p] = acc;
+        }
+        v_.noise_valid = true;
+    }
+
+    void make_default_frame(DDSPFrame& f) {
+        int nh = std::min(n_harmonic_ > 0 ? n_harmonic_ : 64, MAX_HARMONICS);
+        int nb = std::min(n_bands_ > 0 ? n_bands_ : 65, MAX_NOISE_BANDS);
+        f.n_harm = nh; f.n_bands = nb; f.valid = true;
         float sum = 0.0f;
-        for (int h = 0; h < f.num_harmonics; ++h) sum += f.harmonic_amps[h];
-        if (sum > 0.0f) {
-            for (int h = 0; h < f.num_harmonics; ++h)
-                f.harmonic_amps[h] /= sum;
-        }
-
-        // Gentle noise floor
-        for (int b = 0; b < f.num_noise_bands; ++b)
-            f.noise_mags[b] = 0.01f;
+        for (int h = 0; h < nh; ++h) { f.amplitudes[h] = 1.0f / (h + 1); sum += f.amplitudes[h]; }
+        if (sum > 0.0f) for (int h = 0; h < nh; ++h) f.amplitudes[h] *= 0.3f / sum;
+        for (int b = 0; b < nb; ++b) f.noise_param[b] = 0.0f;
     }
 
     // ------------------------------------------------------------------
-    // Model loading (main thread)
+    // Loudness for the current frame: learned expression model if present,
+    // else the velocity*expression -> dB mapping enveloped by the ADSR.
+    // The expression path is CAUSAL and event-driven (no score lookahead), so
+    // preview notes and upstream event-stream plugins behave normally.
     // ------------------------------------------------------------------
 
-    void load_model(const std::string& dir) {
-        if (dir.empty()) {
-            DDSP_LOG("No model directory specified");
-            model_loaded_ = false;
-            return;
+    float loudness_for_frame() {
+        if (has_expr_ && use_expression_) {
+            if (expr_gate_) {
+                // Note held: the model drives the attack + sustain contour.
+                // The velocity feature is scaled by the expression control
+                // (cur_level_ = velocity/127 * expression), so 'expression' is a
+                // live dynamics/swell knob, not just a fallback-path control.
+                float midi = static_cast<float>(v_.pitch) + v_.tune_semitones;
+                float feat[5] = {
+                    (midi - 69.0f) / 12.0f, 1.0f, cur_level_,
+                    std::min(expr_t_onset_sec_, expr_t_clip_) / expr_t_clip_, 0.0f,
+                };
+                float loud;
+                if (run_expr(feat, loud)) { last_loud_db_ = loud; return loud; }
+            } else {
+                // Released: deterministic monotonic decay from the held loudness
+                // to the floor. We do NOT query the model here — its learned
+                // release is unreliable (self-supervised note offsets don't align
+                // with loudness drops, so it tends to swell back up), which caused
+                // a double-articulation at note transitions.
+                float r = (release_time_ > 1e-4f)
+                              ? std::min(expr_t_rel_sec_ / release_time_, 1.0f) : 1.0f;
+                return last_loud_db_ + (loud_floor_db_ - last_loud_db_) * r;
+            }
         }
+        // Fallback: velocity*expression -> dB, swelled by the ADSR level.
+        float lvl = cur_level_ * v_.env.level;
+        return loud_floor_db_ + (loud_ceil_db_ - loud_floor_db_) * lvl;
+    }
 
-        // Parse config.json
-        std::string config_path = dir + "/config.json";
-        std::ifstream cfg_file(config_path);
-        if (!cfg_file.is_open()) {
-            DDSP_LOG("Cannot open %s", config_path.c_str());
-            model_loaded_ = false;
-            return;
-        }
-
-        try {
-            nlohmann::json cfg;
-            cfg_file >> cfg;
-
-            if (cfg.contains("num_harmonics"))
-                num_harmonics_ = cfg["num_harmonics"].get<int>();
-            if (cfg.contains("num_noise_bands"))
-                num_noise_bands_ = cfg["num_noise_bands"].get<int>();
-            if (cfg.contains("frame_rate"))
-                model_frame_rate_ = cfg["frame_rate"].get<int>();
-            if (cfg.contains("sample_rate"))
-                model_sample_rate_ = cfg["sample_rate"].get<int>();
-            if (cfg.contains("z_dim"))
-                z_dim_ = cfg["z_dim"].get<int>();
-
-            num_harmonics_   = std::min(num_harmonics_, MAX_HARMONICS);
-            num_noise_bands_ = std::min(num_noise_bands_, MAX_NOISE_BANDS);
-
-            DDSP_LOG("Config: harmonics=%d noise_bands=%d frame_rate=%d sr=%d z_dim=%d",
-                     num_harmonics_, num_noise_bands_, model_frame_rate_,
-                     model_sample_rate_, z_dim_);
-        } catch (const std::exception& e) {
-            DDSP_LOG("Error parsing config.json: %s", e.what());
-            model_loaded_ = false;
-            return;
-        }
-
+    bool run_expr([[maybe_unused]] const float* feat, [[maybe_unused]] float& loud) {
 #ifdef AS_ENABLE_DDSP
-        // Load ONNX model
-        std::string onnx_path = dir + "/decoder.onnx";
+        if (!expr_session_ || expr_hidden_ <= 0) return false;
         try {
-            if (!ort_env_)
-                ort_env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "ddsp");
-
-            Ort::SessionOptions opts;
-            opts.SetIntraOpNumThreads(2);
-            opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-
-            ort_session_ = std::make_unique<Ort::Session>(*ort_env_, onnx_path.c_str(), opts);
-            model_loaded_ = true;
-            DDSP_LOG("Loaded decoder: %s", onnx_path.c_str());
+            int64_t sfeat[3]  = {1, 1, 5};
+            int64_t scache[3] = {1, 1, static_cast<int64_t>(expr_hidden_)};
+            std::vector<Ort::Value> ins;
+            ins.reserve(2);
+            ins.push_back(Ort::Value::CreateTensor<float>(
+                mem_info_, const_cast<float*>(feat), 5, sfeat, 3));
+            ins.push_back(Ort::Value::CreateTensor<float>(
+                mem_info_, expr_cache_.data(), expr_cache_.size(), scache, 3));
+            const char* in_names[]  = {"feat", "cache_in"};
+            const char* out_names[] = {"loudness", "cache_out"};
+            auto outs = expr_session_->Run(Ort::RunOptions{nullptr},
+                                           in_names, ins.data(), 2, out_names, 2);
+            if (outs.size() < 2) return false;
+            loud = outs[0].GetTensorData<float>()[0];
+            std::memcpy(expr_cache_.data(), outs[1].GetTensorData<float>(),
+                        static_cast<size_t>(expr_hidden_) * sizeof(float));
+            return true;
         } catch (const Ort::Exception& e) {
-            DDSP_LOG("ONNX error loading %s: %s", onnx_path.c_str(), e.what());
-            model_loaded_ = false;
+            DDSP_LOG("Expression inference error: %s", e.what());
+            return false;
         }
 #else
-        DDSP_LOG("ONNX Runtime not available — using hardcoded frames");
-        model_loaded_ = false;
+        return false;
 #endif
-
-        // Update frame advance rate
-        if (sample_rate_ > 0 && model_frame_rate_ > 0)
-            frame_advance_per_sample_ = static_cast<float>(model_frame_rate_) / sample_rate_;
     }
 
     // ------------------------------------------------------------------
-    // Helper thread — runs ONNX inference at frame rate
+    // f0 expression: per-frame pitch deviation (vibrato / scoop / portamento)
+    // in semitones, relative to the nominal note pitch. Autoregressive (the
+    // previous deviation is fed back so the GRU can sustain vibrato), bounded.
     // ------------------------------------------------------------------
 
-    void start_helper_thread() {
-        if (helper_running_.load()) return;
-        helper_stop_.store(false);
-        helper_running_.store(true);
-        helper_thread_ = std::thread(&DDSPPlugin::helper_loop, this);
-    }
-
-    void stop_helper_thread() {
-        if (!helper_running_.load()) return;
-        helper_stop_.store(true);
-        wake_helper();
-        if (helper_thread_.joinable())
-            helper_thread_.join();
-        helper_running_.store(false);
-    }
-
-    void wake_helper() {
-        std::lock_guard<std::mutex> lk(helper_mtx_);
-        helper_wake_ = true;
-        helper_cv_.notify_one();
-    }
-
-    void helper_loop() {
-        DDSP_LOG("Helper thread started");
-        while (!helper_stop_.load(std::memory_order_relaxed)) {
-            {
-                std::unique_lock<std::mutex> lk(helper_mtx_);
-                helper_cv_.wait_for(lk, std::chrono::milliseconds(10),
-                                    [this] { return helper_wake_ || helper_stop_.load(); });
-                helper_wake_ = false;
-            }
-            if (helper_stop_.load()) break;
-
-            // Run inference for each active voice
-            for (auto& v : voices_) {
-                if (!v.active.load(std::memory_order_acquire)) continue;
-
-                DDSPFrame frame;
-                if (model_loaded_) {
-                    if (!run_inference(v, frame)) {
-                        // Inference failed — use default frame
-                        make_default_frame(frame, v.f0_hz, num_harmonics_, num_noise_bands_);
-                    }
-                } else {
-                    // No model — generate default harmonic frame
-                    make_default_frame(frame, v.f0_hz, num_harmonics_, num_noise_bands_);
-                }
-
-                v.ring.push(frame);
-            }
+    float f0_dev_for_frame() {
+        if (!has_f0_expr_) return 0.0f;
+        float midi = static_cast<float>(v_.pitch) + v_.tune_semitones;
+        float feat[6] = {
+            (midi - 69.0f) / 12.0f,
+            expr_gate_ ? 1.0f : 0.0f,
+            v_.velocity / 127.0f,
+            std::min(expr_t_onset_sec_, expr_t_clip_) / expr_t_clip_,
+            expr_gate_ ? 0.0f : std::min(expr_t_rel_sec_, expr_t_clip_) / expr_t_clip_,
+            f0_prev_dev_,
+        };
+        float dev;
+        if (run_f0_expr(feat, dev)) {
+            dev = std::clamp(dev, -f0_max_dev_, f0_max_dev_);
+            f0_prev_dev_ = dev;
+            return dev;
         }
-        DDSP_LOG("Helper thread stopped");
+        return 0.0f;
     }
 
-    bool run_inference([[maybe_unused]] DDSPVoice& v,
-                       [[maybe_unused]] DDSPFrame& frame) {
+    bool run_f0_expr([[maybe_unused]] const float* feat, [[maybe_unused]] float& dev) {
 #ifdef AS_ENABLE_DDSP
-        if (!ort_session_) return false;
-
+        if (!f0_expr_session_ || f0_expr_hidden_ <= 0) return false;
         try {
-            // Prepare inputs: f0 [1,1], loudness [1,1], optionally z [1,Z_DIM]
-            float f0_val = v.f0_hz;
-            float loudness_val = v.velocity / 127.0f;
+            int64_t sfeat[3]  = {1, 1, 6};
+            int64_t scache[3] = {1, 1, static_cast<int64_t>(f0_expr_hidden_)};
+            std::vector<Ort::Value> ins;
+            ins.reserve(2);
+            ins.push_back(Ort::Value::CreateTensor<float>(
+                mem_info_, const_cast<float*>(feat), 6, sfeat, 3));
+            ins.push_back(Ort::Value::CreateTensor<float>(
+                mem_info_, f0_expr_cache_.data(), f0_expr_cache_.size(), scache, 3));
+            const char* in_names[]  = {"feat", "cache_in"};
+            const char* out_names[] = {"deviation", "cache_out"};
+            auto outs = f0_expr_session_->Run(Ort::RunOptions{nullptr},
+                                              in_names, ins.data(), 2, out_names, 2);
+            if (outs.size() < 2) return false;
+            dev = outs[0].GetTensorData<float>()[0];
+            std::memcpy(f0_expr_cache_.data(), outs[1].GetTensorData<float>(),
+                        static_cast<size_t>(f0_expr_hidden_) * sizeof(float));
+            return true;
+        } catch (const Ort::Exception& e) {
+            DDSP_LOG("f0 expression inference error: %s", e.what());
+            return false;
+        }
+#else
+        return false;
+#endif
+    }
 
-            std::array<int64_t, 2> shape_1x1 = {1, 1};
-            auto f0_tensor = Ort::Value::CreateTensor<float>(
-                mem_info_, &f0_val, 1, shape_1x1.data(), 2);
-            auto loud_tensor = Ort::Value::CreateTensor<float>(
-                mem_info_, &loudness_val, 1, shape_1x1.data(), 2);
+    // ------------------------------------------------------------------
+    // Inference (audio thread, synchronous)
+    // ------------------------------------------------------------------
 
-            std::vector<const char*> in_names;
-            std::vector<Ort::Value> in_vals;
+    bool infer_frame([[maybe_unused]] float pitch_hz,
+                     [[maybe_unused]] float loud_db,
+                     [[maybe_unused]] DDSPFrame& frame) {
+#ifdef AS_ENABLE_DDSP
+        if (!ort_session_ || hidden_ <= 0) return false;
+        try {
+            float pitch_v = pitch_hz;
+            float loud_v  = loud_db;
+            int64_t s111[3]   = {1, 1, 1};
+            int64_t scache[3] = {1, 1, static_cast<int64_t>(hidden_)};
 
-            in_names.push_back("f0");
-            in_vals.push_back(std::move(f0_tensor));
-            in_names.push_back("loudness");
-            in_vals.push_back(std::move(loud_tensor));
+            std::vector<Ort::Value> ins;
+            ins.reserve(3);
+            ins.push_back(Ort::Value::CreateTensor<float>(mem_info_, &pitch_v, 1, s111, 3));
+            ins.push_back(Ort::Value::CreateTensor<float>(mem_info_, &loud_v, 1, s111, 3));
+            ins.push_back(Ort::Value::CreateTensor<float>(
+                mem_info_, cache_.data(), cache_.size(), scache, 3));
 
-            // Optional z input (latent code)
-            std::vector<float> z_data;
-            if (z_dim_ > 0) {
-                z_data.resize(z_dim_, 0.0f);
-                std::array<int64_t, 2> z_shape = {1, static_cast<int64_t>(z_dim_)};
-                auto z_tensor = Ort::Value::CreateTensor<float>(
-                    mem_info_, z_data.data(), z_data.size(), z_shape.data(), 2);
-                in_names.push_back("z");
-                in_vals.push_back(std::move(z_tensor));
-            }
+            const char* in_names[]  = {"pitch", "loudness", "cache_in"};
+            const char* out_names[] = {"amplitudes", "noise_param", "cache_out"};
 
-            // Output names
-            std::vector<const char*> out_names = {
-                "harmonic_amplitudes", "noise_magnitudes", "amplitude"
-            };
-
-            auto outs = ort_session_->Run(
-                Ort::RunOptions{nullptr},
-                in_names.data(), in_vals.data(), in_vals.size(),
-                out_names.data(), out_names.size());
-
+            auto outs = ort_session_->Run(Ort::RunOptions{nullptr},
+                                          in_names, ins.data(), 3, out_names, 3);
             if (outs.size() < 3) return false;
 
-            // Extract outputs
-            auto harm_info = outs[0].GetTensorTypeAndShapeInfo();
-            auto noise_info = outs[1].GetTensorTypeAndShapeInfo();
+            const float* amps  = outs[0].GetTensorData<float>();
+            const float* noise = outs[1].GetTensorData<float>();
+            const float* cache = outs[2].GetTensorData<float>();
+            int na = static_cast<int>(outs[0].GetTensorTypeAndShapeInfo().GetElementCount());
+            int nb = static_cast<int>(outs[1].GetTensorTypeAndShapeInfo().GetElementCount());
 
-            const float* harm_data = outs[0].GetTensorData<float>();
-            const float* noise_data = outs[1].GetTensorData<float>();
-            const float* amp_data = outs[2].GetTensorData<float>();
-
-            int n_h = static_cast<int>(harm_info.GetElementCount());
-            int n_n = static_cast<int>(noise_info.GetElementCount());
-
-            frame.f0 = f0_val;
-            frame.amplitude = amp_data[0];
-            frame.num_harmonics = std::min(n_h, MAX_HARMONICS);
-            frame.num_noise_bands = std::min(n_n, MAX_NOISE_BANDS);
-
-            for (int i = 0; i < frame.num_harmonics; ++i)
-                frame.harmonic_amps[i] = harm_data[i];
-            for (int i = 0; i < frame.num_noise_bands; ++i)
-                frame.noise_mags[i] = noise_data[i];
-
+            frame.n_harm  = std::min(na, MAX_HARMONICS);
+            frame.n_bands = std::min(nb, MAX_NOISE_BANDS);
+            for (int i = 0; i < frame.n_harm; ++i)  frame.amplitudes[i]  = amps[i];
+            for (int i = 0; i < frame.n_bands; ++i) frame.noise_param[i] = noise[i];
             frame.valid = true;
-            return true;
 
+            std::memcpy(cache_.data(), cache,
+                        static_cast<size_t>(hidden_) * sizeof(float));
+            return true;
         } catch (const Ort::Exception& e) {
             DDSP_LOG("Inference error: %s", e.what());
             return false;
@@ -900,44 +669,201 @@ private:
     }
 
     // ------------------------------------------------------------------
+    // Model loading (main thread)
+    // ------------------------------------------------------------------
+
+    // Load the configured model once we know the host sample rate. Runs on the
+    // control thread (configure/activate), never the audio thread.
+    void maybe_load_model() {
+        if (!activated_ || !model_dirty_) return;
+        load_model(pending_model_dir_);
+        model_dirty_ = false;
+    }
+
+    void load_model(const std::string& dir) {
+        model_loaded_ = false;
+        has_expr_ = false;
+        want_expr_ = false;
+        has_f0_expr_ = false;
+        want_f0_expr_ = false;
+        if (dir.empty()) { DDSP_LOG("No model directory specified"); return; }
+
+        std::ifstream cfg_file(dir + "/config.json");
+        if (!cfg_file.is_open()) {
+            DDSP_LOG("Cannot open %s/config.json", dir.c_str());
+            return;
+        }
+        try {
+            nlohmann::json cfg; cfg_file >> cfg;
+            if (cfg.contains("sample_rate"))   model_sr_   = cfg["sample_rate"].get<int>();
+            if (cfg.contains("sampling_rate")) model_sr_   = cfg["sampling_rate"].get<int>();
+            if (cfg.contains("block_size"))    block_size_ = cfg["block_size"].get<int>();
+            if (cfg.contains("n_harmonic"))    n_harmonic_ = cfg["n_harmonic"].get<int>();
+            if (cfg.contains("n_bands"))       n_bands_    = cfg["n_bands"].get<int>();
+            if (cfg.contains("hidden_size"))   hidden_     = cfg["hidden_size"].get<int>();
+            // Suggested loudness calibration (the converter derives it from the
+            // model's loudness stats). Explicit user config wins, regardless of
+            // the order config keys arrive in.
+            if (!loud_floor_user_ && cfg.contains("loud_floor_db"))
+                loud_floor_db_ = cfg["loud_floor_db"].get<float>();
+            if (!loud_ceil_user_ && cfg.contains("loud_ceil_db"))
+                loud_ceil_db_ = cfg["loud_ceil_db"].get<float>();
+            // Optional learned expression model (notes -> loudness).
+            if (cfg.contains("expression") && cfg["expression"].is_object()) {
+                expr_hidden_ = cfg["expression"].value("hidden_size", 128);
+                expr_t_clip_ = cfg["expression"].value("t_clip", 2.0f);
+                want_expr_ = true;
+            }
+            // Optional learned pitch-expression model (notes -> f0 deviation).
+            if (cfg.contains("f0_expression") && cfg["f0_expression"].is_object()) {
+                f0_expr_hidden_ = cfg["f0_expression"].value("hidden_size", 128);
+                f0_max_dev_ = cfg["f0_expression"].value("max_dev", 2.0f);
+                want_f0_expr_ = true;
+            }
+            n_harmonic_ = std::min(n_harmonic_, MAX_HARMONICS);
+            n_bands_    = std::min(n_bands_, MAX_NOISE_BANDS);
+            block_size_ = std::min(block_size_, MAX_BLOCK);
+            DDSP_LOG("Config: model_sr=%d block=%d n_harm=%d n_bands=%d hidden=%d expr=%d",
+                     model_sr_, block_size_, n_harmonic_, n_bands_, hidden_, (int)want_expr_);
+        } catch (const std::exception& e) {
+            DDSP_LOG("Error parsing config.json: %s", e.what());
+            return;
+        }
+        recompute_frame_advance();
+
+#ifdef AS_ENABLE_DDSP
+        try {
+            if (!ort_env_)
+                ort_env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "ddsp");
+            Ort::SessionOptions opts;
+            opts.SetIntraOpNumThreads(1);
+            opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+            ort_session_ = std::make_unique<Ort::Session>(
+                *ort_env_, (dir + "/decoder.onnx").c_str(), opts);
+            cache_.assign(hidden_, 0.0f);
+            model_loaded_ = true;
+            DDSP_LOG("Loaded decoder: %s/decoder.onnx", dir.c_str());
+        } catch (const Ort::Exception& e) {
+            DDSP_LOG("ONNX error loading %s/decoder.onnx: %s", dir.c_str(), e.what());
+        }
+
+        // Optional expression model (loudness renderer). Absent -> fall back to
+        // the velocity*expression -> dB mapping.
+        expr_session_.reset();
+        if (want_expr_ && model_loaded_) {
+            try {
+                Ort::SessionOptions eopts;
+                eopts.SetIntraOpNumThreads(1);
+                eopts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+                expr_session_ = std::make_unique<Ort::Session>(
+                    *ort_env_, (dir + "/expression.onnx").c_str(), eopts);
+                expr_cache_.assign(expr_hidden_, 0.0f);
+                has_expr_ = true;
+                DDSP_LOG("Loaded expression model (hidden=%d)", expr_hidden_);
+            } catch (const Ort::Exception& e) {
+                DDSP_LOG("expression.onnx load failed (%s) — using fallback loudness", e.what());
+            }
+        }
+
+        // Optional pitch-expression model. Absent -> flat (nominal) pitch.
+        f0_expr_session_.reset();
+        if (want_f0_expr_ && model_loaded_) {
+            try {
+                Ort::SessionOptions eopts;
+                eopts.SetIntraOpNumThreads(1);
+                eopts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+                f0_expr_session_ = std::make_unique<Ort::Session>(
+                    *ort_env_, (dir + "/f0_expression.onnx").c_str(), eopts);
+                f0_expr_cache_.assign(f0_expr_hidden_, 0.0f);
+                has_f0_expr_ = true;
+                DDSP_LOG("Loaded f0 expression model (hidden=%d, max_dev=%.1f)",
+                         f0_expr_hidden_, f0_max_dev_);
+            } catch (const Ort::Exception& e) {
+                DDSP_LOG("f0_expression.onnx load failed (%s) — using flat pitch", e.what());
+            }
+        }
+#else
+        cache_.assign(hidden_, 0.0f);
+        DDSP_LOG("ONNX Runtime not available — using default frames");
+#endif
+    }
+
+    // ------------------------------------------------------------------
     // Member data
     // ------------------------------------------------------------------
 
-    float sample_rate_ = 44100.0f;
+    float host_sr_ = 44100.0f;
+    bool  activated_ = false;
 
-    // Model config
+    // Model config (from config.json)
     std::string pending_model_dir_;
     bool model_dirty_  = false;
     bool model_loaded_ = false;
-    int  num_harmonics_     = 60;
-    int  num_noise_bands_   = 65;
-    int  model_frame_rate_  = 100;
-    int  model_sample_rate_ = 16000;
-    int  z_dim_             = 0;
+    int  n_harmonic_ = 64;
+    int  n_bands_    = 65;
+    int  model_sr_   = 16000;
+    int  block_size_ = 160;
+    int  hidden_     = 512;
     float frame_advance_per_sample_ = 100.0f / 44100.0f;
+    float frame_sec_ = 0.01f;                 // seconds per model frame
 
-    // ADSR params (updated from control ports each block)
-    float attack_time_  = 0.01f;
+    // Optional learned expression model (notes -> loudness)
+    bool  use_expression_ = true;             // user toggle (config param)
+    bool  want_expr_   = false;               // config.json declares one
+    bool  has_expr_    = false;               // and it loaded
+    int   expr_hidden_ = 128;
+    float expr_t_clip_ = 2.0f;                // seconds clip for onset/release feats
+    bool  expr_gate_   = false;               // note held (1) vs released (0)
+    float expr_t_onset_sec_ = 0.0f;
+    float expr_t_rel_sec_   = 0.0f;
+    float last_loud_db_     = 0.0f;           // loudness at note-off, for release decay
+
+    // Optional learned pitch-expression model (notes -> f0 deviation)
+    bool  want_f0_expr_   = false;
+    bool  has_f0_expr_    = false;
+    int   f0_expr_hidden_ = 128;
+    float f0_max_dev_     = 2.0f;             // clamp on |deviation| (semitones)
+    float f0_prev_dev_    = 0.0f;             // autoregressive feedback
+
+    // Loudness mapping (raw model units)
+    float loud_floor_db_ = -60.0f;
+    float loud_ceil_db_  = 0.0f;
+    float cur_level_     = 0.0f;   // target velocity*expression level [0,1]
+    bool  loud_floor_user_ = false;   // user set loud_floor_db explicitly
+    bool  loud_ceil_user_  = false;
+
+    // Output envelope params (from control ports each block)
+    float attack_time_  = 0.05f;
     float release_time_ = 0.1f;
 
-    // Voices
-    DDSPVoice voices_[MAX_VOICES];
+    // Monophonic voice
+    struct Voice {
+        bool  active = false;
+        bool  releasing = false;
+        int   channel = 0, pitch = 0, velocity = 0;
+        float f0_hz = 0.0f;
+        float tune_semitones = 0.0f;
+        float harmonic_phase[MAX_HARMONICS] = {};
+        DDSPFrame last_frame, cur_frame;
+        float frame_phase = 0.0f;
+        ADSREnvelope env;
+        float noise_block[MAX_BLOCK] = {};
+        bool  noise_valid = false;
+    } v_;
 
-    // Noise RNG
+    std::vector<HeldNote> held_;
     XorShift32 rng_;
 
-    // Helper thread
-    std::thread helper_thread_;
-    std::atomic<bool> helper_running_{false};
-    std::atomic<bool> helper_stop_{false};
-    std::mutex helper_mtx_;
-    std::condition_variable helper_cv_;
-    bool helper_wake_ = false;
+    // GRU caches (threaded frame-to-frame)
+    std::vector<float> cache_;          // decoder
+    std::vector<float> expr_cache_;     // loudness expression model
+    std::vector<float> f0_expr_cache_;  // pitch expression model
 
-    // ONNX Runtime
 #ifdef AS_ENABLE_DDSP
     std::unique_ptr<Ort::Env>     ort_env_;
     std::unique_ptr<Ort::Session> ort_session_;
+    std::unique_ptr<Ort::Session> expr_session_;
+    std::unique_ptr<Ort::Session> f0_expr_session_;
     Ort::MemoryInfo mem_info_ = Ort::MemoryInfo::CreateCpu(
         OrtArenaAllocator, OrtMemTypeDefault);
 #endif

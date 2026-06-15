@@ -1503,6 +1503,17 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
         cp_default = cp.get("default", "")
         stored = node.params.get(cp_id, cp_default)
 
+        # DDSP: the loudness floor/ceiling only feed the fallback loudness map.
+        # Hide them when the model bundles an expression network and it's enabled
+        # (the expression model supersedes that mapping).
+        if cp_id in ("loud_floor_db", "loud_ceil_db"):
+            import os
+            mdir = str(node.params.get("model_dir", "") or "")
+            use_expr = node.params.get("use_expression", True)
+            use_expr = use_expr not in (False, "false", "False", 0, "0", "")
+            if use_expr and mdir and os.path.exists(os.path.join(mdir, "expression.onnx")):
+                continue
+
         # Skip advanced params unless user has set a value
         if cp.get("advanced", False) and not stored:
             continue

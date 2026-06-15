@@ -13,3 +13,17 @@ bin/
 *.dll
 .claude/
 test_pitch_delta
+# DDSP model artifacts (large ONNX / TorchScript / training runs)
+models/
+*.onnx
+*.ts
+*.pth
+# DDSP training relocated to a separate project (kept locally; may contain
+# machine-local paths — must NOT reach this public repo)
+scripts/ddsp_ref/
+scripts/train_ddsp.py
+scripts/train_expression.py
+scripts/convert_ddsp.py
+scripts/train_ddsp_full.sh
+scripts/requirements-ddsp.txt
+scripts/DDSP_TRAINING_MOVED.md
