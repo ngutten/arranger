@@ -47,6 +47,16 @@ struct ProcessContext {
     bool  transport_stopped = false;
 };
 
+// Master/channel meter snapshot, published by the audio thread and polled
+// from the main thread (e.g. CMD_GET_POSITION).  Linear units; gain_reduction
+// is the limiter's current gain (1.0 = no reduction, <1.0 = limiting).
+struct MeterSnapshot {
+    float peak_l = 0.0f, peak_r = 0.0f;
+    float rms_l  = 0.0f, rms_r  = 0.0f;
+    float gain_reduction = 1.0f;
+    bool  valid = false;
+};
+
 class Node {
 public:
     std::string id;
@@ -79,6 +89,7 @@ public:
     virtual void program_change(int channel, int bank, int program) {}
     virtual void pitch_bend(int channel, int value) {}
     virtual void channel_volume(int channel, int volume) {}
+    virtual void channel_pan(int channel, int pan) {}   // pan 0..127, 64=center
     virtual void note_tune(int channel, int note, float semitones) {}
     /// Per-note attribute, delivered just before the matching note_on.
     /// `id` names the attribute (e.g. "attack", "excitation"); the consuming
@@ -111,6 +122,15 @@ public:
     /// Return the pattern data stored in this node, if it is a pattern source.
     /// Returns nullptr for all other node types.
     virtual const PatternData* get_pattern_data() const { return nullptr; }
+
+    /// Publish the node's latest level meter.  Returns {valid=false} for nodes
+    /// that don't meter (the default).  The master mixer overrides this.
+    virtual MeterSnapshot read_meter() const { return {}; }
+
+    /// Number of per-input-channel meters this node exposes (0 = none).
+    virtual int meter_channel_count() const { return 0; }
+    /// Per-input-channel meter snapshot.  ch in [0, meter_channel_count()).
+    virtual MeterSnapshot read_channel_meter(int /*ch*/) const { return {}; }
 };
 
 // ---------------------------------------------------------------------------

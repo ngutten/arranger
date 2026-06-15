@@ -149,6 +149,14 @@ public:
     void set_tempo_map(TempoMap map);
     float current_bpm() const;
 
+    // Latest master-bus meter (peak/RMS/gain-reduction).  {valid=false} if the
+    // graph has no terminal mixer node yet.
+    MeterSnapshot master_meter() const;
+
+    // Per-mixer-input-channel meters (one per stereo input pair). Empty if the
+    // graph has no terminal mixer node.
+    std::vector<MeterSnapshot> channel_meters() const;
+
     // Poll for pending transport callbacks (on_transport_stop etc.).
     // Call from any main-thread entry point; no-op if nothing is pending.
     void poll();

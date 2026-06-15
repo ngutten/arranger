@@ -284,6 +284,10 @@ public:
         if (fs_) fluid_synth_cc(fs_, ch, 7, std::max(0, std::min(127, volume)));
     }
 
+    void channel_pan(int ch, int pan) override {
+        if (fs_) fluid_synth_cc(fs_, ch, 10, std::max(0, std::min(127, pan)));
+    }
+
     void all_notes_off(int channel) override {
         if (!fs_) return;
         if (channel == -1) {

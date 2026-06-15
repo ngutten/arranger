@@ -170,9 +170,30 @@ def _build_server_schedule(state) -> list[dict]:
     """Convert AppState to a flat list of server event dicts."""
     events = []
 
+    # --- Master section setup (terminal "mixer" node) ---
+    # Emitted as beat=-1 control events so they fire before any note-on and
+    # apply identically in live playback and offline export (same dispatcher
+    # path as per-track volume).  master_gain is linear makeup; the ceiling is
+    # stored in dBFS and converted to the limiter's linear threshold.
+    ceiling_db = float(getattr(state, 'master_ceiling_db', -1.0))
+    for port_id, value in (
+        ("master_gain",      float(getattr(state, 'master_gain', 1.0))),
+        ("limiter_enabled",  1.0 if getattr(state, 'master_limiter', True) else 0.0),
+        ("limiter_threshold", 10.0 ** (ceiling_db / 20.0)),
+    ):
+        events.append({
+            "beat": -1, "type": "control", "node_id": "mixer",
+            "port_id": port_id, "channel": 0, "pitch": 0,
+            "velocity": 0, "value": value,
+        })
+
     from ..ops.variations import resolve_placement_notes
 
     # --- Melodic tracks ---
+    # Solo overrides mute: if any track (melodic OR beat) is soloed, only
+    # soloed tracks sound. Audibility is shared across both track types.
+    any_solo = (any(getattr(t, 'solo', False) for t in state.tracks) or
+                any(getattr(bt, 'solo', False) for bt in state.beat_tracks))
     for pl in state.placements:
         t = state.find_track(pl.track_id)
         if not t:
@@ -184,7 +205,8 @@ def _build_server_schedule(state) -> list[dict]:
         node_id = f"track_{t.id}"
         ch = t.channel & 0x0F
 
-        # Setup events: program and volume fire before any note-ons (beat=-1)
+        # Setup events: program, volume, pan fire before any note-ons (beat=-1).
+        # These are emitted even for muted tracks so live un-muting is instant.
         events.append({
             "beat": -1, "type": "program",
             "node_id": node_id, "channel": ch,
@@ -195,6 +217,18 @@ def _build_server_schedule(state) -> list[dict]:
             "node_id": node_id, "channel": ch,
             "pitch": t.volume, "velocity": 0, "value": 0.0,
         })
+        pan_cc = max(0, min(127, int(round((getattr(t, 'pan', 0.0) + 1.0) * 0.5 * 127))))
+        events.append({
+            "beat": -1, "type": "pan",
+            "node_id": node_id, "channel": ch,
+            "pitch": pan_cc, "velocity": 0, "value": 0.0,
+        })
+
+        # Mute / solo: skip note events for inaudible tracks (export-correct).
+        audible = (not getattr(t, 'mute', False)) and \
+                  (getattr(t, 'solo', False) or not any_solo)
+        if not audible:
+            continue
 
         transpose = state.compute_transpose(pl)
         reps = pl.repeats or 1
@@ -250,6 +284,14 @@ def _build_server_schedule(state) -> list[dict]:
         if not bt or not bpat:
             continue
 
+        # Mute/solo: a beat track spans multiple (often shared) instrument
+        # channels, so volume is a per-hit velocity scale rather than CC7.
+        bt_audible = (not getattr(bt, 'mute', False)) and \
+                     (getattr(bt, 'solo', False) or not any_solo)
+        if not bt_audible:
+            continue
+        bt_vol = getattr(bt, 'volume', 100) / 100.0
+
         reps = bp.repeats or 1
 
         for inst in state.beat_kit:
@@ -275,10 +317,11 @@ def _build_server_schedule(state) -> list[dict]:
                     if vel > 0:
                         on_beat  = offset + step_idx * step_dur
                         off_beat = on_beat + step_dur * 0.8
+                        scaled_vel = max(1, min(127, int(round(vel * bt_vol))))
                         events.append({
                             "beat": on_beat, "type": "note_on",
                             "node_id": node_id, "channel": ch,
-                            "pitch": inst.pitch, "velocity": vel, "value": 0.0,
+                            "pitch": inst.pitch, "velocity": scaled_vel, "value": 0.0,
                         })
                         events.append({
                             "beat": off_beat, "type": "note_off",
@@ -506,6 +549,9 @@ class BindingEngine:
         self._is_playing   = False
         self._current_beat = 0.0
         self._current_bpm  = 120.0
+        self._master_meter = {"peak_l": 0.0, "peak_r": 0.0, "rms_l": 0.0,
+                              "rms_r": 0.0, "gr": 1.0, "valid": False,
+                              "channels": []}
 
         # Populate graph editor plugin descriptors
         resp = self._send({"cmd": "list_registered_plugins"})
@@ -638,7 +684,36 @@ class BindingEngine:
             self._current_beat = resp.get("beat", self._current_beat)
             self._is_playing   = resp.get("playing", self._is_playing)
             self._current_bpm  = resp.get("bpm", self._current_bpm)
+            m = resp.get("meter")
+            if m:
+                self._master_meter = m
         return self._current_beat
+
+    @property
+    def master_meter(self) -> dict:
+        """Latest master-bus meter from the last get_position poll.
+
+        Keys: peak_l, peak_r, rms_l, rms_r (linear), gr (gain reduction),
+        valid (bool).  Polled lazily via current_beat by app.py's QTimer.
+        """
+        return self._master_meter
+
+    # ------------------------------------------------------------------
+    # Master section controls (terminal "mixer" node)
+    # ------------------------------------------------------------------
+
+    def set_master_gain(self, gain: float):
+        """Linear makeup gain. Applied live now and persisted for export."""
+        self.state.master_gain = max(0.0, float(gain))
+        self.set_param("mixer", "master_gain", self.state.master_gain)
+
+    def set_master_limiter(self, enabled: bool):
+        self.state.master_limiter = bool(enabled)
+        self.set_param("mixer", "limiter_enabled", 1.0 if enabled else 0.0)
+
+    def set_master_ceiling_db(self, ceiling_db: float):
+        self.state.master_ceiling_db = float(ceiling_db)
+        self.set_param("mixer", "limiter_threshold", 10.0 ** (float(ceiling_db) / 20.0))
 
     @property
     def current_bpm(self) -> float:

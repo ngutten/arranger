@@ -6,7 +6,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxLayout,
-                                QSplitter, QFileDialog, QMessageBox, QMenuBar)
+                                QSplitter, QFileDialog, QMessageBox, QMenuBar,
+                                QDockWidget)
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QPalette, QColor, QAction
 
@@ -132,6 +133,24 @@ class App(QMainWindow):
         self.autosave_timer = QTimer(self)
         self.autosave_timer.timeout.connect(self._auto_save)
         self.autosave_timer.start(60000)
+
+        # Always-on master meter refresh (~20fps). During playback the playhead
+        # timer already refreshes the meter snapshot, so we only poll here when
+        # stopped (catches live note/pattern previews).
+        self._meter_timer = QTimer(self)
+        self._meter_timer.setInterval(50)
+        self._meter_timer.timeout.connect(self._meter_tick)
+        self._meter_timer.start()
+
+    def _meter_tick(self):
+        eng = self.engine
+        if not eng or not hasattr(eng, 'master_meter'):
+            return
+        if not self.state.playing:
+            _ = eng.current_beat   # refresh meter snapshot via get_position
+        self.topbar.update_meter()
+        if getattr(self, '_mixer_open', False):
+            self.mixer_view.update_meter()
     
     # Autosave functionality
     def _auto_save(self):
@@ -367,26 +386,38 @@ class App(QMainWindow):
         self.piano_roll = PianoRoll(self.editor_container, self)
         self.beat_grid = BeatGrid(self.editor_container, self)
         self.automation_curve = AutomationCurve(self.editor_container, self)
+        from .ui.mixer_view import MixerView
+        self.mixer_view = MixerView(self, self.editor_container)
 
         # Start with piano roll visible
         self.editor_layout.addWidget(self.piano_roll)
         self.editor_layout.addWidget(self.beat_grid)
         self.editor_layout.addWidget(self.automation_curve)
+        self.editor_layout.addWidget(self.mixer_view)
         self.piano_roll.show()
         self.beat_grid.hide()
         self.automation_curve.hide()
+        self.mixer_view.hide()
         self._current_editor = 'piano_roll'
+        self._mixer_open = False
 
         self.splitter.addWidget(self.editor_container)
         self.splitter.setSizes([400, 280])
 
         main_layout.addWidget(self.splitter, 1)
 
-        # Right panel (track settings)
-        self.track_panel = TrackPanel(main, self)
-        main_layout.addWidget(self.track_panel)
-
         layout.addWidget(main)
+
+        # Right panel (track settings) lives in a dock so it can tab together
+        # with the song-plugins dock instead of both competing for the right
+        # edge. The center area (splitter) reclaims the freed horizontal space.
+        self.track_panel = TrackPanel(self, self)
+        self.inspector_dock = QDockWidget("Inspector", self)
+        self.inspector_dock.setObjectName("inspector_dock")
+        self.inspector_dock.setAllowedAreas(
+            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.inspector_dock.setWidget(self.track_panel)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.inspector_dock)
 
         # Song-plugins host + dock (optional)
         self.plugin_host = None
@@ -396,6 +427,11 @@ class App(QMainWindow):
                 self.plugin_host = PluginHost(self)
                 self.plugins_dock = PluginsDock(self.plugin_host, self)
                 self.addDockWidget(Qt.RightDockWidgetArea, self.plugins_dock)
+                # Tab the plugins dock together with the inspector so they
+                # share the right edge (one visible at a time) rather than
+                # stacking side-by-side and crowding the layout.
+                self.tabifyDockWidget(self.inspector_dock, self.plugins_dock)
+                self.inspector_dock.raise_()   # inspector is the default tab
                 self.plugins_dock.hide()  # default hidden
                 self.plugin_host.selection_provider.install_focus_tracker()
                 if self.broadcast_band is not None:
@@ -560,10 +596,12 @@ class App(QMainWindow):
         pl_act.toggled.connect(self.pattern_list.setVisible)
         view_menu.addAction(pl_act)
 
-        # Right sidebar (entire Track Panel)
-        tp_act = QAction("Right Side&bar", self, checkable=True)
-        tp_act.setChecked(not self.track_panel.isHidden())
-        tp_act.toggled.connect(self.track_panel.setVisible)
+        # Right sidebar (Inspector dock)
+        tp_act = QAction("&Inspector", self, checkable=True)
+        tp_act.setChecked(self.inspector_dock.isVisible())
+        tp_act.toggled.connect(self.inspector_dock.setVisible)
+        self.inspector_dock.visibilityChanged.connect(
+            lambda visible: tp_act.setChecked(bool(visible)))
         view_menu.addAction(tp_act)
 
         view_menu.addSeparator()
@@ -806,7 +844,9 @@ class App(QMainWindow):
         self.topbar.refresh()
         self.pattern_list.refresh()
         self.arrangement.refresh()
-        if self._current_editor == 'piano_roll':
+        if getattr(self, '_mixer_open', False):
+            self.mixer_view.refresh()
+        elif self._current_editor == 'piano_roll':
             self.piano_roll.refresh()
         elif self._current_editor == 'beat_grid':
             self.beat_grid.refresh()
@@ -873,8 +913,28 @@ class App(QMainWindow):
                 self.engine.mark_dirty()
             self._refresh_all()
 
+    def toggle_mixer(self):
+        """Show/hide the full mixer in the bottom editor pane."""
+        self._mixer_open = not getattr(self, '_mixer_open', False)
+        if self._mixer_open:
+            self.piano_roll.hide()
+            self.beat_grid.hide()
+            self.automation_curve.hide()
+            self.mixer_view.refresh()
+            self.mixer_view.show()
+        else:
+            self.mixer_view.hide()
+            # Force the selection-driven editor to re-show.
+            self._current_editor = None
+            self._switch_editor()
+        if hasattr(self.topbar, 'sync_mixer_button'):
+            self.topbar.sync_mixer_button(self._mixer_open)
+
     def _switch_editor(self):
         """Switch between piano roll, beat grid, and automation curve based on selection."""
+        # The mixer overrides selection-driven editor switching while open.
+        if getattr(self, '_mixer_open', False):
+            return
         if self.state.sel_auto_pat and self._current_editor != 'automation_curve':
             # Switch to automation curve
             self.piano_roll.hide()
@@ -1346,6 +1406,7 @@ class App(QMainWindow):
         if hasattr(self.engine, 'current_bpm') and self.state.find_tempo_track():
             self.topbar.update_bpm_display(self.engine.current_bpm)
 
+        self.topbar.update_meter()
         self.arrangement.refresh()
         self.piano_roll.grid_widget.update()  # Update piano roll for background notes
 

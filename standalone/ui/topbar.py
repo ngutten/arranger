@@ -5,6 +5,8 @@ from PySide6.QtWidgets import (QFrame, QLabel, QPushButton, QSpinBox, QComboBox,
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 
+from .master_meter import MasterMeter
+
 
 class TopBar(QFrame):
     """Top bar with transport controls, BPM, time sig, snap, and action buttons."""
@@ -89,6 +91,38 @@ class TopBar(QFrame):
         self.snap_combo.currentTextChanged.connect(self._on_snap)
         layout.addWidget(self.snap_combo)
 
+        layout.addSpacing(8)
+
+        # ---- Master section (always-on master fader + limiter + meter) ----
+        sep_m = QFrame()
+        sep_m.setFrameShape(QFrame.VLine)
+        sep_m.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(sep_m)
+
+        layout.addWidget(QLabel('Master'))
+        self.master_gain_spin = QDoubleSpinBox()
+        self.master_gain_spin.setRange(-60.0, 24.0)
+        self.master_gain_spin.setDecimals(1)
+        self.master_gain_spin.setSingleStep(0.5)
+        self.master_gain_spin.setSuffix(' dB')
+        self.master_gain_spin.setValue(self._lin_to_db(s.master_gain))
+        self.master_gain_spin.setMaximumWidth(86)
+        self.master_gain_spin.setToolTip('Master makeup gain (applies to playback and export)')
+        self.master_gain_spin.valueChanged.connect(self._on_master_gain)
+        layout.addWidget(self.master_gain_spin)
+
+        self.limiter_btn = QPushButton('LIM')
+        self.limiter_btn.setCheckable(True)
+        self.limiter_btn.setChecked(bool(s.master_limiter))
+        self.limiter_btn.setMaximumWidth(40)
+        self.limiter_btn.setToolTip('Master brickwall limiter (ceiling %.1f dBFS)'
+                                    % s.master_ceiling_db)
+        self.limiter_btn.toggled.connect(self._on_limiter)
+        layout.addWidget(self.limiter_btn)
+
+        self.master_meter = MasterMeter()
+        layout.addWidget(self.master_meter)
+
         # Spacer
         layout.addStretch()
 
@@ -102,6 +136,13 @@ class TopBar(QFrame):
         self.graph_btn.setToolTip('Open signal graph editor')
         self.graph_btn.clicked.connect(self.app.open_graph_editor)
         layout.addWidget(self.graph_btn)
+
+        # Mixer toggle — swaps the bottom editor pane to the full mixer
+        self.mixer_btn = QPushButton('Mixer')
+        self.mixer_btn.setCheckable(True)
+        self.mixer_btn.setToolTip('Show the mixer (per-track faders + master)')
+        self.mixer_btn.clicked.connect(self.app.toggle_mixer)
+        layout.addWidget(self.mixer_btn)
 
         add_track_btn = QPushButton('+ Track')
         add_track_btn.clicked.connect(self.app.add_track)
@@ -155,6 +196,61 @@ class TopBar(QFrame):
         load_btn.clicked.connect(self.app.load_project)
         layout.addWidget(load_btn)
 
+    @staticmethod
+    def _lin_to_db(lin: float) -> float:
+        import math
+        if lin <= 1e-4:
+            return -60.0
+        return max(-60.0, min(24.0, 20.0 * math.log10(lin)))
+
+    @staticmethod
+    def _db_to_lin(db: float) -> float:
+        if db <= -60.0:
+            return 0.0
+        return 10.0 ** (db / 20.0)
+
+    def _engine(self):
+        """Return the engine if it exposes the master-section API, else None."""
+        eng = self.app.engine
+        return eng if (eng and hasattr(eng, 'set_master_gain')) else None
+
+    def _on_master_gain(self, db):
+        lin = self._db_to_lin(float(db))
+        self.state.master_gain = lin
+        eng = self._engine()
+        if eng:
+            eng.set_master_gain(lin)
+        # Keep the running schedule in sync so a loop/restart re-applies this
+        # value instead of reverting to the play-time setting; also syncs the
+        # mixer's master strip.
+        self.state.notify('master')
+
+    def _on_limiter(self, checked):
+        self.state.master_limiter = bool(checked)
+        eng = self._engine()
+        if eng:
+            eng.set_master_limiter(bool(checked))
+        self.state.notify('master')
+
+    def sync_mixer_button(self, is_open: bool):
+        self.mixer_btn.blockSignals(True)
+        self.mixer_btn.setChecked(bool(is_open))
+        self.mixer_btn.blockSignals(False)
+
+    def update_meter(self):
+        """Poll the engine's master meter and repaint. Called by app.py timer."""
+        eng = self._engine()
+        if not eng:
+            return
+        m = getattr(eng, 'master_meter', None)
+        if not m:
+            return
+        self.master_meter.set_levels(
+            float(m.get('peak_l', 0.0)),
+            float(m.get('peak_r', 0.0)),
+            float(m.get('gr', 1.0)),
+        )
+
     def _on_bpm(self, value):
         self.state.bpm = float(value)
 
@@ -191,6 +287,14 @@ class TopBar(QFrame):
         self.snap_combo.setCurrentText(snap_map.get(self.state.snap, '1/4'))
 
         self.play_btn.setText('⏹' if self.state.playing else '▶')
+
+        # Master section
+        self.master_gain_spin.blockSignals(True)
+        self.master_gain_spin.setValue(self._lin_to_db(self.state.master_gain))
+        self.master_gain_spin.blockSignals(False)
+        self.limiter_btn.blockSignals(True)
+        self.limiter_btn.setChecked(bool(self.state.master_limiter))
+        self.limiter_btn.blockSignals(False)
 
         # Grey out BPM spinbox when a tempo automation track exists
         has_tempo_track = self.state.find_tempo_track() is not None

@@ -61,12 +61,41 @@ public:
                  const std::vector<PortBuffer>& inputs,
                  std::vector<PortBuffer>& outputs) override;
     void set_param(const std::string& name, float value) override;  // "gain_N" → channel N gain
+    MeterSnapshot read_meter() const override;
+    int           meter_channel_count() const override;
+    MeterSnapshot read_channel_meter(int ch) const override;
 
 private:
     int              input_count_;
     std::vector<float> channel_gain_;
     float              master_gain_ = 1.0f;
     int              block_size_   = 0;
+    float            sample_rate_  = 44100.0f;
+
+    // ---- Master section: look-ahead brickwall limiter ----
+    bool             limiter_on_   = true;
+    float            threshold_    = 0.891251f;   // linear, ≈ -1 dBFS
+    std::vector<float> look_l_, look_r_;          // look-ahead delay lines
+    int              look_len_     = 0;           // samples of look-ahead
+    int              look_pos_     = 0;           // circular write/read cursor
+    float            gr_           = 1.0f;        // current gain reduction (≤1)
+    float            att_coef_     = 0.0f;        // per-sample attack smoothing
+    float            rel_coef_     = 0.0f;        // per-sample release smoothing
+    int              hold_         = 0;           // samples left to hold min gr
+
+    void rebuild_limiter();                       // recompute coeffs/delay from sr
+
+    // ---- Metering (audio thread → main thread) ----
+    std::atomic<float> meter_peak_l_ { 0.0f };
+    std::atomic<float> meter_peak_r_ { 0.0f };
+    std::atomic<float> meter_rms_l_  { 0.0f };
+    std::atomic<float> meter_rms_r_  { 0.0f };
+    std::atomic<float> meter_gr_     { 1.0f };
+
+    // Per-input-channel meters (the raw track level arriving at each input,
+    // pre channel-gain and pre master). Allocated in activate().
+    std::unique_ptr<std::atomic<float>[]> ch_peak_l_, ch_peak_r_;
+    std::unique_ptr<std::atomic<float>[]> ch_rms_l_,  ch_rms_r_;
 };
 
 // ---------------------------------------------------------------------------
@@ -102,6 +131,7 @@ public:
     void program_change(int channel, int bank, int program) override;
     void pitch_bend(int channel, int value) override;
     void channel_volume(int channel, int volume) override;
+    void channel_pan(int channel, int pan) override;
     void note_tune(int channel, int note, float semitones) override;
     void note_attr(int channel, int note, const std::string& id, float value) override;
 

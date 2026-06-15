@@ -53,7 +53,8 @@ class TestOutputGainAutomation:
         events = _build_server_schedule(state_with_gain_automation)
         gain_events = [e for e in events
                        if e.get('type') == 'control'
-                       and e.get('node_id') == 'mixer']
+                       and e.get('node_id') == 'mixer'
+                       and str(e.get('port_id', '')).startswith('gain_')]
         assert len(gain_events) > 0
         for e in gain_events:
             assert e['port_id'] == 'gain_0'
@@ -102,7 +103,8 @@ class TestOutputGainRouting:
 
         events = _build_server_schedule(s)
         port_ids = {e['port_id'] for e in events
-                    if e.get('node_id') == 'mixer'}
+                    if e.get('node_id') == 'mixer'
+                    and str(e.get('port_id', '')).startswith('gain_')}
         assert port_ids == {'gain_0', 'gain_2', 'gain_7'}
 
     def test_malformed_target_ignored(self):
@@ -123,13 +125,17 @@ class TestOutputGainRouting:
                                 pattern_id=pat.id, time=0.0, repeats=1))
         # Should not raise, should just skip the malformed track.
         events = _build_server_schedule(s)
-        assert not any(e.get('node_id') == 'mixer' for e in events)
+        assert not any(e.get('node_id') == 'mixer'
+                       and str(e.get('port_id', '')).startswith('gain_')
+                       for e in events)
 
     def test_no_automation_emits_no_gain_events(self):
         s = AppState()
         s.bpm = 120.0
         events = _build_server_schedule(s)
-        assert not any(e.get('node_id') == 'mixer' for e in events)
+        assert not any(e.get('node_id') == 'mixer'
+                       and str(e.get('port_id', '')).startswith('gain_')
+                       for e in events)
 
     def test_scaled_to_pattern_range(self):
         s = AppState()
@@ -149,7 +155,8 @@ class TestOutputGainRouting:
                                 pattern_id=pat.id, time=0.0, repeats=1))
         events = _build_server_schedule(s)
         vals = [e['value'] for e in events
-                if e.get('node_id') == 'mixer']
+                if e.get('node_id') == 'mixer'
+                and str(e.get('port_id', '')).startswith('gain_')]
         assert vals
         # All should be at max of pattern range (0.75)
         for v in vals:

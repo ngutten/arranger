@@ -141,10 +141,20 @@ json ServerHandler::dispatch(const std::string& cmd, const json& req) {
 
     if (cmd == protocol::CMD_GET_POSITION) {
         engine_.poll();   // drain on_transport_stop() for natural arrangement-end
+        MeterSnapshot m = engine_.master_meter();
+        json channels = json::array();
+        for (const auto& c : engine_.channel_meters()) {
+            channels.push_back({{"peak_l", c.peak_l}, {"peak_r", c.peak_r},
+                                {"rms_l",  c.rms_l},  {"rms_r",  c.rms_r}});
+        }
         return {{"status", "ok"},
                 {"beat",    engine_.current_beat()},
                 {"playing", engine_.is_playing()},
-                {"bpm",     engine_.current_bpm()}};
+                {"bpm",     engine_.current_bpm()},
+                {"meter",   {{"peak_l", m.peak_l}, {"peak_r", m.peak_r},
+                             {"rms_l",  m.rms_l},  {"rms_r",  m.rms_r},
+                             {"gr",     m.gain_reduction}, {"valid", m.valid},
+                             {"channels", channels}}}};
     }
 
     // -------------------------------------------------------------------

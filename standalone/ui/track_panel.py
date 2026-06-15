@@ -16,7 +16,10 @@ class TrackPanel(QFrame):
         super().__init__(parent)
         self.app = app
         self.state = app.state
-        self.setFixedWidth(250)
+        # Minimum (not fixed) width: as a dock widget this keeps the panel from
+        # collapsing yet lets the user widen it — important now that it shares a
+        # tabbed dock with the wider Plugins panel.
+        self.setMinimumWidth(250)
         self._build()
 
     def _build(self):

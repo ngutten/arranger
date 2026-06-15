@@ -78,6 +78,10 @@ class PluginsDock(QDockWidget):
         )
         root.addWidget(self._empty_label)
 
+        # Plugin blocks are 360px wide and the flow area has no horizontal
+        # scrollbar, so the dock must be at least that wide or tiles get
+        # clipped. This also sets the default width of the tabbed dock group.
+        container.setMinimumWidth(380)
         self.setWidget(container)
         self._refresh_empty_state()
 

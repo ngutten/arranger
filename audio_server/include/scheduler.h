@@ -26,6 +26,7 @@ enum class EventType : uint8_t {
     NoteTune    = 6,   // per-note pitch offset; channel=ch, pitch=note, value=semitones (float)
     NoteAttr    = 7,   // per-note attribute; channel=ch, pitch=note, port_id=attr id, value=float.
                        // Latched at note-on by the consuming synth (see note_attr_latch.h).
+    Pan         = 8,   // pitch=pan (0..127, 64=center)
 };
 
 struct SchedEvent {

@@ -42,6 +42,7 @@ std::unique_ptr<Schedule> Schedule::from_json(const std::string& j_str, std::str
         else if (type_str == "note_off") evt.type = EventType::NoteOff;
         else if (type_str == "program")  evt.type = EventType::Program;
         else if (type_str == "volume")   evt.type = EventType::Volume;
+        else if (type_str == "pan")      evt.type = EventType::Pan;
         else if (type_str == "bend")     evt.type = EventType::Bend;
         else if (type_str == "control")    evt.type = EventType::Control;
         else if (type_str == "note_tune")  evt.type = EventType::NoteTune;
@@ -62,6 +63,7 @@ std::unique_ptr<Schedule> Schedule::from_json(const std::string& j_str, std::str
             case EventType::Bend:     return 1;
             case EventType::Program:  return 1;
             case EventType::Volume:   return 1;
+            case EventType::Pan:      return 1;
             case EventType::Control:  return 1;
             case EventType::NoteTune: return 1;
             case EventType::NoteAttr: return 1;   // before NoteOn so it latches first
@@ -93,8 +95,9 @@ std::vector<SchedEvent> Schedule::get_setup_events_before(double beat) const {
         // Include events up to and including the specified beat
         if (e.beat > beat) break;
         
-        if (e.type == EventType::Program || 
-            e.type == EventType::Volume || 
+        if (e.type == EventType::Program ||
+            e.type == EventType::Volume ||
+            e.type == EventType::Pan ||
             e.type == EventType::Bend) {
             auto key = std::make_tuple(e.node_id, e.channel, e.type);
             latest[key] = e;
@@ -156,6 +159,9 @@ void Dispatcher::dispatch(double start_beat, double end_beat, Graph* graph) {
                     case EventType::Volume:
                         node->channel_volume(e.channel, e.pitch);
                         break;
+                    case EventType::Pan:
+                        node->channel_pan(e.channel, e.pitch);
+                        break;
                     case EventType::Bend:
                         node->pitch_bend(e.channel, e.pitch | (e.velocity << 7));
                         break;
@@ -212,6 +218,9 @@ void Dispatcher::apply_setup_events(const std::vector<SchedEvent>& events, Graph
             case EventType::Volume:
                 node->channel_volume(e.channel, e.pitch);
                 break;
+            case EventType::Pan:
+                node->channel_pan(e.channel, e.pitch);
+                break;
             case EventType::Bend:
                 node->pitch_bend(e.channel, e.pitch | (e.velocity << 7));
                 break;
@@ -231,9 +240,10 @@ void Dispatcher::apply_setup_events(const std::vector<SchedEvent>& events, Graph
     while (idx_ < evts.size()) {
         const auto& e = evts[idx_];
         if (e.beat > current_beat) break;
-        if (e.beat == current_beat && 
-            (e.type == EventType::Program || 
-             e.type == EventType::Volume || 
+        if (e.beat == current_beat &&
+            (e.type == EventType::Program ||
+             e.type == EventType::Volume ||
+             e.type == EventType::Pan ||
              e.type == EventType::Bend)) {
             idx_++;
         } else if (e.beat < current_beat) {

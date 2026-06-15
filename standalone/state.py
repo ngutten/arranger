@@ -312,11 +312,15 @@ class Track:
     bank: int = 0
     program: int = 0
     volume: int = 100
+    pan: float = 0.0      # -1.0 (hard left) .. +1.0 (hard right), 0 = center
+    mute: bool = False
+    solo: bool = False
 
     def to_dict(self):
         return {
             'id': self.id, 'name': self.name, 'channel': self.channel,
             'bank': self.bank, 'program': self.program, 'volume': self.volume,
+            'pan': self.pan, 'mute': self.mute, 'solo': self.solo,
         }
 
     @staticmethod
@@ -325,6 +329,9 @@ class Track:
             id=d['id'], name=d['name'], channel=d.get('channel', 0),
             bank=d.get('bank', 0), program=d.get('program', 0),
             volume=d.get('volume', 100),
+            pan=float(d.get('pan', 0.0)),
+            mute=bool(d.get('mute', False)),
+            solo=bool(d.get('solo', False)),
         )
 
 
@@ -332,13 +339,20 @@ class Track:
 class BeatTrack:
     id: int
     name: str
+    volume: int = 100    # velocity scale %, applied to all hits (no shared CC7)
+    mute: bool = False
+    solo: bool = False
 
     def to_dict(self):
-        return {'id': self.id, 'name': self.name}
+        return {'id': self.id, 'name': self.name, 'volume': self.volume,
+                'mute': self.mute, 'solo': self.solo}
 
     @staticmethod
     def from_dict(d):
-        return BeatTrack(id=d['id'], name=d['name'])
+        return BeatTrack(id=d['id'], name=d['name'],
+                         volume=d.get('volume', 100),
+                         mute=bool(d.get('mute', False)),
+                         solo=bool(d.get('solo', False)))
 
 
 @dataclass
@@ -722,6 +736,12 @@ class AppState:
         self.ts_num: int = 4
         self.ts_den: int = 4
 
+        # Master section (terminal mixer node). Linear makeup gain, look-ahead
+        # brickwall limiter on/off, and ceiling in dBFS.
+        self.master_gain: float = 1.0
+        self.master_limiter: bool = True
+        self.master_ceiling_db: float = -1.0
+
         self._patterns = IndexedList()
         self._tracks = IndexedList()
         self._placements = IndexedList()
@@ -1005,6 +1025,9 @@ class AppState:
             'v': 3,
             'bpm': self.bpm, 'snap': self.snap,
             'tsNum': self.ts_num, 'tsDen': self.ts_den,
+            'masterGain': self.master_gain,
+            'masterLimiter': self.master_limiter,
+            'masterCeilingDb': self.master_ceiling_db,
             'patterns': [p.to_dict() for p in self.patterns],
             'tracks': [t.to_dict() for t in self.tracks],
             'placements': [p.to_dict() for p in self.placements],
@@ -1029,6 +1052,9 @@ class AppState:
         self.snap = d.get('snap', 0.5)
         self.ts_num = d.get('tsNum', 4)
         self.ts_den = d.get('tsDen', 4)
+        self.master_gain = float(d.get('masterGain', 1.0))
+        self.master_limiter = bool(d.get('masterLimiter', True))
+        self.master_ceiling_db = float(d.get('masterCeilingDb', -1.0))
         self.patterns = [Pattern.from_dict(p) for p in d.get('patterns', [])]
         self.tracks = [Track.from_dict(t) for t in d.get('tracks', [])]
         self.placements = [Placement.from_dict(p) for p in d.get('placements', [])]

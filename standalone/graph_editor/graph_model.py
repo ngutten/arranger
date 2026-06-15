@@ -781,6 +781,50 @@ class GraphModel:
     def remove_track_source(self, track_id) -> None:
         self.remove_node(f"track_{track_id}")
 
+    def track_mixer_channels(self) -> dict:
+        """Map track_source node_id → terminal-mixer input channel index.
+
+        Traces connections forward from each track_source to the output/mixer
+        node and records which ``audio_in_N`` port the signal arrives at.  Used
+        for per-track meters: a mixer-input channel meter is only a meaningful
+        per-track level when exactly one track feeds it (graph-mode routing);
+        tracks that reach multiple channels are reported as -1 (ambiguous).
+        Returns {} if there is no mixer node.
+        """
+        mixer = next((n for n in self.nodes
+                      if n.node_type in ('output', 'mixer')), None)
+        if mixer is None:
+            return {}
+        adj: dict = {}
+        for c in self.connections:
+            adj.setdefault(c.from_node, []).append((c.to_node, c.to_port))
+
+        result = {}
+        for n in self.nodes:
+            if n.node_type != 'track_source':
+                continue
+            seen, stack, found = set(), [n.node_id], None
+            while stack:
+                cur = stack.pop()
+                if cur in seen:
+                    continue
+                seen.add(cur)
+                for to_node, to_port in adj.get(cur, []):
+                    if to_node == mixer.node_id and to_port.startswith('audio_in_'):
+                        try:
+                            ch = int(to_port.rsplit('_', 1)[1])
+                        except ValueError:
+                            continue
+                        if found is None:
+                            found = ch
+                        elif found != ch:
+                            found = -1   # reaches more than one channel
+                    elif to_node != mixer.node_id:
+                        stack.append(to_node)
+            if found is not None:
+                result[n.node_id] = found
+        return result
+
     def sync_track_sources(self, state, sf2_path: str = "") -> None:
         current_ids = set(
             [f"track_{t.id}" for t in state.tracks] +

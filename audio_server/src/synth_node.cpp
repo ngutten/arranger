@@ -124,8 +124,39 @@ std::vector<Node::PortDecl> MixerNode::declare_ports() const {
     return ports;
 }
 
-void MixerNode::activate(float /*sr*/, int max_block_size) {
-    block_size_ = max_block_size;
+void MixerNode::activate(float sr, int max_block_size) {
+    block_size_  = max_block_size;
+    sample_rate_ = sr > 0.0f ? sr : 44100.0f;
+    rebuild_limiter();
+
+    int n = std::max(1, input_count_);
+    ch_peak_l_ = std::make_unique<std::atomic<float>[]>(n);
+    ch_peak_r_ = std::make_unique<std::atomic<float>[]>(n);
+    ch_rms_l_  = std::make_unique<std::atomic<float>[]>(n);
+    ch_rms_r_  = std::make_unique<std::atomic<float>[]>(n);
+    for (int i = 0; i < n; ++i) {
+        ch_peak_l_[i].store(0.0f); ch_peak_r_[i].store(0.0f);
+        ch_rms_l_[i].store(0.0f);  ch_rms_r_[i].store(0.0f);
+    }
+}
+
+void MixerNode::rebuild_limiter() {
+    // Look-ahead window must be several attack time-constants long so the gain
+    // envelope fully reaches its target before the peak that triggered it
+    // reaches the output.  A hold stage keeps the reduction in place while the
+    // peak passes through; release is slow to avoid pumping.
+    const float lookahead_ms = 5.0f;
+    const float attack_ms    = 0.8f;
+    const float release_ms   = 120.0f;
+    look_len_ = std::max(1, static_cast<int>(sample_rate_ * lookahead_ms * 0.001f));
+    look_l_.assign(look_len_, 0.0f);
+    look_r_.assign(look_len_, 0.0f);
+    look_pos_ = 0;
+    gr_       = 1.0f;
+    hold_     = 0;
+    // One-pole smoothing coefficients (per sample).
+    att_coef_ = 1.0f - std::exp(-1.0f / (sample_rate_ * attack_ms  * 0.001f));
+    rel_coef_ = 1.0f - std::exp(-1.0f / (sample_rate_ * release_ms * 0.001f));
 }
 
 void MixerNode::process(const ProcessContext& ctx,
@@ -137,25 +168,127 @@ void MixerNode::process(const ProcessContext& ctx,
     std::memset(out_L, 0, ctx.block_size * sizeof(float));
     std::memset(out_R, 0, ctx.block_size * sizeof(float));
 
+    // Sum channels with per-channel gain × master makeup gain, while metering
+    // each channel's raw input level (the track's own output, independent of
+    // the channel fader and master) for per-track meters.
+    const float inv_n = ctx.block_size > 0 ? 1.0f / ctx.block_size : 0.0f;
     for (int ch = 0; ch < input_count_; ++ch) {
         float g = channel_gain_[ch] * master_gain_;
         const float* in_L = inputs[ch * 2    ].audio;
         const float* in_R = inputs[ch * 2 + 1].audio;
+        float cpk_l = 0.0f, cpk_r = 0.0f;
+        double csq_l = 0.0, csq_r = 0.0;
         for (int i = 0; i < ctx.block_size; ++i) {
-            out_L[i] += in_L[i] * g;
-            out_R[i] += in_R[i] * g;
+            float l = in_L[i], r = in_R[i];
+            out_L[i] += l * g;
+            out_R[i] += r * g;
+            cpk_l = std::max(cpk_l, std::fabs(l));
+            cpk_r = std::max(cpk_r, std::fabs(r));
+            csq_l += static_cast<double>(l) * l;
+            csq_r += static_cast<double>(r) * r;
+        }
+        if (ch_peak_l_) {
+            ch_peak_l_[ch].store(cpk_l, std::memory_order_relaxed);
+            ch_peak_r_[ch].store(cpk_r, std::memory_order_relaxed);
+            ch_rms_l_[ch].store(std::sqrt(static_cast<float>(csq_l) * inv_n), std::memory_order_relaxed);
+            ch_rms_r_[ch].store(std::sqrt(static_cast<float>(csq_r) * inv_n), std::memory_order_relaxed);
         }
     }
 
+    // Master section: stereo-linked look-ahead brickwall limiter.
+    // Transparent below threshold; controlled, click-free ceiling above it.
+    // A final hard clamp guards against any residual overshoot.
+    double sq_l = 0.0, sq_r = 0.0;
+    float  pk_l = 0.0f, pk_r = 0.0f;
+    float  min_gr = 1.0f;
+
     for (int i = 0; i < ctx.block_size; ++i) {
-        out_L[i] = std::tanh(out_L[i]);
-        out_R[i] = std::tanh(out_R[i]);
+        float xl = out_L[i];
+        float xr = out_R[i];
+
+        // Required gain for THIS (incoming, look-ahead) sample pair.
+        float peak    = std::max(std::fabs(xl), std::fabs(xr));
+        float desired = (limiter_on_ && peak > threshold_) ? threshold_ / peak : 1.0f;
+
+        // Attack toward a deeper reduction (fast); hold it while the peak
+        // travels through the look-ahead delay; then release slowly.
+        if (desired < gr_) {
+            gr_  += (desired - gr_) * att_coef_;
+            hold_ = look_len_;
+        } else if (hold_ > 0) {
+            --hold_;
+        } else {
+            gr_ += (1.0f - gr_) * rel_coef_;
+        }
+
+        // Output the delayed sample (look_len_ old) scaled by the smoothed
+        // gain, so reduction is time-aligned with the peak that caused it.
+        float dl = look_l_[look_pos_];
+        float dr = look_r_[look_pos_];
+        look_l_[look_pos_] = xl;
+        look_r_[look_pos_] = xr;
+        look_pos_ = (look_pos_ + 1) % look_len_;
+
+        float yl = dl * gr_;
+        float yr = dr * gr_;
+        // Safety clamp (residual overshoot / limiter disabled).
+        yl = std::max(-1.0f, std::min(1.0f, yl));
+        yr = std::max(-1.0f, std::min(1.0f, yr));
+        out_L[i] = yl;
+        out_R[i] = yr;
+
+        pk_l = std::max(pk_l, std::fabs(yl));
+        pk_r = std::max(pk_r, std::fabs(yr));
+        sq_l += static_cast<double>(yl) * yl;
+        sq_r += static_cast<double>(yr) * yr;
+        min_gr = std::min(min_gr, gr_);
     }
+
+    meter_peak_l_.store(pk_l, std::memory_order_relaxed);
+    meter_peak_r_.store(pk_r, std::memory_order_relaxed);
+    meter_rms_l_.store(std::sqrt(static_cast<float>(sq_l) * inv_n), std::memory_order_relaxed);
+    meter_rms_r_.store(std::sqrt(static_cast<float>(sq_r) * inv_n), std::memory_order_relaxed);
+    meter_gr_.store(min_gr, std::memory_order_relaxed);
+}
+
+MeterSnapshot MixerNode::read_meter() const {
+    MeterSnapshot m;
+    m.peak_l = meter_peak_l_.load(std::memory_order_relaxed);
+    m.peak_r = meter_peak_r_.load(std::memory_order_relaxed);
+    m.rms_l  = meter_rms_l_.load(std::memory_order_relaxed);
+    m.rms_r  = meter_rms_r_.load(std::memory_order_relaxed);
+    m.gain_reduction = meter_gr_.load(std::memory_order_relaxed);
+    m.valid  = true;
+    return m;
+}
+
+int MixerNode::meter_channel_count() const {
+    return ch_peak_l_ ? input_count_ : 0;
+}
+
+MeterSnapshot MixerNode::read_channel_meter(int ch) const {
+    MeterSnapshot m;
+    if (!ch_peak_l_ || ch < 0 || ch >= input_count_) return m;
+    m.peak_l = ch_peak_l_[ch].load(std::memory_order_relaxed);
+    m.peak_r = ch_peak_r_[ch].load(std::memory_order_relaxed);
+    m.rms_l  = ch_rms_l_[ch].load(std::memory_order_relaxed);
+    m.rms_r  = ch_rms_r_[ch].load(std::memory_order_relaxed);
+    m.valid  = true;
+    return m;
 }
 
 void MixerNode::set_param(const std::string& name, float value) {
     if (name == "master_gain") {
         master_gain_ = std::max(0.0f, value);
+        return;
+    }
+    if (name == "limiter_enabled") {
+        limiter_on_ = value >= 0.5f;
+        return;
+    }
+    if (name == "limiter_threshold") {
+        // Accept linear (0,1]; ignore nonsense values.
+        if (value > 0.0f && value <= 1.0f) threshold_ = value;
         return;
     }
     if (name.substr(0, 5) == "gain_") {
@@ -208,6 +341,9 @@ void TrackSourceNode::pitch_bend(int channel, int value) {
 }
 void TrackSourceNode::channel_volume(int channel, int volume) {
     for (auto* n : downstream_) n->channel_volume(channel, volume);
+}
+void TrackSourceNode::channel_pan(int channel, int pan) {
+    for (auto* n : downstream_) n->channel_pan(channel, pan);
 }
 void TrackSourceNode::note_tune(int channel, int note, float semitones) {
     for (auto* n : downstream_) n->note_tune(channel, note, semitones);

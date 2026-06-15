@@ -421,6 +421,10 @@ void PluginAdapterNode::channel_volume(int channel, int volume) {
     plugin_->channel_volume(channel, volume);
 }
 
+void PluginAdapterNode::channel_pan(int channel, int pan) {
+    plugin_->channel_pan(channel, pan);
+}
+
 void PluginAdapterNode::note_tune(int channel, int note, float semitones) {
     plugin_->note_tune(channel, note, semitones);
 }

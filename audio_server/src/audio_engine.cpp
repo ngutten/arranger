@@ -358,6 +358,26 @@ float AudioEngine::current_bpm() const {
     return tempo_map_.bpm_at(beat, bpm_);
 }
 
+MeterSnapshot AudioEngine::master_meter() const {
+    Graph* g = active_graph_.load(std::memory_order_acquire);
+    if (!g) return {};
+    // The terminal mixer node always serialises with id "mixer".
+    Node* n = g->find_node("mixer");
+    return n ? n->read_meter() : MeterSnapshot{};
+}
+
+std::vector<MeterSnapshot> AudioEngine::channel_meters() const {
+    std::vector<MeterSnapshot> out;
+    Graph* g = active_graph_.load(std::memory_order_acquire);
+    if (!g) return out;
+    Node* n = g->find_node("mixer");
+    if (!n) return out;
+    int count = n->meter_channel_count();
+    out.reserve(count);
+    for (int i = 0; i < count; ++i) out.push_back(n->read_channel_meter(i));
+    return out;
+}
+
 void AudioEngine::set_param(const std::string& nid, const std::string& param, float val) {
     // Enqueue so the audio thread applies this at the start of the next block,
     // avoiding a data race between this (IPC/main) thread and the audio thread
