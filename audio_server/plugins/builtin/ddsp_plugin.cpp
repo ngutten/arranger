@@ -64,6 +64,7 @@ static constexpr int MAX_HARMONICS   = 128;
 static constexpr int MAX_NOISE_BANDS = 128;
 static constexpr int MAX_BLOCK       = 2048;  // model-rate noise block ceiling
 static constexpr int SIN_TABLE_SIZE  = 1024;
+static constexpr int F0_MAX_HARM     = 8;     // ceiling on f0 phase harmonics
 
 // ==========================================================================
 // Wavetable sine lookup
@@ -114,6 +115,21 @@ struct XorShift32 {
     }
 };
 
+#ifdef AS_ENABLE_DDSP
+// True iff the loaded graph declares an input with the given name. Used to
+// confirm a latent 'style' input is actually present before feeding one (the
+// config block declares intent; the graph is authoritative).
+static bool session_has_input(Ort::Session& s, const char* name) {
+    Ort::AllocatorWithDefaultOptions alloc;
+    size_t n = s.GetInputCount();
+    for (size_t i = 0; i < n; ++i) {
+        auto in = s.GetInputNameAllocated(i, alloc);
+        if (std::strcmp(in.get(), name) == 0) return true;
+    }
+    return false;
+}
+#endif
+
 // ==========================================================================
 // DDSPPlugin (monophonic)
 // ==========================================================================
@@ -138,7 +154,7 @@ public:
                          "band, reproducing the modelled instrument. Convert models "
                          "with scripts/convert_ddsp.py.";
         d.author       = "builtin";
-        d.version      = 2;
+        d.version      = 3;
 
         d.ports = {
             { "events_in", "Events In", "MIDI event input.",
@@ -166,6 +182,31 @@ public:
               "Output envelope release time in seconds.",
               PluginPortType::Control, PortRole::Input,
               ControlHint::Continuous, 0.1f, 0.001f, 5.0f },
+            { "vibrato", "Vibrato",
+              "Scales the learned f0 (vibrato/scoop) deviation. 1.0 = as modelled; "
+              "0 = flat pitch. Only effective for models with an f0 expression net.",
+              PluginPortType::Control, PortRole::Input,
+              ControlHint::Continuous, 1.0f, 0.0f, 2.0f },
+            { "style_x", "Timbre X",
+              "Timbre style-pad X coordinate (normalised -1..1, mapped onto the "
+              "model's useful range). 0 = average timbre. Only for latent decoders.",
+              PluginPortType::Control, PortRole::Input,
+              ControlHint::Continuous, 0.0f, -1.0f, 1.0f },
+            { "style_y", "Timbre Y",
+              "Timbre style-pad Y coordinate (normalised -1..1). 0 = average timbre. "
+              "Only for latent decoders.",
+              PluginPortType::Control, PortRole::Input,
+              ControlHint::Continuous, 0.0f, -1.0f, 1.0f },
+            { "perf_x", "Perf X",
+              "Performance style-pad X coordinate (normalised -1..1, how it's played: "
+              "loudness/vibrato shaping). 0 = average. Only for models with a perf latent.",
+              PluginPortType::Control, PortRole::Input,
+              ControlHint::Continuous, 0.0f, -1.0f, 1.0f },
+            { "perf_y", "Perf Y",
+              "Performance style-pad Y coordinate (normalised -1..1). 0 = average. "
+              "Only for models with a perf latent.",
+              PluginPortType::Control, PortRole::Input,
+              ControlHint::Continuous, 0.0f, -1.0f, 1.0f },
         };
 
         d.config_params = {
@@ -288,6 +329,20 @@ public:
         float noise_gain = ctrl("noise_gain", 1.0f);
         attack_time_     = ctrl("attack", 0.05f);
         release_time_    = ctrl("release", 0.1f);
+        vibrato_amount_  = ctrl("vibrato", 1.0f);
+
+        // Style pads: normalised [-1,1] node params mapped onto each model's
+        // useful pad range (from config extent). Held constant within the block;
+        // (0,0) == the mean embedding. Read once per block (timbre selector, not
+        // a per-sample modulation). Harmless when the model has no latent input.
+        if (has_style_) {
+            style_px_ = map_pad(ctrl("style_x", 0.0f), style_x_lo_, style_x_hi_);
+            style_py_ = map_pad(ctrl("style_y", 0.0f), style_y_lo_, style_y_hi_);
+        }
+        if (has_perf_style_) {
+            perf_px_ = map_pad(ctrl("perf_x", 0.0f), perf_x_lo_, perf_x_hi_);
+            perf_py_ = map_pad(ctrl("perf_y", 0.0f), perf_y_lo_, perf_y_hi_);
+        }
 
         // Target loudness level [0,1] from velocity + expression. The actual
         // loudness fed to the model is this scaled by the attack/release envelope
@@ -374,6 +429,14 @@ private:
         return 440.0f * std::pow(2.0f, (note - 69.0f) / 12.0f);
     }
 
+    // Map a normalised pad axis n in [-1,1] onto the model's pad range [lo,hi],
+    // passing through 0 (the mean embedding) at n == 0. lo is typically < 0 and
+    // hi > 0, so each half is scaled independently to keep the centre at 0.
+    static inline float map_pad(float n, float lo, float hi) {
+        n = std::clamp(n, -1.0f, 1.0f);
+        return (n >= 0.0f) ? n * hi : n * (-lo);
+    }
+
     // ------------------------------------------------------------------
     // Note lifecycle
     // ------------------------------------------------------------------
@@ -397,7 +460,7 @@ private:
         expr_gate_ = true;
         expr_t_onset_sec_ = 0.0f;
         expr_t_rel_sec_ = 0.0f;
-        f0_prev_dev_ = 0.0f;
+        f0_lfo_phase_ = 0.0f;            // restart the vibrato LFO at note-on
 
         make_default_frame(v_.cur_frame);   // immediate sound before first infer
         v_.last_frame = v_.cur_frame;
@@ -418,7 +481,7 @@ private:
         expr_gate_ = false;
         expr_t_onset_sec_ = 0.0f;
         expr_t_rel_sec_ = 0.0f;
-        f0_prev_dev_ = 0.0f;
+        f0_lfo_phase_ = 0.0f;
         held_.clear();
     }
 
@@ -428,6 +491,8 @@ private:
                         : 100.0f;
         frame_advance_per_sample_ = (host_sr_ > 0) ? (fps / host_sr_) : 0.0f;
         frame_sec_ = (fps > 0.0f) ? (1.0f / fps) : 0.01f;   // seconds per model frame
+        // Vibrato LFO increment in turns ([0,1)) per model frame: rate / frame_rate.
+        f0_lfo_inc_ = (fps > 0.0f) ? (f0_vibrato_rate_ / fps) : 0.0f;
     }
 
     // ------------------------------------------------------------------
@@ -535,16 +600,26 @@ private:
         try {
             int64_t sfeat[3]  = {1, 1, 5};
             int64_t scache[3] = {1, 1, static_cast<int64_t>(expr_hidden_)};
+            int64_t sstyle[3] = {1, 1, 2};
             std::vector<Ort::Value> ins;
-            ins.reserve(2);
+            ins.reserve(3);
+            // Input order matches the graph: feat, [style,] cache_in.
             ins.push_back(Ort::Value::CreateTensor<float>(
                 mem_info_, const_cast<float*>(feat), 5, sfeat, 3));
+            if (has_perf_style_expr_) {
+                perf_style_[0] = perf_px_; perf_style_[1] = perf_py_;
+                ins.push_back(Ort::Value::CreateTensor<float>(
+                    mem_info_, perf_style_, 2, sstyle, 3));
+            }
             ins.push_back(Ort::Value::CreateTensor<float>(
                 mem_info_, expr_cache_.data(), expr_cache_.size(), scache, 3));
-            const char* in_names[]  = {"feat", "cache_in"};
+            const char* in_names_p[] = {"feat", "style", "cache_in"};
+            const char* in_names_n[] = {"feat", "cache_in"};
+            const char** in_names = has_perf_style_expr_ ? in_names_p : in_names_n;
             const char* out_names[] = {"loudness", "cache_out"};
             auto outs = expr_session_->Run(Ort::RunOptions{nullptr},
-                                           in_names, ins.data(), 2, out_names, 2);
+                                           in_names, ins.data(), ins.size(),
+                                           out_names, 2);
             if (outs.size() < 2) return false;
             loud = outs[0].GetTensorData<float>()[0];
             std::memcpy(expr_cache_.data(), outs[1].GetTensorData<float>(),
@@ -560,27 +635,38 @@ private:
     }
 
     // ------------------------------------------------------------------
-    // f0 expression: per-frame pitch deviation (vibrato / scoop / portamento)
-    // in semitones, relative to the nominal note pitch. Autoregressive (the
-    // previous deviation is fed back so the GRU can sustain vibrato), bounded.
+    // f0 expression: per-frame pitch deviation (vibrato / scoop) in semitones,
+    // relative to the nominal note pitch. Phase-conditioned (NOT autoregressive):
+    // the plugin drives a free-running LFO at the model's calibrated vibrato_rate
+    // and feeds its phase harmonics [sin kφ, cos kφ] as features, so the net rides
+    // a supplied oscillation and cannot drift. Bounded by max_dev·tanh in-graph;
+    // the host 'vibrato' control scales the depth.
     // ------------------------------------------------------------------
 
     float f0_dev_for_frame() {
         if (!has_f0_expr_) return 0.0f;
         float midi = static_cast<float>(v_.pitch) + v_.tune_semitones;
-        float feat[6] = {
+        float feat[5 + 2 * F0_MAX_HARM] = {
             (midi - 69.0f) / 12.0f,
             expr_gate_ ? 1.0f : 0.0f,
             v_.velocity / 127.0f,
             std::min(expr_t_onset_sec_, expr_t_clip_) / expr_t_clip_,
             expr_gate_ ? 0.0f : std::min(expr_t_rel_sec_, expr_t_clip_) / expr_t_clip_,
-            f0_prev_dev_,
         };
+        // Phase harmonics [sin kφ, cos kφ], k = 1..H. Phase kept in turns [0,1);
+        // fast_sin(p) == sin(2πp), so cos(2πp) == fast_sin(p + 0.25).
+        const float ph = f0_lfo_phase_;
+        for (int k = 1; k <= f0_n_harm_; ++k) {
+            feat[5 + 2 * (k - 1)]     = fast_sin(k * ph);
+            feat[5 + 2 * (k - 1) + 1] = fast_sin(k * ph + 0.25f);
+        }
+        f0_lfo_phase_ += f0_lfo_inc_;
+        if (f0_lfo_phase_ >= 1.0f) f0_lfo_phase_ -= 1.0f;
+
         float dev;
         if (run_f0_expr(feat, dev)) {
-            dev = std::clamp(dev, -f0_max_dev_, f0_max_dev_);
-            f0_prev_dev_ = dev;
-            return dev;
+            dev *= vibrato_amount_;                          // host vibrato-depth knob
+            return std::clamp(dev, -f0_max_dev_, f0_max_dev_);
         }
         return 0.0f;
     }
@@ -589,18 +675,28 @@ private:
 #ifdef AS_ENABLE_DDSP
         if (!f0_expr_session_ || f0_expr_hidden_ <= 0) return false;
         try {
-            int64_t sfeat[3]  = {1, 1, 6};
+            int64_t sfeat[3]  = {1, 1, static_cast<int64_t>(f0_feat_dim_)};
             int64_t scache[3] = {1, 1, static_cast<int64_t>(f0_expr_hidden_)};
+            int64_t sstyle[3] = {1, 1, 2};
             std::vector<Ort::Value> ins;
-            ins.reserve(2);
+            ins.reserve(3);
+            // Input order matches the graph: feat, [style,] cache_in.
             ins.push_back(Ort::Value::CreateTensor<float>(
-                mem_info_, const_cast<float*>(feat), 6, sfeat, 3));
+                mem_info_, const_cast<float*>(feat), f0_feat_dim_, sfeat, 3));
+            if (has_perf_style_f0_) {
+                perf_style_[0] = perf_px_; perf_style_[1] = perf_py_;
+                ins.push_back(Ort::Value::CreateTensor<float>(
+                    mem_info_, perf_style_, 2, sstyle, 3));
+            }
             ins.push_back(Ort::Value::CreateTensor<float>(
                 mem_info_, f0_expr_cache_.data(), f0_expr_cache_.size(), scache, 3));
-            const char* in_names[]  = {"feat", "cache_in"};
+            const char* in_names_p[] = {"feat", "style", "cache_in"};
+            const char* in_names_n[] = {"feat", "cache_in"};
+            const char** in_names = has_perf_style_f0_ ? in_names_p : in_names_n;
             const char* out_names[] = {"deviation", "cache_out"};
             auto outs = f0_expr_session_->Run(Ort::RunOptions{nullptr},
-                                              in_names, ins.data(), 2, out_names, 2);
+                                              in_names, ins.data(), ins.size(),
+                                              out_names, 2);
             if (outs.size() < 2) return false;
             dev = outs[0].GetTensorData<float>()[0];
             std::memcpy(f0_expr_cache_.data(), outs[1].GetTensorData<float>(),
@@ -629,19 +725,29 @@ private:
             float loud_v  = loud_db;
             int64_t s111[3]   = {1, 1, 1};
             int64_t scache[3] = {1, 1, static_cast<int64_t>(hidden_)};
+            int64_t sstyle[3] = {1, 1, 2};
 
             std::vector<Ort::Value> ins;
-            ins.reserve(3);
+            ins.reserve(4);
+            // Input order matches the graph: pitch, loudness, [style,] cache_in.
             ins.push_back(Ort::Value::CreateTensor<float>(mem_info_, &pitch_v, 1, s111, 3));
             ins.push_back(Ort::Value::CreateTensor<float>(mem_info_, &loud_v, 1, s111, 3));
+            if (has_style_) {
+                style_[0] = style_px_; style_[1] = style_py_;
+                ins.push_back(Ort::Value::CreateTensor<float>(
+                    mem_info_, style_, 2, sstyle, 3));
+            }
             ins.push_back(Ort::Value::CreateTensor<float>(
                 mem_info_, cache_.data(), cache_.size(), scache, 3));
 
-            const char* in_names[]  = {"pitch", "loudness", "cache_in"};
+            const char* in_names_s[] = {"pitch", "loudness", "style", "cache_in"};
+            const char* in_names_n[] = {"pitch", "loudness", "cache_in"};
+            const char** in_names = has_style_ ? in_names_s : in_names_n;
             const char* out_names[] = {"amplitudes", "noise_param", "cache_out"};
 
             auto outs = ort_session_->Run(Ort::RunOptions{nullptr},
-                                          in_names, ins.data(), 3, out_names, 3);
+                                          in_names, ins.data(), ins.size(),
+                                          out_names, 3);
             if (outs.size() < 3) return false;
 
             const float* amps  = outs[0].GetTensorData<float>();
@@ -686,6 +792,12 @@ private:
         want_expr_ = false;
         has_f0_expr_ = false;
         want_f0_expr_ = false;
+        has_style_ = false;
+        want_style_ = false;
+        has_perf_style_ = false;
+        has_perf_style_expr_ = false;
+        has_perf_style_f0_ = false;
+        want_perf_style_ = false;
         if (dir.empty()) { DDSP_LOG("No model directory specified"); return; }
 
         std::ifstream cfg_file(dir + "/config.json");
@@ -715,10 +827,43 @@ private:
                 want_expr_ = true;
             }
             // Optional learned pitch-expression model (notes -> f0 deviation).
+            // Phase-conditioned (variant #3): the plugin drives the LFO; the net
+            // rides the supplied phase harmonics, so it cannot drift. Old AR models
+            // (feat_dim==6, no vibrato_rate) are deprecated -> refuse them.
             if (cfg.contains("f0_expression") && cfg["f0_expression"].is_object()) {
-                f0_expr_hidden_ = cfg["f0_expression"].value("hidden_size", 128);
-                f0_max_dev_ = cfg["f0_expression"].value("max_dev", 2.0f);
-                want_f0_expr_ = true;
+                auto& fc = cfg["f0_expression"];
+                if (!fc.contains("vibrato_rate")) {
+                    DDSP_LOG("f0_expression is a deprecated autoregressive model "
+                             "(no vibrato_rate) — skipping; pitch will be flat. "
+                             "Re-export with the phase-conditioned trainer.");
+                } else {
+                    f0_expr_hidden_  = fc.value("hidden_size", 128);
+                    f0_max_dev_      = fc.value("max_dev", 2.0f);
+                    f0_vibrato_rate_ = fc.value("vibrato_rate", 5.5f);
+                    f0_n_harm_       = std::min(fc.value("n_phase_harmonics", 2),
+                                                F0_MAX_HARM);
+                    f0_feat_dim_     = 5 + 2 * f0_n_harm_;
+                    want_f0_expr_ = true;
+                }
+            }
+            // Optional 2D latent style pads (timbre on the decoder, performance on
+            // the expression nets). Read the extent for the [-1,1] -> pad mapping;
+            // presence of the graph 'style' input is confirmed after load.
+            want_style_ = false;
+            want_perf_style_ = false;
+            if (cfg.contains("latent") && cfg["latent"].is_object() &&
+                cfg["latent"].contains("extent")) {
+                auto& ext = cfg["latent"]["extent"];
+                style_x_lo_ = ext["x"][0].get<float>(); style_x_hi_ = ext["x"][1].get<float>();
+                style_y_lo_ = ext["y"][0].get<float>(); style_y_hi_ = ext["y"][1].get<float>();
+                want_style_ = true;
+            }
+            if (cfg.contains("perf_latent") && cfg["perf_latent"].is_object() &&
+                cfg["perf_latent"].contains("extent")) {
+                auto& ext = cfg["perf_latent"]["extent"];
+                perf_x_lo_ = ext["x"][0].get<float>(); perf_x_hi_ = ext["x"][1].get<float>();
+                perf_y_lo_ = ext["y"][0].get<float>(); perf_y_hi_ = ext["y"][1].get<float>();
+                want_perf_style_ = true;
             }
             n_harmonic_ = std::min(n_harmonic_, MAX_HARMONICS);
             n_bands_    = std::min(n_bands_, MAX_NOISE_BANDS);
@@ -742,7 +887,13 @@ private:
                 *ort_env_, (dir + "/decoder.onnx").c_str(), opts);
             cache_.assign(hidden_, 0.0f);
             model_loaded_ = true;
-            DDSP_LOG("Loaded decoder: %s/decoder.onnx", dir.c_str());
+            has_style_ = session_has_input(*ort_session_, "style");
+            if (has_style_ != want_style_)
+                DDSP_LOG("decoder 'style' input %s graph but %s config — using graph",
+                         has_style_ ? "present in" : "absent from",
+                         want_style_ ? "declared in" : "absent from");
+            DDSP_LOG("Loaded decoder: %s/decoder.onnx (timbre pad=%d)",
+                     dir.c_str(), (int)has_style_);
         } catch (const Ort::Exception& e) {
             DDSP_LOG("ONNX error loading %s/decoder.onnx: %s", dir.c_str(), e.what());
         }
@@ -759,7 +910,9 @@ private:
                     *ort_env_, (dir + "/expression.onnx").c_str(), eopts);
                 expr_cache_.assign(expr_hidden_, 0.0f);
                 has_expr_ = true;
-                DDSP_LOG("Loaded expression model (hidden=%d)", expr_hidden_);
+                has_perf_style_expr_ = session_has_input(*expr_session_, "style");
+                DDSP_LOG("Loaded expression model (hidden=%d, perf pad=%d)",
+                         expr_hidden_, (int)has_perf_style_expr_);
             } catch (const Ort::Exception& e) {
                 DDSP_LOG("expression.onnx load failed (%s) — using fallback loudness", e.what());
             }
@@ -776,12 +929,18 @@ private:
                     *ort_env_, (dir + "/f0_expression.onnx").c_str(), eopts);
                 f0_expr_cache_.assign(f0_expr_hidden_, 0.0f);
                 has_f0_expr_ = true;
-                DDSP_LOG("Loaded f0 expression model (hidden=%d, max_dev=%.1f)",
-                         f0_expr_hidden_, f0_max_dev_);
+                has_perf_style_f0_ = session_has_input(*f0_expr_session_, "style");
+                DDSP_LOG("Loaded f0 expression model (hidden=%d, max_dev=%.1f, "
+                         "vibrato_rate=%.2f, H=%d, perf pad=%d)",
+                         f0_expr_hidden_, f0_max_dev_, f0_vibrato_rate_,
+                         f0_n_harm_, (int)has_perf_style_f0_);
             } catch (const Ort::Exception& e) {
                 DDSP_LOG("f0_expression.onnx load failed (%s) — using flat pitch", e.what());
             }
         }
+
+        // Performance pad is active if either expression net consumes it.
+        has_perf_style_ = has_perf_style_expr_ || has_perf_style_f0_;
 #else
         cache_.assign(hidden_, 0.0f);
         DDSP_LOG("ONNX Runtime not available — using default frames");
@@ -818,12 +977,39 @@ private:
     float expr_t_rel_sec_   = 0.0f;
     float last_loud_db_     = 0.0f;           // loudness at note-off, for release decay
 
-    // Optional learned pitch-expression model (notes -> f0 deviation)
+    // Optional learned pitch-expression model (notes -> f0 deviation).
+    // Phase-conditioned: the plugin drives a free LFO and feeds its phase
+    // harmonics; the net predicts a bounded depth/scoop that cannot drift.
     bool  want_f0_expr_   = false;
     bool  has_f0_expr_    = false;
     int   f0_expr_hidden_ = 128;
     float f0_max_dev_     = 2.0f;             // clamp on |deviation| (semitones)
-    float f0_prev_dev_    = 0.0f;             // autoregressive feedback
+    float f0_vibrato_rate_ = 5.5f;           // LFO rate (Hz), calibrated from data
+    int   f0_n_harm_      = 2;               // # phase harmonics fed in
+    int   f0_feat_dim_    = 9;               // 5 + 2*H
+    float f0_lfo_phase_   = 0.0f;            // free LFO phase, in turns [0,1)
+    float f0_lfo_inc_     = 0.0f;            // per-frame phase increment (turns)
+    float vibrato_amount_ = 1.0f;            // host vibrato-depth knob (control)
+
+    // Optional 2D latent style pads. Timbre pad -> decoder.onnx 'style';
+    // performance pad -> expression.onnx + f0_expression.onnx 'style' (shared).
+    // Node params are normalised [-1,1] (0 == mean embedding), mapped onto the
+    // per-axis extent below. Held constant within a note (timbre selector).
+    bool  want_style_  = false;              // config declares a timbre latent
+    bool  has_style_   = false;              // decoder graph has a 'style' input
+    float style_x_lo_ = -1.0f, style_x_hi_ = 1.0f;
+    float style_y_lo_ = -1.0f, style_y_hi_ = 1.0f;
+    float style_px_ = 0.0f, style_py_ = 0.0f;   // current pad coord (model units)
+    float style_[2] = {0.0f, 0.0f};
+
+    bool  want_perf_style_      = false;     // config declares a performance latent
+    bool  has_perf_style_       = false;     // either expression net has 'style'
+    bool  has_perf_style_expr_  = false;     // loudness net has 'style'
+    bool  has_perf_style_f0_    = false;     // f0 net has 'style'
+    float perf_x_lo_ = -1.0f, perf_x_hi_ = 1.0f;
+    float perf_y_lo_ = -1.0f, perf_y_hi_ = 1.0f;
+    float perf_px_ = 0.0f, perf_py_ = 0.0f;
+    float perf_style_[2] = {0.0f, 0.0f};
 
     // Loudness mapping (raw model units)
     float loud_floor_db_ = -60.0f;

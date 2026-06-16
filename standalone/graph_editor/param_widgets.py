@@ -112,8 +112,11 @@ class SmartFloatWidget(QWidget):
         
         # Allow flexible text entry
         self._spinbox.setStepType(QDoubleSpinBox.StepType.AdaptiveDecimalStepType)
-        self._spinbox.setMinimumWidth(60)
-        self._spinbox.setMaximumWidth(100)
+        # Keep the spinbox compact so the adaptive slider gets the rest of the
+        # row — otherwise in a narrow (two-column) node the slider is left with
+        # almost no travel.
+        self._spinbox.setMinimumWidth(54)
+        self._spinbox.setMaximumWidth(74)
         self._spinbox.setKeyboardTracking(False)
         
         # Override textFromValue to limit display decimals while keeping full precision

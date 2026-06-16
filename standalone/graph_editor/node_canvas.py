@@ -46,7 +46,9 @@ from .param_widgets import SmartFloatWidget
 # ---------------------------------------------------------------------------
 
 NODE_W          = 180     # base node width (scene units)
-NODE_W_WIDE     = 340     # wider width for two-column parameter nodes
+NODE_W_WIDE     = 460     # wider width for two-column parameter nodes
+                          # (each column ~220px so the label + adaptive slider +
+                          # spinbox fit without the edit box clipping the edge)
 NODE_HEADER_H   = 26      # title bar height
 PORT_ROW_H      = 16      # height per port row (compact)
 PORT_R          = 5       # port circle radius (smaller = more compact)
