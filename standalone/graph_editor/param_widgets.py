@@ -12,10 +12,11 @@ from __future__ import annotations
 import math
 from typing import Callable, Optional
 from PySide6.QtWidgets import (
-    QWidget, QHBoxLayout, QDoubleSpinBox, QSlider, QLabel
+    QWidget, QHBoxLayout, QDoubleSpinBox, QSlider, QLabel, QSizePolicy
 )
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QFontMetrics, QDoubleValidator
+from PySide6.QtCore import Qt, QTimer, Signal, QPointF
+from PySide6.QtGui import (QFontMetrics, QDoubleValidator, QPainter, QColor,
+                           QPen, QBrush)
 
 def format_value(value, display_dec=10):
     if value == 0:
@@ -456,3 +457,108 @@ def create_config_param_widget(param_id: str, param_value, state, parent: QWidge
         "background: #0d1117; color: #ccc; border: 1px solid #2a3a5c;"
     )
     return widget
+
+
+class XYPadWidget(QWidget):
+    """2D pad for a pair of bounded params (e.g. a 2D latent style space).
+
+    Drag the puck to set both axes at once — far better than two sliders for
+    sweeping a latent live. Emits xChanged/yChanged with mapped values. The Y
+    axis is drawn with its maximum at the top (screen-natural).
+    """
+
+    xChanged = Signal(float)
+    yChanged = Signal(float)
+
+    def __init__(self, x_min, x_max, y_min, y_max, x_val, y_val,
+                 x_label="X", y_label="Y", parent=None):
+        super().__init__(parent)
+        self._xmin, self._xmax = float(x_min), float(x_max)
+        self._ymin, self._ymax = float(y_min), float(y_max)
+        if self._xmax == self._xmin:
+            self._xmax = self._xmin + 1.0
+        if self._ymax == self._ymin:
+            self._ymax = self._ymin + 1.0
+        self._x, self._y = float(x_val), float(y_val)
+        self._x_label, self._y_label = x_label, y_label
+        self._driven = False
+        self._pad = 6
+        self.setMinimumSize(96, 96)
+        self.setMaximumHeight(150)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setCursor(Qt.CrossCursor)
+
+    # -- value <-> pixel mapping ------------------------------------------
+    def _inner(self):
+        return self.rect().adjusted(self._pad, self._pad, -self._pad, -self._pad)
+
+    def _val_to_px(self):
+        r = self._inner()
+        fx = (self._x - self._xmin) / (self._xmax - self._xmin)
+        fy = (self._y - self._ymin) / (self._ymax - self._ymin)
+        return (r.left() + fx * r.width(), r.bottom() - fy * r.height())
+
+    def _px_to_val(self, px, py):
+        r = self._inner()
+        fx = min(1.0, max(0.0, (px - r.left()) / max(1, r.width())))
+        fy = min(1.0, max(0.0, (r.bottom() - py) / max(1, r.height())))
+        return (self._xmin + fx * (self._xmax - self._xmin),
+                self._ymin + fy * (self._ymax - self._ymin))
+
+    # -- public API -------------------------------------------------------
+    def set_values(self, x, y):
+        self._x, self._y = float(x), float(y)
+        self.update()
+
+    def setDriven(self, driven: bool):
+        self._driven = bool(driven)
+        self.setEnabled(not self._driven)
+        self.update()
+
+    # -- interaction ------------------------------------------------------
+    def mousePressEvent(self, e):
+        if not self._driven:
+            self._apply(e)
+
+    def mouseMoveEvent(self, e):
+        if not self._driven and (e.buttons() & Qt.LeftButton):
+            self._apply(e)
+
+    def _apply(self, e):
+        x, y = self._px_to_val(e.position().x(), e.position().y())
+        cx, cy = (x != self._x), (y != self._y)
+        self._x, self._y = x, y
+        self.update()
+        if cx:
+            self.xChanged.emit(x)
+        if cy:
+            self.yChanged.emit(y)
+
+    # -- paint ------------------------------------------------------------
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = self._inner()
+        p.fillRect(self.rect(), QColor("#0d1117"))
+        p.setPen(QPen(QColor("#2a3a5c"), 1))
+        p.drawRect(r)
+        # centre crosshair
+        p.setPen(QPen(QColor("#1d2942"), 1))
+        cx, cy = r.left() + r.width() / 2, r.top() + r.height() / 2
+        p.drawLine(int(cx), r.top(), int(cx), r.bottom())
+        p.drawLine(r.left(), int(cy), r.right(), int(cy))
+        # axis labels
+        f = p.font()
+        f.setPointSize(7)
+        p.setFont(f)
+        p.setPen(QColor("#6b7790"))
+        p.drawText(r.adjusted(3, 0, 0, -1), Qt.AlignBottom | Qt.AlignLeft,
+                   self._x_label)
+        p.drawText(r.adjusted(0, 1, -3, 0), Qt.AlignTop | Qt.AlignRight,
+                   self._y_label)
+        # puck
+        px, py = self._val_to_px()
+        puck = QColor("#5a6680") if self._driven else QColor("#4db6ac")
+        p.setBrush(QBrush(puck))
+        p.setPen(QPen(QColor("#e6edf6"), 1.5))
+        p.drawEllipse(QPointF(px, py), 6, 6)

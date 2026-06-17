@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxLayout,
                                 QSplitter, QFileDialog, QMessageBox, QMenuBar,
-                                QDockWidget)
+                                QDockWidget, QStackedWidget, QLabel)
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QPalette, QColor, QAction
 
@@ -105,6 +105,15 @@ class App(QMainWindow):
         # Graph editor window (non-modal; lazily created)
         self._graph_editor_window = None
 
+        # Context-aware inspector: the graph node currently selected in the
+        # graph editor (drives the inspector's node-params panel). Cleared by
+        # any arrangement-side selection so the two views don't fight.
+        self.sel_graph_node = None
+        self._sel_graph_canvas = None
+        # Frame the graph to fit the first time it's shown at real size (the
+        # construction-time frame runs while the page is hidden/zero-size).
+        self._graph_framed = False
+
         # Drag-and-drop state
         self._drag_type = None
         self._drag_pid = None
@@ -149,7 +158,7 @@ class App(QMainWindow):
         if not self.state.playing:
             _ = eng.current_beat   # refresh meter snapshot via get_position
         self.topbar.update_meter()
-        if getattr(self, '_mixer_open', False):
+        if self.mixer_dock.isVisible():
             self.mixer_view.update_meter()
     
     # Autosave functionality
@@ -386,27 +395,56 @@ class App(QMainWindow):
         self.piano_roll = PianoRoll(self.editor_container, self)
         self.beat_grid = BeatGrid(self.editor_container, self)
         self.automation_curve = AutomationCurve(self.editor_container, self)
-        from .ui.mixer_view import MixerView
-        self.mixer_view = MixerView(self, self.editor_container)
 
         # Start with piano roll visible
         self.editor_layout.addWidget(self.piano_roll)
         self.editor_layout.addWidget(self.beat_grid)
         self.editor_layout.addWidget(self.automation_curve)
-        self.editor_layout.addWidget(self.mixer_view)
         self.piano_roll.show()
         self.beat_grid.hide()
         self.automation_curve.hide()
-        self.mixer_view.hide()
         self._current_editor = 'piano_roll'
-        self._mixer_open = False
 
         self.splitter.addWidget(self.editor_container)
         self.splitter.setSizes([400, 280])
 
         main_layout.addWidget(self.splitter, 1)
 
-        layout.addWidget(main)
+        # ---- Workspaces -------------------------------------------------
+        # The centre area is a stack of three task layouts switched from the
+        # topbar: Arrange (pattern list + arrangement + bottom editor), Graph
+        # (the signal-graph editor, given near-full width), and Mix (the full
+        # mixer). The topbar transport + the inspector dock persist across all
+        # three, so a loop keeps playing while you switch.
+        self.workspace = 'arrange'
+        self.workspace_stack = QStackedWidget()
+
+        # Page 0 — Arrange (the `main` widget built above)
+        self.workspace_stack.addWidget(main)
+
+        # Page 1 — Graph (populated lazily by _ensure_graph_panel once an
+        # engine that supports the graph protocol is up)
+        self.graph_page = QWidget()
+        self.graph_page_layout = QVBoxLayout(self.graph_page)
+        self.graph_page_layout.setContentsMargins(0, 0, 0, 0)
+        self._graph_placeholder = QLabel(
+            'The signal-graph editor requires the C++ built-in or server backend.\n'
+            'Switch the audio backend in Settings to use it.')
+        self._graph_placeholder.setAlignment(Qt.AlignCenter)
+        self._graph_placeholder.setStyleSheet('color: #888;')
+        self.graph_page_layout.addWidget(self._graph_placeholder)
+        self.workspace_stack.addWidget(self.graph_page)
+
+        self._workspace_index = {'arrange': 0, 'graph': 1}
+
+        layout.addWidget(self.workspace_stack)
+
+        # Mixer lives in a dock (like the inspector/plugins), not a workspace —
+        # it's wide by nature so it defaults to the bottom, but being a
+        # QDockWidget the user can drag it into a side column. Available under
+        # any workspace. Built into its dock further below with the others.
+        from .ui.mixer_view import MixerView
+        self.mixer_view = MixerView(self, None)
 
         # Right panel (track settings) lives in a dock so it can tab together
         # with the song-plugins dock instead of both competing for the right
@@ -418,6 +456,18 @@ class App(QMainWindow):
             Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
         self.inspector_dock.setWidget(self.track_panel)
         self.addDockWidget(Qt.RightDockWidgetArea, self.inspector_dock)
+
+        # Mixer dock — bottom by default (mixers are wide), but movable to a
+        # left/right column if preferred. Hidden until toggled.
+        self.mixer_dock = QDockWidget("Mixer", self)
+        self.mixer_dock.setObjectName("mixer_dock")
+        self.mixer_dock.setAllowedAreas(
+            Qt.BottomDockWidgetArea | Qt.LeftDockWidgetArea
+            | Qt.RightDockWidgetArea)
+        self.mixer_dock.setWidget(self.mixer_view)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.mixer_dock)
+        self.mixer_dock.hide()
+        self.mixer_dock.visibilityChanged.connect(self._on_mixer_visibility)
 
         # Song-plugins host + dock (optional)
         self.plugin_host = None
@@ -694,6 +744,7 @@ class App(QMainWindow):
 
         # Build default graph model (done after SF2 load so sf2_path is known)
         self._ensure_graph_model()
+        self._ensure_graph_panel()
 
         # Start MIDI live-preview router (if a device is configured)
         self._restart_midi_router()
@@ -769,40 +820,111 @@ class App(QMainWindow):
             return self.engine._sf2_path or ''
         return ''
 
-    def open_graph_editor(self) -> None:
-        """Open (or raise) the signal graph editor window."""
-        if not _HAS_GRAPH_EDITOR:
-            print("Error: no graph editor")
-            return
-        # Requires an engine that supports _send (BindingEngine)
-        if not (self.engine and hasattr(self.engine, '_send')):
-            return
+    def _graph_supported(self) -> bool:
+        """True if the current engine can host the live signal graph."""
+        return bool(_HAS_GRAPH_EDITOR and self.engine
+                    and hasattr(self.engine, '_send'))
 
+    def _ensure_graph_panel(self) -> None:
+        """Build the embedded graph editor into the Graph workspace page.
+
+        Idempotent. Does nothing (placeholder stays) until an engine that
+        supports the graph protocol is available.
+        """
         if self._graph_editor_window is not None:
-            self._graph_editor_window.raise_()
-            self._graph_editor_window.activateWindow()
             return
-
+        if not self._graph_supported():
+            return
         self._graph_editor_window = GraphEditorWindow(
             model=self.state.signal_graph,
             server_engine=self.engine,
             state=self.state,
             on_graph_changed=self._on_graph_model_changed,
-            parent=self,   # parent to main window so it closes with app and dialogs work
+            parent=self.graph_page,
+            embedded=True,
         )
-        self._graph_editor_window.closed.connect(self._on_graph_editor_closed)
-        self._graph_editor_window.show()
+        # Drive the context-aware inspector from node selection in the canvas;
+        # with the inspector co-located, node params live there (pure layout).
+        self._sel_graph_canvas = self._graph_editor_window._canvas
+        self._sel_graph_canvas.selection_changed.connect(
+            self._on_graph_node_selected)
+        self._sel_graph_canvas.params_in_inspector = True
+        self._graph_placeholder.hide()
+        self.graph_page_layout.addWidget(self._graph_editor_window)
+
+    def _teardown_graph_panel(self) -> None:
+        """Drop the embedded graph editor (e.g. on backend switch)."""
+        if self._graph_editor_window is not None:
+            self.graph_page_layout.removeWidget(self._graph_editor_window)
+            self._graph_editor_window.setParent(None)
+            self._graph_editor_window.deleteLater()
+        self._graph_editor_window = None
+        self._sel_graph_canvas = None
+        self.sel_graph_node = None
+        self._graph_placeholder.show()
+
+    def set_workspace(self, name: str) -> None:
+        """Switch the centre area between 'arrange' and 'graph'."""
+        if name not in self._workspace_index:
+            return
+        if name == 'graph':
+            self._ensure_graph_panel()
+        self.workspace = name
+        self.workspace_stack.setCurrentIndex(self._workspace_index[name])
+
+        if name == 'graph':
+            # Sync the inspector to whatever is selected on the canvas.
+            if self._sel_graph_canvas is not None:
+                self._sel_graph_canvas.emit_selection()
+            # Frame-to-fit once the page is laid out at real size.
+            if self._sel_graph_canvas is not None and not self._graph_framed:
+                QTimer.singleShot(0, self._frame_graph_once)
+        else:
+            # Leaving the graph hands the inspector back to the arrangement.
+            self.sel_graph_node = None
+        self.track_panel.refresh()
+        if hasattr(self.topbar, 'sync_workspace'):
+            self.topbar.sync_workspace(name)
+
+    def _frame_graph_once(self) -> None:
+        if self._sel_graph_canvas is not None:
+            self._sel_graph_canvas.frame_all()
+            self._graph_framed = True
+
+    def _regraph_view(self) -> None:
+        """Re-fit the graph after its model changed (project load/new/import).
+
+        Frames now if the Graph workspace is showing, else on next entry.
+        """
+        self._graph_framed = False
+        if self.workspace == 'graph':
+            QTimer.singleShot(0, self._frame_graph_once)
+
+    def open_graph_editor(self) -> None:
+        """Switch to the Graph workspace (was: open floating window)."""
+        self.set_workspace('graph')
+
+    def _on_graph_node_selected(self, node) -> None:
+        """A node was (de)selected in the graph editor → update inspector."""
+        # Only reflect node selection while the Graph workspace is active.
+        if self.workspace != 'graph':
+            return
+        self.sel_graph_node = node
+        self.track_panel.refresh()
 
     def _on_graph_model_changed(self, model) -> None:
         """Called when the graph editor makes a live change."""
         # model is the same object as self.state.signal_graph (edited in-place)
         pass
-
-    def _on_graph_editor_closed(self) -> None:
-        self._graph_editor_window = None
+        self.track_panel.refresh()
 
     def _on_state_change(self, source=None):
         """Called whenever state changes. Refreshes relevant UI components."""
+        # An arrangement/track/pattern change reclaims the inspector from the
+        # graph-node view. Node param edits use the canvas fast-path and never
+        # call state.notify(), so they don't trip this.
+        self.sel_graph_node = None
+
         # Mark engine dirty so schedule rebuilds on next audio callback
         if self.engine and self.state.playing:
             self.engine.mark_dirty()
@@ -844,14 +966,14 @@ class App(QMainWindow):
         self.topbar.refresh()
         self.pattern_list.refresh()
         self.arrangement.refresh()
-        if getattr(self, '_mixer_open', False):
-            self.mixer_view.refresh()
-        elif self._current_editor == 'piano_roll':
+        if self._current_editor == 'piano_roll':
             self.piano_roll.refresh()
         elif self._current_editor == 'beat_grid':
             self.beat_grid.refresh()
         elif self._current_editor == 'automation_curve':
             self.automation_curve.refresh()
+        if self.mixer_dock.isVisible():
+            self.mixer_view.refresh()
         self.track_panel.refresh()
     
     def _push_undo(self, source=None):
@@ -914,26 +1036,19 @@ class App(QMainWindow):
             self._refresh_all()
 
     def toggle_mixer(self):
-        """Show/hide the full mixer in the bottom editor pane."""
-        self._mixer_open = not getattr(self, '_mixer_open', False)
-        if self._mixer_open:
-            self.piano_roll.hide()
-            self.beat_grid.hide()
-            self.automation_curve.hide()
+        """Show/hide the mixer dock (independent of the active workspace)."""
+        self.mixer_dock.setVisible(not self.mixer_dock.isVisible())
+
+    def _on_mixer_visibility(self, visible):
+        if visible:
             self.mixer_view.refresh()
-            self.mixer_view.show()
-        else:
-            self.mixer_view.hide()
-            # Force the selection-driven editor to re-show.
-            self._current_editor = None
-            self._switch_editor()
         if hasattr(self.topbar, 'sync_mixer_button'):
-            self.topbar.sync_mixer_button(self._mixer_open)
+            self.topbar.sync_mixer_button(visible)
 
     def _switch_editor(self):
         """Switch between piano roll, beat grid, and automation curve based on selection."""
-        # The mixer overrides selection-driven editor switching while open.
-        if getattr(self, '_mixer_open', False):
+        # Selection-driven editor switching only applies in the Arrange page.
+        if self.workspace != 'arrange':
             return
         if self.state.sel_auto_pat and self._current_editor != 'automation_curve':
             # Switch to automation curve
@@ -1235,7 +1350,8 @@ class App(QMainWindow):
         if self.state.playing:
             self.stop_play()
 
-        # Tear down current engine
+        # Tear down current engine (and the graph panel bound to it)
+        self._teardown_graph_panel()
         if self.engine:
             try:
                 self.engine.shutdown()
@@ -1257,6 +1373,12 @@ class App(QMainWindow):
             sf2_path = _get_sf2_path(self.state.sf2)
             if sf2_path:
                 self.engine.load_sf2(sf2_path)
+
+        # Rebuild the graph panel against the new engine; if the Graph
+        # workspace is showing, drop back to Arrange when unsupported.
+        self._ensure_graph_panel()
+        if self.workspace == 'graph' and not self._graph_supported():
+            self.set_workspace('arrange')
 
         return self.engine is not None
 
@@ -1570,6 +1692,7 @@ class App(QMainWindow):
                 self._ensure_graph_model()
                 if self._graph_editor_window is not None:
                     self._graph_editor_window._canvas.set_model(self.state.signal_graph)
+                self._regraph_view()
                 self._refresh_all()
             except Exception as e:
                 QMessageBox.critical(self, 'Error', f'Failed to load initial state: {e}')
@@ -1612,7 +1735,7 @@ class App(QMainWindow):
                 self._ensure_graph_model()
                 if self._graph_editor_window is not None:
                     self._graph_editor_window._canvas.set_model(self.state.signal_graph)
-                    self._graph_editor_window._canvas.frame_all()
+                self._regraph_view()
                 self._refresh_all()
             except Exception as e:
                 QMessageBox.critical(self, 'Error', f'Failed to load project: {e}')
@@ -1637,7 +1760,7 @@ class App(QMainWindow):
         self._ensure_graph_model()
         if self._graph_editor_window is not None:
             self._graph_editor_window._canvas.set_model(self.state.signal_graph)
-            self._graph_editor_window._canvas.frame_all()
+        self._regraph_view()
         self._refresh_all()
         QMessageBox.information(
             self, 'MIDI imported',

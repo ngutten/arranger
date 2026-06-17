@@ -19,7 +19,7 @@ class TrackPanel(QFrame):
         # Minimum (not fixed) width: as a dock widget this keeps the panel from
         # collapsing yet lets the user widen it — important now that it shares a
         # tabbed dock with the wider Plugins panel.
-        self.setMinimumWidth(250)
+        self.setMinimumWidth(290)
         self._build()
 
     def _build(self):
@@ -59,13 +59,47 @@ class TrackPanel(QFrame):
         self.auto_frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self.inner_layout.addWidget(self.auto_frame)
 
+        # Node-params frame — shown only while a graph node is selected in the
+        # signal-graph editor (context-aware inspector). Hidden otherwise.
+        self.node_frame = QGroupBox('Node')
+        self.node_frame.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self.node_frame.hide()
+        self.inner_layout.addWidget(self.node_frame)
+
+        # The arrangement-side frames, grouped so we can show/hide them as a set
+        # when toggling into node-params mode.
+        self._arrange_frames = [self.trk_frame, self.sf2_frame, self.pl_frame,
+                                self.kit_frame, self.auto_frame]
+
         self.inner_layout.addStretch()
 
         self.scroll_area.setWidget(self.inner)
         layout.addWidget(self.scroll_area)
 
     def refresh(self):
-        """Rebuild all sections from state."""
+        """Rebuild all sections from state.
+
+        When a graph node is selected in the signal-graph editor, the inspector
+        switches to a node-params view; otherwise it shows the arrangement-side
+        track/clip/beat sections.
+        """
+        node = getattr(self.app, 'sel_graph_node', None)
+        if node is not None:
+            for f in self._arrange_frames:
+                f.hide()
+            self.node_frame.show()
+            self._render_node_params(node)
+            return
+
+        self.node_frame.hide()
+        for f in self._arrange_frames:
+            f.show()
+        # Beat Kit and Soundfont are mutually exclusive by track type: a beat
+        # track has a kit, an instrument track has a soundfont. Hide the
+        # irrelevant one instead of showing an empty panel.
+        is_beat = bool(self.state.sel_beat_trk)
+        self.kit_frame.setVisible(is_beat)
+        self.sf2_frame.setVisible(not is_beat)
         self._render_track_settings()
         self._render_sf2_info()
         self._render_placement_settings()
@@ -546,6 +580,76 @@ class TrackPanel(QFrame):
         return widget
 
     # Helpers
+    def _render_node_params(self, node):
+        """Render the selected graph node's params + port-exposure toggles.
+
+        Reuses the graph canvas's settings-widget builder so edits route through
+        the same low-latency param_changed → set_param path (no graph rebuild).
+        """
+        self._clear_frame(self.node_frame)
+        layout = self.node_frame.layout()
+        layout.setContentsMargins(6, 4, 4, 4)  # tight — reclaim left padding
+        self.node_frame.setTitle(node.display_name or node.node_type)
+
+        canvas = getattr(self.app, '_sel_graph_canvas', None)
+        if canvas is None:
+            layout.addWidget(QLabel('Graph editor not available'))
+            return
+        try:
+            from ..graph_editor.node_canvas import _make_default_settings_widget
+            from ..graph_editor.graph_model import PortType
+        except Exception:
+            layout.addWidget(QLabel('Graph editor not available'))
+            return
+
+        w = _make_default_settings_widget(
+            node, self.node_frame, canvas._on_node_param_changed,
+            settings=getattr(canvas, '_settings', None),
+            force_single_col=True)
+        if w is not None:
+            # Dim controls whose ports are wired (driven by an upstream signal).
+            if hasattr(w, 'refresh_wired_ports'):
+                wired = {c.to_port for c in canvas.model.connections
+                         if c.to_node == node.node_id}
+                try:
+                    w.refresh_wired_ports(wired)
+                except Exception:
+                    pass
+            layout.addWidget(w)
+        else:
+            lbl = QLabel('This node has no editable parameters.')
+            lbl.setStyleSheet('color: #888;')
+            layout.addWidget(lbl)
+
+        # Promote-to-port: expose a control param as a wireable input port.
+        ctrl_inputs = [p for p in node.input_ports()
+                       if p.ptype == PortType.CONTROL]
+        if ctrl_inputs:
+            hdr = QLabel('Expose as port')
+            hdr.setStyleSheet('color: #7a88a8; font-size: 8px;')
+            layout.addWidget(hdr)
+            for p in ctrl_inputs:
+                cb = QCheckBox(p.name)
+                cb.setChecked(p.port_id not in node.hidden_ports)
+                cb.setToolTip(
+                    'Show an input port on the node so automation or a control '
+                    'signal can be wired into this parameter.')
+                cb.toggled.connect(
+                    lambda checked, port=p: self._toggle_node_port(port, checked))
+                layout.addWidget(cb)
+
+    def _toggle_node_port(self, port, exposed):
+        node = getattr(self.app, 'sel_graph_node', None)
+        canvas = getattr(self.app, '_sel_graph_canvas', None)
+        if node is None or canvas is None:
+            return
+        if exposed:
+            canvas._reveal_port(node, port)
+        else:
+            canvas._hide_port(node, port)
+        # Re-render so wired-dimming reflects any removed connections.
+        self._render_node_params(node)
+
     def _row(self, layout, label, value, on_change):
         row = QHBoxLayout()
         row.addWidget(QLabel(label))

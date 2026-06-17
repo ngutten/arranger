@@ -277,6 +277,16 @@ class PianoRoll(QFrame):
 
         hdr_layout.addStretch()
 
+        # Snap (grid quantization for note placement/editing). Moved here from
+        # the topbar — snap is a note-editing concern; the arrangement snaps to
+        # measures independently.
+        hdr_layout.addWidget(QLabel('Snap'))
+        self.snap_cb = QComboBox()
+        self.snap_cb.addItems(['1', '1/2', '1/4', '1/8', '1/16'])
+        self.snap_cb.setCurrentText(self._snap_to_text(self.state.snap))
+        self.snap_cb.currentTextChanged.connect(self._on_snap)
+        hdr_layout.addWidget(self.snap_cb)
+
         # Note length
         hdr_layout.addWidget(QLabel('Len'))
         self.note_len_cb = QComboBox()
@@ -404,6 +414,22 @@ class PianoRoll(QFrame):
 
     def _on_note_len(self, text):
         self.state.note_len = text
+
+    @staticmethod
+    def _snap_to_text(value):
+        """Map a numeric snap value to its display fraction."""
+        return {1: '1', 0.5: '1/2', 0.25: '1/4',
+                0.125: '1/8', 0.0625: '1/16'}.get(value, '1/4')
+
+    def _on_snap(self, text):
+        try:
+            if '/' in text:
+                num, den = text.split('/')
+                self.state.snap = float(num) / float(den)
+            else:
+                self.state.snap = float(text)
+        except Exception:
+            pass
 
     # -- Bottom-lane (velocity / note-attr) handling ----------------------
 
@@ -612,6 +638,11 @@ class PianoRoll(QFrame):
 
         self._update_tool_buttons()
         self._refresh_lane_options()
+
+        # Keep the snap dropdown in sync with state (e.g. after project load)
+        self.snap_cb.blockSignals(True)
+        self.snap_cb.setCurrentText(self._snap_to_text(self.state.snap))
+        self.snap_cb.blockSignals(False)
 
         # Update widget sizes
         pitch_range = self.HI - self.LO + 1

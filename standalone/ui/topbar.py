@@ -1,9 +1,9 @@
 """Top control bar - BPM, time signature, snap, tool buttons, and action buttons."""
 
 from PySide6.QtWidgets import (QFrame, QLabel, QPushButton, QSpinBox, QComboBox,
-                                QDoubleSpinBox, QHBoxLayout)
+                                QDoubleSpinBox, QHBoxLayout, QMenu, QButtonGroup)
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QAction
 
 from .master_meter import MasterMeter
 
@@ -80,18 +80,8 @@ class TopBar(QFrame):
 
         layout.addSpacing(8)
 
-        # Snap
-        layout.addWidget(QLabel('Snap'))
-        self.snap_combo = QComboBox()
-        self.snap_combo.addItems(['1', '1/2', '1/4', '1/8', '1/16'])
-        # Map current snap value to display format
-        snap_map = {1: '1', 0.5: '1/2', 0.25: '1/4', 0.125: '1/8', 0.0625: '1/16'}
-        self.snap_combo.setCurrentText(snap_map.get(s.snap, '1/4'))
-        self.snap_combo.setMaximumWidth(70)
-        self.snap_combo.currentTextChanged.connect(self._on_snap)
-        layout.addWidget(self.snap_combo)
-
-        layout.addSpacing(8)
+        # Note: the snap control now lives in the piano-roll header, since snap
+        # is a note-editing concern (the arrangement snaps to measures).
 
         # ---- Master section (always-on master fader + limiter + meter) ----
         sep_m = QFrame()
@@ -119,29 +109,49 @@ class TopBar(QFrame):
                                     % s.master_ceiling_db)
         self.limiter_btn.toggled.connect(self._on_limiter)
         layout.addWidget(self.limiter_btn)
+        # Track the limiter's visual state so we only restyle on transitions
+        # (off / armed-idle / limiting), not every meter tick.
+        self._limiter_state = None
+        self._apply_limiter_style('off' if not s.master_limiter else 'armed')
 
         self.master_meter = MasterMeter()
         layout.addWidget(self.master_meter)
 
-        # Spacer
+        # ---- Workspace switcher (centred) -------------------------------
+        # Arrange / Graph — whole-screen layout modes. Exclusive, so exactly
+        # one is active; mirrors app.set_workspace(). (The mixer is a dock,
+        # not a workspace — see the Mixer toggle below.)
+        layout.addStretch()
+        self._workspace_btns = {}
+        ws_group = QButtonGroup(self)
+        ws_group.setExclusive(True)
+        ws_box = QHBoxLayout()
+        ws_box.setSpacing(0)
+        for name, label, tip in (
+            ('arrange', 'Arrange', 'Pattern list, arrangement timeline, and editors'),
+            ('graph',   'Graph',   'Signal-graph editor (live sound design)'),
+        ):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setToolTip(tip)
+            btn.clicked.connect(lambda checked=False, n=name: self.app.set_workspace(n))
+            ws_group.addButton(btn)
+            ws_box.addWidget(btn)
+            self._workspace_btns[name] = btn
+        self._workspace_btns['arrange'].setChecked(True)
+        layout.addLayout(ws_box)
         layout.addStretch()
 
         # Action buttons
         config_btn = QPushButton('Config')
         config_btn.clicked.connect(self.app.open_config)
-        layout.addWidget(config_btn)
 
-        # Graph Editor button — enabled when a C++ engine backend is active
-        self.graph_btn = QPushButton('Graph ⬡')
-        self.graph_btn.setToolTip('Open signal graph editor')
-        self.graph_btn.clicked.connect(self.app.open_graph_editor)
-        layout.addWidget(self.graph_btn)
-
-        # Mixer toggle — swaps the bottom editor pane to the full mixer
+        # Mixer — toggles a bottom dock (movable to a side column if preferred)
         self.mixer_btn = QPushButton('Mixer')
         self.mixer_btn.setCheckable(True)
-        self.mixer_btn.setToolTip('Show the mixer (per-track faders + master)')
+        self.mixer_btn.setToolTip('Show/hide the mixer (per-track faders + master)')
         self.mixer_btn.clicked.connect(self.app.toggle_mixer)
+        layout.addWidget(config_btn)
         layout.addWidget(self.mixer_btn)
 
         add_track_btn = QPushButton('+ Track')
@@ -162,21 +172,18 @@ class TopBar(QFrame):
         sep1.setFrameShadow(QFrame.Sunken)
         layout.addWidget(sep1)
 
-        midi_btn = QPushButton('MIDI')
-        midi_btn.clicked.connect(lambda: self.app.do_export('midi'))
-        layout.addWidget(midi_btn)
-
-        wav_btn = QPushButton('WAV')
-        wav_btn.clicked.connect(lambda: self.app.do_export('wav'))
-        layout.addWidget(wav_btn)
-
-        mp3_btn = QPushButton('MP3')
-        mp3_btn.clicked.connect(lambda: self.app.do_export('mp3'))
-        layout.addWidget(mp3_btn)
-
-        mxml_btn = QPushButton('MusicXML')
-        mxml_btn.clicked.connect(lambda: self.app.do_export('musicxml'))
-        layout.addWidget(mxml_btn)
+        # Export — consolidated dropdown (was four always-visible buttons)
+        export_btn = QPushButton('Export ⏷')
+        export_btn.setToolTip('Export the arrangement')
+        export_menu = QMenu(export_btn)
+        for label, fmt in (('MIDI', 'midi'), ('Audio (WAV)', 'wav'),
+                           ('Audio (MP3)', 'mp3'), ('MusicXML', 'musicxml')):
+            act = QAction(label, export_menu)
+            act.triggered.connect(
+                lambda checked=False, f=fmt: self.app.do_export(f))
+            export_menu.addAction(act)
+        export_btn.setMenu(export_menu)
+        layout.addWidget(export_btn)
 
         # Separator
         sep2 = QFrame()
@@ -232,7 +239,17 @@ class TopBar(QFrame):
             eng.set_master_limiter(bool(checked))
         self.state.notify('master')
 
+    def sync_workspace(self, name: str):
+        """Reflect the active workspace in the switcher without re-firing."""
+        btn = self._workspace_btns.get(name)
+        if btn is None:
+            return
+        btn.blockSignals(True)
+        btn.setChecked(True)
+        btn.blockSignals(False)
+
     def sync_mixer_button(self, is_open: bool):
+        """Reflect mixer-dock visibility in the toggle button."""
         self.mixer_btn.blockSignals(True)
         self.mixer_btn.setChecked(bool(is_open))
         self.mixer_btn.blockSignals(False)
@@ -245,11 +262,18 @@ class TopBar(QFrame):
         m = getattr(eng, 'master_meter', None)
         if not m:
             return
+        gr = float(m.get('gr', 1.0))
         self.master_meter.set_levels(
             float(m.get('peak_l', 0.0)),
             float(m.get('peak_r', 0.0)),
-            float(m.get('gr', 1.0)),
+            gr,
         )
+        # Light up LIM only when the limiter is on AND actually pulling gain
+        # down (gr < ~ -0.1 dB, i.e. ~0.989 linear).
+        if self.state.master_limiter:
+            self._apply_limiter_style('limiting' if gr < 0.989 else 'armed')
+        else:
+            self._apply_limiter_style('off')
 
     def _on_bpm(self, value):
         self.state.bpm = float(value)
@@ -262,17 +286,25 @@ class TopBar(QFrame):
         except Exception:
             pass
 
-    def _on_snap(self):
-        try:
-            text = self.snap_combo.currentText()
-            # Parse fraction format
-            if '/' in text:
-                parts = text.split('/')
-                self.state.snap = float(parts[0]) / float(parts[1])
-            else:
-                self.state.snap = float(text)
-        except Exception:
-            pass
+    def _apply_limiter_style(self, state: str):
+        """Restyle the LIM button. state: 'off' | 'armed' | 'limiting'.
+
+        'off'      — limiter disabled (dim).
+        'armed'    — enabled but not currently reducing gain (neutral blue).
+        'limiting' — actively reducing gain right now (amber/red alert).
+        """
+        if state == self._limiter_state:
+            return
+        self._limiter_state = state
+        if state == 'limiting':
+            css = ('QPushButton { background-color: #e0573a; color: #fff;'
+                   ' border: 1px solid #ff8a6a; font-weight: bold; }')
+        elif state == 'armed':
+            css = ('QPushButton { background-color: #2c3a55; color: #cdd6e6;'
+                   ' border: 1px solid #3a4a66; }')
+        else:  # off
+            css = 'QPushButton { color: #8a93a6; }'
+        self.limiter_btn.setStyleSheet(css)
 
     def refresh(self):
         """Update controls from state."""
@@ -281,10 +313,6 @@ class TopBar(QFrame):
         self.bpm_spin.blockSignals(False)
         self.ts_num_combo.setCurrentText(str(self.state.ts_num))
         self.ts_den_combo.setCurrentText(str(self.state.ts_den))
-
-        # Map snap value to display format
-        snap_map = {1: '1', 0.5: '1/2', 0.25: '1/4', 0.125: '1/8', 0.0625: '1/16'}
-        self.snap_combo.setCurrentText(snap_map.get(self.state.snap, '1/4'))
 
         self.play_btn.setText('⏹' if self.state.playing else '▶')
 
@@ -295,6 +323,10 @@ class TopBar(QFrame):
         self.limiter_btn.blockSignals(True)
         self.limiter_btn.setChecked(bool(self.state.master_limiter))
         self.limiter_btn.blockSignals(False)
+        # Baseline LIM look; update_meter() promotes to 'limiting' when reducing.
+        if self._limiter_state != 'limiting':
+            self._apply_limiter_style(
+                'armed' if self.state.master_limiter else 'off')
 
         # Grey out BPM spinbox when a tempo automation track exists
         has_tempo_track = self.state.find_tempo_track() is not None
@@ -304,13 +336,17 @@ class TopBar(QFrame):
         else:
             self.bpm_spin.setToolTip('')
 
-        # Enable graph editor button when the engine supports the graph protocol
+        # Enable the Graph workspace only when the engine supports the protocol
         graph_available = bool(self.app.engine and hasattr(self.app.engine, '_send'))
-        self.graph_btn.setEnabled(graph_available)
-        self.graph_btn.setToolTip(
-            'Open signal graph editor' if graph_available
-            else 'Signal graph editor requires the C++ built-in or server backend'
-        )
+        gbtn = self._workspace_btns.get('graph')
+        if gbtn is not None:
+            gbtn.setEnabled(graph_available)
+            gbtn.setToolTip(
+                'Signal-graph editor (live sound design)' if graph_available
+                else 'Signal graph editor requires the C++ built-in or server backend'
+            )
+        # Keep the switcher highlight in sync with the active workspace.
+        self.sync_workspace(getattr(self.app, 'workspace', 'arrange'))
 
     def update_bpm_display(self, bpm: float):
         """Update spinbox to show current BPM without triggering _on_bpm."""

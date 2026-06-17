@@ -65,14 +65,20 @@ class GraphEditorWindow(QWidget):
 
     def __init__(self, model: GraphModel, server_engine,
                  state, on_graph_changed: Callable = None,
-                 parent=None):
-        # Use Qt.Window to make it a top-level window that can be moved independently,
-        # but keep parent relationship so it closes with main window and respects modality
-        super().__init__(parent, Qt.Window)
-        self.setWindowTitle("Signal Graph Editor")
-        self.resize(1100, 700)
+                 parent=None, embedded: bool = False):
+        # embedded=True hosts the editor inside a workspace pane (no window
+        # chrome); otherwise it is a free-floating top-level window.
+        self._embedded = embedded
+        if embedded:
+            super().__init__(parent)
+        else:
+            # Qt.Window makes it a movable top-level window while keeping the
+            # parent relationship so it closes with the main window.
+            super().__init__(parent, Qt.Window)
+            self.setWindowTitle("Signal Graph Editor")
+            self.resize(1100, 700)
 
-        self.model         = model
+        self._initial_model = model
         self.server_engine = server_engine
         self.state         = state
         self.settings      = server_engine.settings if server_engine and hasattr(server_engine, 'settings') else None
@@ -107,6 +113,17 @@ class GraphEditorWindow(QWidget):
             QMenu::item:disabled { color: #555; }
             QLabel { background: transparent; }
         """)
+
+    @property
+    def model(self):
+        """The model currently shown by the canvas.
+
+        set_model() can replace the canvas's model on project load, so always
+        read it from the canvas — otherwise node add/delete/save would operate
+        on a stale, detached model (and added nodes would never appear).
+        """
+        canvas = getattr(self, '_canvas', None)
+        return canvas.model if canvas is not None else self._initial_model
 
     # -----------------------------------------------------------------------
     # UI construction
@@ -465,6 +482,7 @@ class GraphEditorWindow(QWidget):
     def _delete_node(self, node: GraphNode) -> None:
         self.model.remove_node(node.node_id)
         self._canvas.selected_nodes.discard(node.node_id)
+        self._canvas.emit_selection()
         # Clean up the inline settings widget so it doesn't linger on screen
         w = self._canvas._settings_widgets.pop(node.node_id, None)
         if w:

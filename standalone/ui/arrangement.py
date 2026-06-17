@@ -1,5 +1,7 @@
 """Arrangement timeline canvas - track lanes, placements, and playhead."""
 
+import math
+
 from PySide6.QtWidgets import QFrame, QWidget, QScrollArea, QVBoxLayout, QHBoxLayout, QScrollBar
 from PySide6.QtCore import Qt, QRect, QPoint, QSize
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QFont
@@ -16,6 +18,7 @@ class ArrangementView(QFrame):
     TH = 56    # track height
     BW = 30    # pixels per beat
     MIN_BEATS = 64 # Minimum number of beats to show
+    SNAP_TOL_PX = 10  # soft-snap pull distance (pixels) for clips
     LOOKAHEAD_FACTOR = 1.5 # How much to extend the scrollbar past the current song extent
 
     def __init__(self, parent, app):
@@ -135,8 +138,75 @@ class ArrangementView(QFrame):
         # Sync track labels with vertical scroll
         self.trk_scroll.verticalScrollBar().setValue(value)
 
-    def _snap(self, beat):
-        return round(beat / self.state.snap) * self.state.snap
+    # ---- Soft snapping ---------------------------------------------------
+    # The arrangement no longer uses the piano-roll grid (state.snap). Clips
+    # softly snap to measure boundaries (derived from the time signature) and
+    # to other clips' start/end edges, within a small pixel pull distance;
+    # outside that, placement is free.
+
+    def _measure_beats(self):
+        s = self.state
+        return s.ts_num * (4.0 / s.ts_den) if s.ts_den else 4.0
+
+    def _snap_tol(self):
+        return self.SNAP_TOL_PX / self.BW if self.BW else 0.25
+
+    def _neighbor_edges(self, exclude=None):
+        """Start and end beats of every placement (for clip-to-clip snapping)."""
+        edges = []
+        for pl in self.state.placements:
+            if pl is exclude:
+                continue
+            length = self._placement_length(pl) * (pl.repeats or 1)
+            edges.append(pl.time)
+            edges.append(pl.time + length)
+        for bp in self.state.beat_placements:
+            if bp is exclude:
+                continue
+            pat = self.state.find_beat_pattern(bp.pattern_id)
+            if pat:
+                edges.append(bp.time)
+                edges.append(bp.time + pat.length * (bp.repeats or 1))
+        for ap in self.state.automation_placements:
+            if ap is exclude:
+                continue
+            pat = self.state.find_automation_pattern(ap.pattern_id)
+            if pat:
+                edges.append(ap.time)
+                edges.append(ap.time + pat.length * (ap.repeats or 1))
+        return edges
+
+    def _snap_candidates(self, beat, exclude=None):
+        """Measure boundaries around `beat` plus all neighbor clip edges."""
+        cands = []
+        m = self._measure_beats()
+        if m > 0:
+            base = math.floor(beat / m) * m
+            cands.extend((base, base + m))
+        cands.extend(self._neighbor_edges(exclude))
+        return cands
+
+    def _snap(self, beat, exclude=None):
+        """Soft-snap a single position to a measure boundary or clip edge."""
+        cands = self._snap_candidates(beat, exclude)
+        if cands:
+            best = min(cands, key=lambda c: abs(c - beat))
+            if abs(best - beat) <= self._snap_tol():
+                return max(0.0, best)
+        return max(0.0, round(beat, 3))
+
+    def _snap_drag(self, start, length, exclude=None):
+        """Soft-snap a dragged clip by whichever edge (start or end) is closest."""
+        cands = set(self._snap_candidates(start, exclude))
+        cands |= set(self._snap_candidates(start + length, exclude))
+        tol = self._snap_tol()
+        best_start, best_d = round(max(0.0, start), 3), tol + 1.0
+        for c in cands:
+            if abs(c - start) < best_d:               # align clip start to c
+                best_d, best_start = abs(c - start), c
+            if abs(c - (start + length)) < best_d:    # align clip end to c
+                best_d, best_start = abs(c - (start + length)), c - length
+        return max(0.0, best_start if best_d <= tol else round(start, 3))
 
     def _compute_content_extent(self):
         """Calculate the rightmost beat position of any placement."""
@@ -557,40 +627,51 @@ class ArrangementView(QFrame):
         beat = x / self.BW
 
         if self._drag_pl:
-            self._drag_pl.time = max(0, self._snap(beat - self._drag_offset))
+            length = self._placement_length(self._drag_pl) * (self._drag_pl.repeats or 1)
+            self._drag_pl.time = self._snap_drag(
+                beat - self._drag_offset, length, exclude=self._drag_pl)
             ti = int(y // self.TH)
             if 0 <= ti < len(self.state.tracks):
                 self._drag_pl.track_id = self.state.tracks[ti].id
             self.canvas_widget.update()
         elif self._resize_pl:
-            new_len = max(self.state.snap, self._snap(beat - self._resize_pl.time))
+            end = self._snap(beat, exclude=self._resize_pl)
             pat_len = self._placement_length(self._resize_pl)
             if pat_len > 0:
-                self._resize_pl.repeats = max(1, round(new_len / pat_len))
+                self._resize_pl.repeats = max(
+                    1, round((end - self._resize_pl.time) / pat_len))
             self.canvas_widget.update()
         elif self._drag_beat_pl:
-            self._drag_beat_pl.time = max(0, self._snap(beat - self._drag_offset))
+            pat = self.state.find_beat_pattern(self._drag_beat_pl.pattern_id)
+            length = (pat.length * (self._drag_beat_pl.repeats or 1)) if pat else 0
+            self._drag_beat_pl.time = self._snap_drag(
+                beat - self._drag_offset, length, exclude=self._drag_beat_pl)
             ti = int(y // self.TH) - len(self.state.tracks)
             if 0 <= ti < len(self.state.beat_tracks):
                 self._drag_beat_pl.track_id = self.state.beat_tracks[ti].id
             self.canvas_widget.update()
         elif self._resize_beat_pl:
-            new_len = max(self.state.snap, self._snap(beat - self._resize_beat_pl.time))
+            end = self._snap(beat, exclude=self._resize_beat_pl)
             pat = self.state.find_beat_pattern(self._resize_beat_pl.pattern_id)
             if pat:
-                self._resize_beat_pl.repeats = max(1, round(new_len / pat.length))
+                self._resize_beat_pl.repeats = max(
+                    1, round((end - self._resize_beat_pl.time) / pat.length))
             self.canvas_widget.update()
         elif self._drag_auto_pl:
-            self._drag_auto_pl.time = max(0, self._snap(beat - self._drag_offset))
+            pat = self.state.find_automation_pattern(self._drag_auto_pl.pattern_id)
+            length = (pat.length * (self._drag_auto_pl.repeats or 1)) if pat else 0
+            self._drag_auto_pl.time = self._snap_drag(
+                beat - self._drag_offset, length, exclude=self._drag_auto_pl)
             ti = int(y // self.TH) - len(self.state.tracks) - len(self.state.beat_tracks)
             if 0 <= ti < len(self.state.automation_tracks):
                 self._drag_auto_pl.track_id = self.state.automation_tracks[ti].id
             self.canvas_widget.update()
         elif self._resize_auto_pl:
-            new_len = max(self.state.snap, self._snap(beat - self._resize_auto_pl.time))
+            end = self._snap(beat, exclude=self._resize_auto_pl)
             pat = self.state.find_automation_pattern(self._resize_auto_pl.pattern_id)
             if pat:
-                self._resize_auto_pl.repeats = max(1, round(new_len / pat.length))
+                self._resize_auto_pl.repeats = max(
+                    1, round((end - self._resize_auto_pl.time) / pat.length))
             self.canvas_widget.update()
 
     def _on_release(self, event):

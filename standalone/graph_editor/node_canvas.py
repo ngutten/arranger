@@ -38,7 +38,7 @@ from PySide6.QtGui import (
 )
 
 from .graph_model import GraphModel, GraphNode, GraphConnection, PortDef, PortType
-from .param_widgets import SmartFloatWidget
+from .param_widgets import SmartFloatWidget, XYPadWidget
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +192,7 @@ class NodeGraphCanvas(QWidget):
     graph_changed = Signal()
     node_right_clicked = Signal(object, QPoint)   # (GraphNode, global_pos)
     param_changed = Signal(str, str, float)        # (node_id, param_id, value) — low-latency path
+    selection_changed = Signal(object)             # primary selected GraphNode, or None
 
     def __init__(self, model: GraphModel, parent=None,
                  settings_factory: Callable = None):
@@ -236,6 +237,11 @@ class NodeGraphCanvas(QWidget):
 
         self.selected_nodes: set = set()   # node_ids
 
+        # When True, on-canvas param widgets are suppressed because params are
+        # edited in the (co-located) inspector instead — nodes become pure
+        # layout/wiring. Set by the host when an inspector is available.
+        self.params_in_inspector: bool = False
+
         # Inline settings widgets: node_id → QWidget
         self._settings_widgets: dict = {}
         self._rebuild_settings_widgets()
@@ -254,6 +260,7 @@ class NodeGraphCanvas(QWidget):
 
         self.model = model
         self.selected_nodes.clear()
+        self.emit_selection()
         self._rebuild_settings_widgets()
         self.update()
 
@@ -303,6 +310,9 @@ class NodeGraphCanvas(QWidget):
     # -----------------------------------------------------------------------
 
     def _node_width(self, node: GraphNode) -> float:
+        # Params live in the inspector → no wide two-column body to fit.
+        if self.params_in_inspector:
+            return NODE_W
         view = self._settings_widgets.get(node.node_id)
         if view is not None:
             inner = getattr(view, '_inner', view)
@@ -324,6 +334,9 @@ class NodeGraphCanvas(QWidget):
         return NODE_HEADER_H + port_h + settings_h
 
     def _settings_height(self, node: GraphNode) -> float:
+        # Params live in the inspector → nodes reserve no on-canvas settings space.
+        if self.params_in_inspector:
+            return 0
         view = self._settings_widgets.get(node.node_id)
         if view is None:
             return 0
@@ -466,6 +479,17 @@ class NodeGraphCanvas(QWidget):
             view.hide()
             self._settings_widgets[node.node_id] = view
 
+    def emit_selection(self) -> None:
+        """Emit selection_changed with the single selected node (or None).
+
+        The inspector renders a node only when exactly one is selected; a
+        multi-selection or empty selection clears it.
+        """
+        node = None
+        if len(self.selected_nodes) == 1:
+            node = self.model.get_node(next(iter(self.selected_nodes)))
+        self.selection_changed.emit(node)
+
     def _on_node_param_changed(self, node_id: str, key: str, value) -> None:
         """Called by inline settings widgets when a param changes."""
         node = self.model.get_node(node_id)
@@ -503,6 +527,12 @@ class NodeGraphCanvas(QWidget):
         would be too small to interact with.
         """
         from PySide6.QtGui import QRegion
+
+        # Params live in the inspector → keep nodes as pure layout/wiring.
+        if self.params_in_inspector:
+            for w in self._settings_widgets.values():
+                w.hide()
+            return
 
         # Hide all widgets when zoomed out too far to interact
         if self._scale < ZOOM_HIDE_SCALE:
@@ -913,6 +943,7 @@ class NodeGraphCanvas(QWidget):
                 self._drag_node = node
                 self._drag_offset = QPointF(scene_pos.x() - node.x,
                                             scene_pos.y() - node.y)
+                self.emit_selection()
                 self.update()
                 return
 
@@ -922,6 +953,7 @@ class NodeGraphCanvas(QWidget):
                 self._marquee_end   = scene_pos
             else:
                 self.selected_nodes.clear()
+                self.emit_selection()
                 self._pan_start = QPointF(event.position())
                 self._pan_origin_start = QPointF(self._origin)
                 self.setCursor(QCursor(Qt.ClosedHandCursor))
@@ -1038,6 +1070,7 @@ class NodeGraphCanvas(QWidget):
                         self.selected_nodes.add(node.node_id)
                 self._marquee_start = None
                 self._marquee_end   = None
+                self.emit_selection()
                 self.update()
                 return
 
@@ -1084,7 +1117,8 @@ class NodeGraphCanvas(QWidget):
 # Default inline settings widgets
 # ---------------------------------------------------------------------------
 
-def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable, settings=None):
+def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable,
+                                  settings=None, force_single_col: bool = False):
     """Build a compact inline settings panel for a node type.
 
     Returns None if this node type has no settings.
@@ -1256,7 +1290,9 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable, 
         # Special-case: control_monitor gets a live sparkline widget
         if t in ("builtin.control_monitor", "control_monitor"):
             return _make_control_monitor_widget(node, parent)
-        return _make_plugin_settings_widget(node, desc, parent, on_change, settings=settings)
+        return _make_plugin_settings_widget(
+            node, desc, parent, on_change, settings=settings,
+            force_single_col=force_single_col)
     return None
 
 
@@ -1427,7 +1463,7 @@ def _make_control_monitor_widget(node: GraphNode, parent) -> "QWidget":
     return SparklineWidget(parent)
 
 
-def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change: Callable, settings=None):
+def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change: Callable, settings=None, force_single_col: bool = False):
     """Auto-generate a settings panel from a plugin descriptor.
 
     Generates widgets for:
@@ -1460,7 +1496,9 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
         if not cp.get("advanced", False) or node.params.get(cp.get("id", ""), cp.get("default", ""))
     )
     n_total = n_visible_config + len(ctrl_inputs)
-    use_two_col = n_total >= TWO_COL_THRESHOLD
+    # Single-column when hosted in the (narrow) inspector; two-column only on
+    # the canvas where horizontal space is cheap.
+    use_two_col = (n_total >= TWO_COL_THRESHOLD) and not force_single_col
 
     w = QWidget(parent)
     w.setStyleSheet("background: transparent; color: #ccc;")
@@ -1474,6 +1512,9 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
         left_form.setSpacing(3)
         right_form = QFormLayout()
         right_form.setSpacing(3)
+        for _f in (left_form, right_form):
+            _f.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            _f.setLabelAlignment(_Qt.AlignLeft)
         outer.addLayout(left_form)
         outer.addLayout(right_form)
         _forms = [left_form, right_form]
@@ -1486,8 +1527,12 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
         lay = left_form  # fallback reference (unused when two-col)
     else:
         lay = QFormLayout(w)
-        lay.setContentsMargins(4, 2, 4, 2)
+        lay.setContentsMargins(2, 2, 2, 2)
         lay.setSpacing(3)
+        # Let value fields fill the available width instead of being squeezed
+        # by long labels — important in the narrow inspector.
+        lay.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        lay.setLabelAlignment(_Qt.AlignLeft)
 
         def _add_row(label, widget):
             lay.addRow(label, widget)
@@ -1495,12 +1540,19 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
     STYLE_ACTIVE = "background: #0d1117; color: #ccc; border: 1px solid #2a3a5c;"
     STYLE_DISABLED = "background: #111; color: #444; border: 1px solid #1a1a1a;"
 
+    import re as _re
+
+    def _short_label(s: str) -> str:
+        """Trim a trailing file-extension hint, e.g. 'Scale File (.scl)' →
+        'Scale File', so labels don't crowd out the value field."""
+        return _re.sub(r'\s*\(\.[^)]*\)\s*$', '', s)
+
     _ctrl_widgets: dict = {}
 
     # --- Config params first (file pickers, etc.) ---
     for cp in config_params:
         cp_id = cp.get("id", "")
-        cp_display = cp.get("display_name", cp_id)
+        cp_display = _short_label(cp.get("display_name", cp_id))
         cp_type = cp.get("type", "string")
         cp_default = cp.get("default", "")
         stored = node.params.get(cp_id, cp_default)
@@ -1528,6 +1580,7 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
             edit = QLineEdit(str(stored))
             edit.setPlaceholderText(cp.get("doc", ""))
             edit.setReadOnly(True)
+            edit.setCursorPosition(0)  # show the start of the name, not the tail
             edit.setStyleSheet("color: #aaa; background: #0d1117; border: 1px solid #2a3a5c;")
             row_lay.addWidget(edit)
             browse_btn = QPushButton("…")
@@ -1678,10 +1731,54 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
                 lambda text, cid=cp_id: on_change(node.node_id, cid, text))
             _add_row(QLabel(cp_display + ":"), edit)
 
+    # Detect 2D latent pairs (e.g. style_x/style_y, perf_x/perf_y) so they can
+    # render as a single XY pad instead of two sliders — better for sweeping a
+    # latent live. A pair is two continuous control inputs whose ids end in
+    # "_x"/"_y" sharing a base.
+    _ctrl_by_id = {cp.get("id", ""): cp for cp in ctrl_inputs}
+    _xy_pair = {}     # x_id -> (x_port, y_port, base_label)
+    _xy_skip = set()  # ids consumed by a pad (both x and y)
+    for cp in ctrl_inputs:
+        xid = cp.get("id", "")
+        if xid.endswith("_x") and cp.get("hint", "continuous") == "continuous":
+            yid = xid[:-2] + "_y"
+            yp = _ctrl_by_id.get(yid)
+            if yp is not None and yp.get("hint", "continuous") == "continuous":
+                base = cp.get("display_name", xid)
+                if base.lower().endswith(" x"):
+                    base = base[:-2].strip()
+                _xy_pair[xid] = (cp, yp, base)
+                _xy_skip.add(xid)
+                _xy_skip.add(yid)
+
     # --- Control input ports ---
     for p in ctrl_inputs:
         pid = p.get("id", "")
-        display = p.get("display_name", pid)
+
+        # 2D latent pair → one XY pad (rendered on the X member; Y is skipped).
+        if pid in _xy_skip:
+            if pid in _xy_pair:
+                xp, yp, base = _xy_pair[pid]
+                pad = XYPadWidget(
+                    float(xp.get("min", 0.0)), float(xp.get("max", 1.0)),
+                    float(yp.get("min", 0.0)), float(yp.get("max", 1.0)),
+                    float(node.params.get(xp["id"], xp.get("default", 0.0))),
+                    float(node.params.get(yp["id"], yp.get("default", 0.0))),
+                    x_label=xp.get("display_name", "X"),
+                    y_label=yp.get("display_name", "Y"),
+                    parent=w)
+                pad.xChanged.connect(
+                    lambda v, k=xp["id"]: on_change(node.node_id, k, v))
+                pad.yChanged.connect(
+                    lambda v, k=yp["id"]: on_change(node.node_id, k, v))
+                lbl = QLabel(base + ":")
+                lbl.setStyleSheet("color: #aaa; font-size: 8px;")
+                _add_row(lbl, pad)
+                _ctrl_widgets[xp["id"]] = pad
+                _ctrl_widgets[yp["id"]] = pad
+            continue
+
+        display = _short_label(p.get("display_name", pid))
         hint = p.get("hint", "continuous")
         p_min = float(p.get("min", 0.0))
         p_max = float(p.get("max", 1.0))
@@ -1771,8 +1868,8 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
         for sym, widget in _ctrl_widgets.items():
             driven = sym in wired
             
-            # Handle SmartFloatWidget specially - it has setDriven method
-            if isinstance(widget, SmartFloatWidget):
+            # SmartFloatWidget / XYPadWidget have a setDriven method
+            if isinstance(widget, (SmartFloatWidget, XYPadWidget)):
                 widget.setDriven(driven)
             else:
                 widget.setEnabled(not driven)
