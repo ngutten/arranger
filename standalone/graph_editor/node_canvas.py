@@ -1755,6 +1755,22 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
     for p in ctrl_inputs:
         pid = p.get("id", "")
 
+        # DDSP: hide controls that are inert for the currently-loaded model, so the
+        # panel doesn't show dead knobs (mirrors the loud_floor/ceil hide above).
+        #   - 'attack' is clamped to a declick when an expression net drives the
+        #     onset (it only shapes the fallback path) → hide when expression active.
+        #   - 'vibrato' is a no-op without an f0 expression net → hide then.
+        if pid in ("attack", "vibrato"):
+            import os
+            mdir = str(node.params.get("model_dir", "") or "")
+            use_expr = node.params.get("use_expression", True)
+            use_expr = use_expr not in (False, "false", "False", 0, "0", "")
+            has = lambda fn: bool(mdir) and os.path.exists(os.path.join(mdir, fn))
+            if pid == "attack" and use_expr and has("expression.onnx"):
+                continue
+            if pid == "vibrato" and not (use_expr and has("f0_expression.onnx")):
+                continue
+
         # 2D latent pair → one XY pad (rendered on the X member; Y is skipped).
         if pid in _xy_skip:
             if pid in _xy_pair:

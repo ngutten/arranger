@@ -81,9 +81,29 @@ def main(model_dir):
     mid = s[n // 4: n // 2]
     rms = math.sqrt(sum(x * x for x in mid) / max(1, len(mid)))
 
-    print(f"samples={n} peak={peak} rms={rms:.1f} finite={finite}")
+    rms_db = 20 * math.log10(rms / 32767 + 1e-12)
+    print(f"samples={n} peak={peak} rms={rms:.1f} ({rms_db:.1f} dB) finite={finite}")
     assert finite, "non-finite samples in output"
     assert peak > 0, "output is silent"
+
+    # If the model ships an expression head, assert it actually RAN — i.e. the
+    # sustain sits in the learned loudness band, not the crude fallback floor.
+    # This is the regression guard for the loudness bug: a feat-dim mismatch (e.g.
+    # a tremolo head, feat_dim=9, fed a hardcoded [1,1,5]) makes ONNX reject every
+    # frame, run_expr falls back to velocity->dB, and the body collapses to
+    # ~-40 dB. A correctly-driven expression model sustains around -25 dB.
+    cfg_path = Path(model_dir) / "config.json"
+    has_expr = False
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            has_expr = isinstance(json.load(f).get("expression"), dict)
+    if has_expr:
+        EXPR_MIN_DB = -33.0
+        assert rms_db > EXPR_MIN_DB, (
+            f"expression model present but sustain is {rms_db:.1f} dB "
+            f"(< {EXPR_MIN_DB} dB) — the expression path likely fell back to the "
+            f"velocity floor (feat-dim mismatch? tremolo head not driven?)")
+        print(f"PASS: expression model ran (sustain {rms_db:.1f} dB)")
     print("PASS: DDSP plugin rendered finite, non-silent audio")
 
 

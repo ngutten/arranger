@@ -34,6 +34,7 @@
 
 #include "plugin_api.h"
 #include "adsr.h"
+#include "note_attr_latch.h"
 
 #include <nlohmann/json.hpp>
 
@@ -65,6 +66,14 @@ static constexpr int MAX_NOISE_BANDS = 128;
 static constexpr int MAX_BLOCK       = 2048;  // model-rate noise block ceiling
 static constexpr int SIN_TABLE_SIZE  = 1024;
 static constexpr int F0_MAX_HARM     = 8;     // ceiling on f0 phase harmonics
+static constexpr int EXPR_MAX_HARM   = 8;     // ceiling on tremolo phase harmonics
+
+// Loudness-calibration node-param defaults. These double as the "not calibrated"
+// sentinel: when the incoming param still equals its default we let the model's
+// config.json calibration win (see resolve_loudness_calibration). Keep in sync
+// with the config_params defaults in descriptor().
+static constexpr float DEFAULT_LOUD_FLOOR_DB = -60.0f;
+static constexpr float DEFAULT_LOUD_CEIL_DB  =   0.0f;
 
 // ==========================================================================
 // Wavetable sine lookup
@@ -219,6 +228,15 @@ public:
               "loudness (and pitch). Turn off to use the simple "
               "velocity/expression -> loudness mapping below.",
               ConfigType::Bool, "true" },
+            { "note_mode", "Note Priority",
+              "How a new note behaves while another is still held (the model is "
+              "monophonic). 'retrigger' re-articulates each note with a fresh "
+              "onset; 'legato' glides pitch into the new note, keeping the model's "
+              "evolving timbre/loudness state and oscillator phase — a slur, no "
+              "re-attack. Releasing back onto a still-held note glides too.",
+              ConfigType::Categorical, "retrigger", "",
+              false, false,
+              { "retrigger", "legato" } },
             { "loud_floor_db", "Loudness Floor (dB)",
               "Raw loudness (model units) at velocity/expression = 0. Calibrate "
               "to the model's training loudness range.",
@@ -227,6 +245,40 @@ public:
               "Raw loudness (model units) at full velocity/expression.",
               ConfigType::Float, "0", "", false, true },
         };
+
+        // Per-note (onset-latched) lanes. Each MULTIPLIES the corresponding
+        // control (neutral 1.0), composing on top of the knob/automation value —
+        // so a per-note value and a track-level curve coexist. Only controls that
+        // are independent of velocity and meaningful as a single note value are
+        // exposed (expression is omitted: it's redundant with velocity; attack is
+        // omitted: inert under the expression model). Ranges are log-symmetric
+        // around 1.0 so the lane's neutral sits mid-height.
+        d.note_attrs = {
+            { "vibrato", "Vibrato",
+              "Per-note multiplier on vibrato depth (1.0 = unchanged). Composes on "
+              "top of the Vibrato control; effective only on models with an f0 "
+              "expression net.",
+              ControlHint::Continuous, 1.0f, 0.25f, 4.0f, {} },
+            { "breath", "Breath",
+              "Per-note multiplier on breath/noise gain (1.0 = unchanged). Composes "
+              "on top of the Noise Gain control — airy vs pure tone per note.",
+              ControlHint::Continuous, 1.0f, 0.25f, 4.0f, {} },
+            { "release", "Release",
+              "Per-note multiplier on release time (1.0 = unchanged): shorter = "
+              "more staccato, longer = more let-ring. Composes on top of the "
+              "Release control.",
+              ControlHint::Continuous, 1.0f, 0.25f, 4.0f, {} },
+        };
+
+        // Keep the node visually clean: default-hide every control-port DOT on the
+        // canvas except the commonly-automated 'expression'. The inspector still
+        // renders every knob (so values stay editable), and a hidden dot can be
+        // revealed from its port context menu. This only seeds NEW nodes.
+        for (auto& p : d.ports) {
+            if (p.type == PluginPortType::Control && p.role == PortRole::Input &&
+                p.id != "expression")
+                p.show_port_default = false;
+        }
 
         return d;
     }
@@ -242,10 +294,28 @@ public:
             maybe_load_model();   // configure() runs on the control thread, not audio
         } else if (key == "use_expression") {
             use_expression_ = (value == "true" || value == "1" || value == "True");
+        } else if (key == "note_mode") {
+            legato_ = (value == "legato");
         } else if (key == "loud_floor_db") {
-            if (!value.empty()) { try { loud_floor_db_ = std::stof(value); loud_floor_user_ = true; } catch (...) {} }
+            // The host serialises EVERY config param each push, including ones the
+            // user never touched — so a value equal to the default is NOT a user
+            // override. Treat default == "uncalibrated" and let config.json win;
+            // only a real edit (value != default) pins the param. (Bug: previously
+            // the default push set loud_floor_user_, shadowing the model's
+            // calibrated loud_floor_db and leaving renders ~15 dB too quiet.)
+            if (!value.empty()) { try {
+                float v = std::stof(value);
+                loud_floor_user_ = std::fabs(v - DEFAULT_LOUD_FLOOR_DB) > 1e-4f;
+                user_loud_floor_db_ = v;
+                resolve_loudness_calibration();
+            } catch (...) {} }
         } else if (key == "loud_ceil_db") {
-            if (!value.empty()) { try { loud_ceil_db_ = std::stof(value); loud_ceil_user_ = true; } catch (...) {} }
+            if (!value.empty()) { try {
+                float v = std::stof(value);
+                loud_ceil_user_ = std::fabs(v - DEFAULT_LOUD_CEIL_DB) > 1e-4f;
+                user_loud_ceil_db_ = v;
+                resolve_loudness_calibration();
+            } catch (...) {} }
         }
     }
 
@@ -265,8 +335,13 @@ public:
 
     void note_on(int channel, int pitch, int velocity) override {
         if (velocity == 0) { note_off(channel, pitch); return; }
+        // Legato: if a note is already sounding (held, not yet releasing), glide
+        // into the new one instead of re-articulating. Otherwise (retrigger mode,
+        // or the previous note already released) start fresh.
+        bool glide = legato_ && v_.active && !v_.releasing;
         held_.push_back({channel, pitch, velocity});
-        start_note(channel, pitch, velocity);
+        if (glide) glide_to_note(channel, pitch, velocity);
+        else       start_note(channel, pitch, velocity);
     }
 
     void note_off(int channel, int pitch) override {
@@ -276,8 +351,11 @@ public:
                 held_.erase(it);
                 if (was_top) {
                     if (!held_.empty()) {
+                        // Fall back to the next held note. The voice is still
+                        // sounding, so legato glides; retrigger re-articulates.
                         auto& n = held_.back();
-                        start_note(n.ch, n.pitch, n.vel);  // fall back, retrigger
+                        if (legato_) glide_to_note(n.ch, n.pitch, n.vel);
+                        else         start_note(n.ch, n.pitch, n.vel);
                     } else {
                         v_.releasing = true;
                         v_.env.release();
@@ -303,6 +381,12 @@ public:
             v_.tune_semitones = semitones;
             v_.f0_hz = midi_to_hz(v_.pitch + semitones);
         }
+    }
+
+    // Per-note attribute (dispatched just before its note_on). Stash until the
+    // note starts; start_note/glide_to_note drain it into the voice multipliers.
+    void note_attr(int channel, int note, const std::string& id, float value) override {
+        pending_attrs_.set(channel, note, id.c_str(), value);
     }
 
     // ------------------------------------------------------------------
@@ -352,6 +436,8 @@ public:
         cur_level_ = std::clamp((v_.velocity / 127.0f) * expression, 0.0f, 1.0f);
 
         if (!v_.active) return;
+
+        noise_gain *= v_.attr_breath;   // per-note breath/noise multiplier
 
         const int block = std::max(1, std::min(block_size_, MAX_BLOCK));
 
@@ -441,10 +527,21 @@ private:
     // Note lifecycle
     // ------------------------------------------------------------------
 
+    // Drain any per-note attrs latched for (channel,pitch) into the voice's
+    // multipliers (neutral 1.0 when none). Onset-latched: read once per note.
+    void drain_note_attrs(int channel, int pitch) {
+        NoteAttrSet a;
+        pending_attrs_.take(channel, pitch, a);
+        v_.attr_vibrato = a.get_or("vibrato", 1.0f);
+        v_.attr_breath  = a.get_or("breath",  1.0f);
+        v_.attr_release = a.get_or("release", 1.0f);
+    }
+
     void start_note(int channel, int pitch, int velocity) {
         v_.channel  = channel;
         v_.pitch    = pitch;
         v_.velocity = velocity;
+        drain_note_attrs(channel, pitch);
         v_.tune_semitones = 0.0f;
         v_.f0_hz    = midi_to_hz(static_cast<float>(pitch));
         v_.frame_phase = 1.0f;          // force inference on the first sample
@@ -461,6 +558,7 @@ private:
         expr_t_onset_sec_ = 0.0f;
         expr_t_rel_sec_ = 0.0f;
         f0_lfo_phase_ = 0.0f;            // restart the vibrato LFO at note-on
+        tremolo_lfo_phase_ = 0.0f;       // restart the tremolo LFO at note-on
 
         make_default_frame(v_.cur_frame);   // immediate sound before first infer
         v_.last_frame = v_.cur_frame;
@@ -468,9 +566,28 @@ private:
         // When the expression model owns the musical attack, the output ADSR is
         // just a short declick; otherwise it carries the attack swell itself.
         float atk = has_expr_ ? std::min(attack_time_, 0.005f) : attack_time_;
-        v_.env.trigger(host_sr_, atk, 0.0f, 1.0f, release_time_);
+        v_.env.trigger(host_sr_, atk, 0.0f, 1.0f, release_time_ * v_.attr_release);
         v_.releasing = false;
         v_.active = true;
+    }
+
+    // Legato transition: retune the sounding voice into a new note WITHOUT
+    // re-articulating. Everything that carries the model's evolving state is kept
+    // — GRU caches, the output envelope, oscillator phases, the onset timer and
+    // the vibrato/tremolo LFO phases — so the contour slides continuously into the
+    // new pitch (a slur), and phase continuity avoids a click. Only the
+    // pitch/velocity targets change; the decoder picks up the new f0 on its next
+    // frame inference (for f0-expression models process() re-derives f0_hz anyway).
+    void glide_to_note(int channel, int pitch, int velocity) {
+        v_.channel  = channel;
+        v_.pitch    = pitch;
+        v_.velocity = velocity;
+        drain_note_attrs(channel, pitch);   // a slurred note may re-shape vib/breath/release
+        v_.tune_semitones = 0.0f;
+        v_.f0_hz    = midi_to_hz(static_cast<float>(pitch));
+        expr_gate_  = true;
+        v_.releasing = false;
+        v_.active   = true;
     }
 
     void reset_voice() {
@@ -482,7 +599,20 @@ private:
         expr_t_onset_sec_ = 0.0f;
         expr_t_rel_sec_ = 0.0f;
         f0_lfo_phase_ = 0.0f;
+        tremolo_lfo_phase_ = 0.0f;
         held_.clear();
+        pending_attrs_.clear();
+    }
+
+    // Resolve effective loudness calibration from the three sources, in priority
+    // order: an explicit user edit > the model's config.json calibration > the
+    // built-in default. Called whenever any of those inputs change, so the result
+    // is independent of config-key / param arrival order.
+    void resolve_loudness_calibration() {
+        loud_floor_db_ = loud_floor_user_ ? user_loud_floor_db_
+                       : (has_cfg_loud_floor_ ? cfg_loud_floor_db_ : DEFAULT_LOUD_FLOOR_DB);
+        loud_ceil_db_  = loud_ceil_user_  ? user_loud_ceil_db_
+                       : (has_cfg_loud_ceil_  ? cfg_loud_ceil_db_  : DEFAULT_LOUD_CEIL_DB);
     }
 
     void recompute_frame_advance() {
@@ -491,8 +621,9 @@ private:
                         : 100.0f;
         frame_advance_per_sample_ = (host_sr_ > 0) ? (fps / host_sr_) : 0.0f;
         frame_sec_ = (fps > 0.0f) ? (1.0f / fps) : 0.01f;   // seconds per model frame
-        // Vibrato LFO increment in turns ([0,1)) per model frame: rate / frame_rate.
-        f0_lfo_inc_ = (fps > 0.0f) ? (f0_vibrato_rate_ / fps) : 0.0f;
+        // Vibrato/tremolo LFO increments in turns ([0,1)) per model frame: rate / frame_rate.
+        f0_lfo_inc_      = (fps > 0.0f) ? (f0_vibrato_rate_ / fps) : 0.0f;
+        tremolo_lfo_inc_ = (fps > 0.0f) ? (tremolo_rate_ / fps) : 0.0f;
     }
 
     // ------------------------------------------------------------------
@@ -547,13 +678,18 @@ private:
         v_.noise_valid = true;
     }
 
+    // Silent placeholder frame. The first real inference runs on sample 0 of a
+    // note (frame_phase is forced to 1.0 at note-on), so this frame's only audible
+    // role is the <=1-frame (~10 ms) linear interpolation INTO that first
+    // inference: starting from silence makes that a clean fade-in / declick.
+    // (Previously this emitted a fixed harmonic bank summing to 0.3; once the body
+    // sat ~24 dB lower it became a sharp note-on spike. It's also the fallback when
+    // an inference fails mid-note, where silence is likewise the safe choice.)
     void make_default_frame(DDSPFrame& f) {
         int nh = std::min(n_harmonic_ > 0 ? n_harmonic_ : 64, MAX_HARMONICS);
         int nb = std::min(n_bands_ > 0 ? n_bands_ : 65, MAX_NOISE_BANDS);
         f.n_harm = nh; f.n_bands = nb; f.valid = true;
-        float sum = 0.0f;
-        for (int h = 0; h < nh; ++h) { f.amplitudes[h] = 1.0f / (h + 1); sum += f.amplitudes[h]; }
-        if (sum > 0.0f) for (int h = 0; h < nh; ++h) f.amplitudes[h] *= 0.3f / sum;
+        for (int h = 0; h < nh; ++h) f.amplitudes[h]  = 0.0f;
         for (int b = 0; b < nb; ++b) f.noise_param[b] = 0.0f;
     }
 
@@ -572,10 +708,23 @@ private:
                 // (cur_level_ = velocity/127 * expression), so 'expression' is a
                 // live dynamics/swell knob, not just a fallback-path control.
                 float midi = static_cast<float>(v_.pitch) + v_.tune_semitones;
-                float feat[5] = {
+                // Base note features (5); for tremolo models append the H phase
+                // harmonics [sin kφ, cos kφ] of a free LFO the plugin runs at the
+                // model's calibrated tremolo_rate (phase reset at note-on, advanced
+                // once per frame — exactly the amplitude analogue of the f0 LFO).
+                float feat[5 + 2 * EXPR_MAX_HARM] = {
                     (midi - 69.0f) / 12.0f, 1.0f, cur_level_,
                     std::min(expr_t_onset_sec_, expr_t_clip_) / expr_t_clip_, 0.0f,
                 };
+                if (has_tremolo_) {
+                    const float ph = tremolo_lfo_phase_;
+                    for (int k = 1; k <= tremolo_n_harm_; ++k) {
+                        feat[5 + 2 * (k - 1)]     = fast_sin(k * ph);
+                        feat[5 + 2 * (k - 1) + 1] = fast_sin(k * ph + 0.25f);
+                    }
+                    tremolo_lfo_phase_ += tremolo_lfo_inc_;
+                    if (tremolo_lfo_phase_ >= 1.0f) tremolo_lfo_phase_ -= 1.0f;
+                }
                 float loud;
                 if (run_expr(feat, loud)) { last_loud_db_ = loud; return loud; }
             } else {
@@ -584,8 +733,9 @@ private:
                 // release is unreliable (self-supervised note offsets don't align
                 // with loudness drops, so it tends to swell back up), which caused
                 // a double-articulation at note transitions.
-                float r = (release_time_ > 1e-4f)
-                              ? std::min(expr_t_rel_sec_ / release_time_, 1.0f) : 1.0f;
+                float eff_release = release_time_ * v_.attr_release;
+                float r = (eff_release > 1e-4f)
+                              ? std::min(expr_t_rel_sec_ / eff_release, 1.0f) : 1.0f;
                 return last_loud_db_ + (loud_floor_db_ - last_loud_db_) * r;
             }
         }
@@ -598,14 +748,14 @@ private:
 #ifdef AS_ENABLE_DDSP
         if (!expr_session_ || expr_hidden_ <= 0) return false;
         try {
-            int64_t sfeat[3]  = {1, 1, 5};
+            int64_t sfeat[3]  = {1, 1, static_cast<int64_t>(expr_feat_dim_)};
             int64_t scache[3] = {1, 1, static_cast<int64_t>(expr_hidden_)};
             int64_t sstyle[3] = {1, 1, 2};
             std::vector<Ort::Value> ins;
             ins.reserve(3);
             // Input order matches the graph: feat, [style,] cache_in.
             ins.push_back(Ort::Value::CreateTensor<float>(
-                mem_info_, const_cast<float*>(feat), 5, sfeat, 3));
+                mem_info_, const_cast<float*>(feat), expr_feat_dim_, sfeat, 3));
             if (has_perf_style_expr_) {
                 perf_style_[0] = perf_px_; perf_style_[1] = perf_py_;
                 ins.push_back(Ort::Value::CreateTensor<float>(
@@ -665,7 +815,7 @@ private:
 
         float dev;
         if (run_f0_expr(feat, dev)) {
-            dev *= vibrato_amount_;                          // host vibrato-depth knob
+            dev *= vibrato_amount_ * v_.attr_vibrato;        // knob × per-note depth
             return std::clamp(dev, -f0_max_dev_, f0_max_dev_);
         }
         return 0.0f;
@@ -790,6 +940,9 @@ private:
         model_loaded_ = false;
         has_expr_ = false;
         want_expr_ = false;
+        has_tremolo_ = false;
+        tremolo_n_harm_ = 0;
+        expr_feat_dim_ = 5;
         has_f0_expr_ = false;
         want_f0_expr_ = false;
         has_style_ = false;
@@ -814,16 +967,26 @@ private:
             if (cfg.contains("n_bands"))       n_bands_    = cfg["n_bands"].get<int>();
             if (cfg.contains("hidden_size"))   hidden_     = cfg["hidden_size"].get<int>();
             // Suggested loudness calibration (the converter derives it from the
-            // model's loudness stats). Explicit user config wins, regardless of
-            // the order config keys arrive in.
-            if (!loud_floor_user_ && cfg.contains("loud_floor_db"))
-                loud_floor_db_ = cfg["loud_floor_db"].get<float>();
-            if (!loud_ceil_user_ && cfg.contains("loud_ceil_db"))
-                loud_ceil_db_ = cfg["loud_ceil_db"].get<float>();
-            // Optional learned expression model (notes -> loudness).
+            // model's loudness stats). A real user edit wins; an untouched param
+            // (still at its default) yields to this calibration. resolve_*()
+            // applies the precedence so config-key / param arrival order is moot.
+            has_cfg_loud_floor_ = cfg.contains("loud_floor_db");
+            has_cfg_loud_ceil_  = cfg.contains("loud_ceil_db");
+            if (has_cfg_loud_floor_) cfg_loud_floor_db_ = cfg["loud_floor_db"].get<float>();
+            if (has_cfg_loud_ceil_)  cfg_loud_ceil_db_  = cfg["loud_ceil_db"].get<float>();
+            // Optional learned expression model (notes -> loudness). Tremolo head
+            // (n_tremolo_harmonics > 0) mirrors the f0/vibrato design for amplitude:
+            // the plugin runs a free LFO at tremolo_rate and feeds its phase
+            // harmonics, so feat_dim = 5 + 2*Ht. Models with no tremolo head keep 5.
             if (cfg.contains("expression") && cfg["expression"].is_object()) {
-                expr_hidden_ = cfg["expression"].value("hidden_size", 128);
-                expr_t_clip_ = cfg["expression"].value("t_clip", 2.0f);
+                auto& ec = cfg["expression"];
+                expr_hidden_  = ec.value("hidden_size", 128);
+                expr_t_clip_  = ec.value("t_clip", 2.0f);
+                tremolo_n_harm_ = std::min(ec.value("n_tremolo_harmonics", 0),
+                                           EXPR_MAX_HARM);
+                tremolo_rate_ = ec.value("tremolo_rate", 4.0f);
+                expr_feat_dim_ = 5 + 2 * tremolo_n_harm_;
+                has_tremolo_   = tremolo_n_harm_ > 0;
                 want_expr_ = true;
             }
             // Optional learned pitch-expression model (notes -> f0 deviation).
@@ -868,8 +1031,11 @@ private:
             n_harmonic_ = std::min(n_harmonic_, MAX_HARMONICS);
             n_bands_    = std::min(n_bands_, MAX_NOISE_BANDS);
             block_size_ = std::min(block_size_, MAX_BLOCK);
-            DDSP_LOG("Config: model_sr=%d block=%d n_harm=%d n_bands=%d hidden=%d expr=%d",
-                     model_sr_, block_size_, n_harmonic_, n_bands_, hidden_, (int)want_expr_);
+            resolve_loudness_calibration();
+            DDSP_LOG("Config: model_sr=%d block=%d n_harm=%d n_bands=%d hidden=%d expr=%d "
+                     "loud[floor=%.2f ceil=%.2f]",
+                     model_sr_, block_size_, n_harmonic_, n_bands_, hidden_, (int)want_expr_,
+                     loud_floor_db_, loud_ceil_db_);
         } catch (const std::exception& e) {
             DDSP_LOG("Error parsing config.json: %s", e.what());
             return;
@@ -966,6 +1132,10 @@ private:
     float frame_advance_per_sample_ = 100.0f / 44100.0f;
     float frame_sec_ = 0.01f;                 // seconds per model frame
 
+    // Note priority: false = retrigger (re-articulate every note), true = legato
+    // (glide into a new note while one is held, keeping model state). Config param.
+    bool  legato_ = false;
+
     // Optional learned expression model (notes -> loudness)
     bool  use_expression_ = true;             // user toggle (config param)
     bool  want_expr_   = false;               // config.json declares one
@@ -976,6 +1146,14 @@ private:
     float expr_t_onset_sec_ = 0.0f;
     float expr_t_rel_sec_   = 0.0f;
     float last_loud_db_     = 0.0f;           // loudness at note-off, for release decay
+    // Optional tremolo head on the loudness model (amplitude analogue of f0
+    // vibrato): plugin drives a free LFO at tremolo_rate, feeds H phase harmonics.
+    bool  has_tremolo_    = false;            // expression model consumes tremolo phase
+    int   tremolo_n_harm_ = 0;                // # phase harmonics fed in (Ht)
+    int   expr_feat_dim_  = 5;                // 5 + 2*Ht
+    float tremolo_rate_   = 4.0f;             // LFO rate (Hz), calibrated from data
+    float tremolo_lfo_phase_ = 0.0f;          // free LFO phase, in turns [0,1)
+    float tremolo_lfo_inc_   = 0.0f;          // per-frame phase increment (turns)
 
     // Optional learned pitch-expression model (notes -> f0 deviation).
     // Phase-conditioned: the plugin drives a free LFO and feeds its phase
@@ -1011,12 +1189,19 @@ private:
     float perf_px_ = 0.0f, perf_py_ = 0.0f;
     float perf_style_[2] = {0.0f, 0.0f};
 
-    // Loudness mapping (raw model units)
-    float loud_floor_db_ = -60.0f;
-    float loud_ceil_db_  = 0.0f;
+    // Loudness mapping (raw model units). Effective values resolved by
+    // resolve_loudness_calibration() from: user edit > config.json > default.
+    float loud_floor_db_ = DEFAULT_LOUD_FLOOR_DB;   // effective floor
+    float loud_ceil_db_  = DEFAULT_LOUD_CEIL_DB;    // effective ceiling
     float cur_level_     = 0.0f;   // target velocity*expression level [0,1]
-    bool  loud_floor_user_ = false;   // user set loud_floor_db explicitly
+    bool  loud_floor_user_ = false;   // user edited loud_floor_db (≠ default)
     bool  loud_ceil_user_  = false;
+    float user_loud_floor_db_ = DEFAULT_LOUD_FLOOR_DB;  // last user-edit value
+    float user_loud_ceil_db_  = DEFAULT_LOUD_CEIL_DB;
+    bool  has_cfg_loud_floor_ = false;   // config.json supplied a calibration
+    bool  has_cfg_loud_ceil_  = false;
+    float cfg_loud_floor_db_  = DEFAULT_LOUD_FLOOR_DB;  // config.json calibration
+    float cfg_loud_ceil_db_   = DEFAULT_LOUD_CEIL_DB;
 
     // Output envelope params (from control ports each block)
     float attack_time_  = 0.05f;
@@ -1035,10 +1220,15 @@ private:
         ADSREnvelope env;
         float noise_block[MAX_BLOCK] = {};
         bool  noise_valid = false;
+        // Per-note (onset-latched) multipliers, neutral 1.0. See d.note_attrs.
+        float attr_vibrato = 1.0f;
+        float attr_breath  = 1.0f;
+        float attr_release = 1.0f;
     } v_;
 
     std::vector<HeldNote> held_;
     XorShift32 rng_;
+    PendingAttrStore pending_attrs_;   // note-attrs awaiting their note_on
 
     // GRU caches (threaded frame-to-frame)
     std::vector<float> cache_;          // decoder
