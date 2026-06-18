@@ -1490,8 +1490,8 @@ def _make_control_monitor_widget(node: GraphNode, parent, canvas=None) -> "QWidg
 
 
 # Maps an XY-pad's X-port id onto the config.json block describing its data
-# distribution. Timbre pad → decoder latent; performance pad → expression latent.
-_LATENT_BLOCK_FOR = {"style_x": "latent", "perf_x": "perf_latent"}
+# distribution. Only the timbre pad remains; the performance pad was dropped.
+_LATENT_BLOCK_FOR = {"style_x": "latent"}
 
 # Cache parsed config.json per (path, mtime) so re-opening the inspector while
 # dragging doesn't re-read/re-parse a multi-hundred-KB file every rebuild.

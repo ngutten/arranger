@@ -206,16 +206,11 @@ public:
               "Only for latent decoders.",
               PluginPortType::Control, PortRole::Input,
               ControlHint::Continuous, 0.0f, -1.0f, 1.0f },
-            { "perf_x", "Perf X",
-              "Performance style-pad X coordinate (normalised -1..1, how it's played: "
-              "loudness/vibrato shaping). 0 = average. Only for models with a perf latent.",
-              PluginPortType::Control, PortRole::Input,
-              ControlHint::Continuous, 0.0f, -1.0f, 1.0f },
-            { "perf_y", "Perf Y",
-              "Performance style-pad Y coordinate (normalised -1..1). 0 = average. "
-              "Only for models with a perf latent.",
-              PluginPortType::Control, PortRole::Input,
-              ControlHint::Continuous, 0.0f, -1.0f, 1.0f },
+            // NOTE: the performance style pad (perf_x/perf_y -> expression +
+            // f0_expression 'style') was dropped — it barely altered the output
+            // for our instruments. Models exported with a perf-latent 'style'
+            // input are still fed the mean (0,0) for backwards compatibility
+            // (see process_block); only the user-facing pad is gone.
         };
 
         d.config_params = {
@@ -415,17 +410,15 @@ public:
         release_time_    = ctrl("release", 0.1f);
         vibrato_amount_  = ctrl("vibrato", 1.0f);
 
-        // Style pads: normalised [-1,1] node params mapped onto each model's
-        // useful pad range (from config extent). Held constant within the block;
-        // (0,0) == the mean embedding. Read once per block (timbre selector, not
-        // a per-sample modulation). Harmless when the model has no latent input.
+        // Timbre style pad: normalised [-1,1] node params mapped onto the
+        // model's useful pad range (from config extent). Held constant within
+        // the block; (0,0) == the mean embedding. Read once per block (timbre
+        // selector, not a per-sample modulation). Harmless when the model has
+        // no latent input. The performance pad was dropped; perf_px_/perf_py_
+        // stay at the mean (0,0) and are still fed to perf-latent models below.
         if (has_style_) {
             style_px_ = map_pad(ctrl("style_x", 0.0f), style_x_lo_, style_x_hi_);
             style_py_ = map_pad(ctrl("style_y", 0.0f), style_y_lo_, style_y_hi_);
-        }
-        if (has_perf_style_) {
-            perf_px_ = map_pad(ctrl("perf_x", 0.0f), perf_x_lo_, perf_x_hi_);
-            perf_py_ = map_pad(ctrl("perf_y", 0.0f), perf_y_lo_, perf_y_hi_);
         }
 
         // Target loudness level [0,1] from velocity + expression. The actual
@@ -950,7 +943,6 @@ private:
         has_perf_style_ = false;
         has_perf_style_expr_ = false;
         has_perf_style_f0_ = false;
-        want_perf_style_ = false;
         if (dir.empty()) { DDSP_LOG("No model directory specified"); return; }
 
         std::ifstream cfg_file(dir + "/config.json");
@@ -1009,24 +1001,17 @@ private:
                     want_f0_expr_ = true;
                 }
             }
-            // Optional 2D latent style pads (timbre on the decoder, performance on
-            // the expression nets). Read the extent for the [-1,1] -> pad mapping;
-            // presence of the graph 'style' input is confirmed after load.
+            // Optional 2D timbre style pad on the decoder. Read the extent for
+            // the [-1,1] -> pad mapping; presence of the graph 'style' input is
+            // confirmed after load. (The performance pad was dropped; perf-latent
+            // models are still fed the mean (0,0) — see process_block.)
             want_style_ = false;
-            want_perf_style_ = false;
             if (cfg.contains("latent") && cfg["latent"].is_object() &&
                 cfg["latent"].contains("extent")) {
                 auto& ext = cfg["latent"]["extent"];
                 style_x_lo_ = ext["x"][0].get<float>(); style_x_hi_ = ext["x"][1].get<float>();
                 style_y_lo_ = ext["y"][0].get<float>(); style_y_hi_ = ext["y"][1].get<float>();
                 want_style_ = true;
-            }
-            if (cfg.contains("perf_latent") && cfg["perf_latent"].is_object() &&
-                cfg["perf_latent"].contains("extent")) {
-                auto& ext = cfg["perf_latent"]["extent"];
-                perf_x_lo_ = ext["x"][0].get<float>(); perf_x_hi_ = ext["x"][1].get<float>();
-                perf_y_lo_ = ext["y"][0].get<float>(); perf_y_hi_ = ext["y"][1].get<float>();
-                want_perf_style_ = true;
             }
             n_harmonic_ = std::min(n_harmonic_, MAX_HARMONICS);
             n_bands_    = std::min(n_bands_, MAX_NOISE_BANDS);
@@ -1169,10 +1154,9 @@ private:
     float f0_lfo_inc_     = 0.0f;            // per-frame phase increment (turns)
     float vibrato_amount_ = 1.0f;            // host vibrato-depth knob (control)
 
-    // Optional 2D latent style pads. Timbre pad -> decoder.onnx 'style';
-    // performance pad -> expression.onnx + f0_expression.onnx 'style' (shared).
-    // Node params are normalised [-1,1] (0 == mean embedding), mapped onto the
-    // per-axis extent below. Held constant within a note (timbre selector).
+    // Optional 2D timbre style pad -> decoder.onnx 'style'. Node params are
+    // normalised [-1,1] (0 == mean embedding), mapped onto the per-axis extent
+    // below. Held constant within a note (timbre selector).
     bool  want_style_  = false;              // config declares a timbre latent
     bool  has_style_   = false;              // decoder graph has a 'style' input
     float style_x_lo_ = -1.0f, style_x_hi_ = 1.0f;
@@ -1180,13 +1164,13 @@ private:
     float style_px_ = 0.0f, style_py_ = 0.0f;   // current pad coord (model units)
     float style_[2] = {0.0f, 0.0f};
 
-    bool  want_perf_style_      = false;     // config declares a performance latent
+    // The performance style pad was dropped (negligible effect for our
+    // instruments). We still detect a 'style' input on the expression / f0 nets
+    // and feed it the mean (0,0) so perf-latent models keep loading/running.
     bool  has_perf_style_       = false;     // either expression net has 'style'
     bool  has_perf_style_expr_  = false;     // loudness net has 'style'
     bool  has_perf_style_f0_    = false;     // f0 net has 'style'
-    float perf_x_lo_ = -1.0f, perf_x_hi_ = 1.0f;
-    float perf_y_lo_ = -1.0f, perf_y_hi_ = 1.0f;
-    float perf_px_ = 0.0f, perf_py_ = 0.0f;
+    float perf_px_ = 0.0f, perf_py_ = 0.0f;  // pinned at the mean (pad dropped)
     float perf_style_[2] = {0.0f, 0.0f};
 
     // Loudness mapping (raw model units). Effective values resolved by
