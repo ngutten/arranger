@@ -1117,8 +1117,33 @@ class NodeGraphCanvas(QWidget):
 # Default inline settings widgets
 # ---------------------------------------------------------------------------
 
+def _resolve_canvas(parent, canvas):
+    """Find the owning NodeGraphCanvas for a settings panel.
+
+    Prefer an explicitly-passed ``canvas`` (the inspector builds node panels with
+    a non-canvas parent, so the walk-up below can't reach it). Fall back to
+    walking the widget parent chain (the in-canvas inline-panel path)."""
+    if canvas is not None:
+        return canvas
+    w = parent
+    while w is not None and not isinstance(w, NodeGraphCanvas):
+        w = w.parent()
+    return w if isinstance(w, NodeGraphCanvas) else None
+
+
+def _resolve_state(parent, state, canvas=None):
+    """Find the AppState for a settings panel.
+
+    Prefer an explicitly-passed ``state``; otherwise read ``_state`` off the
+    resolved canvas (explicit ``canvas`` or a parent-chain walk-up)."""
+    if state is not None:
+        return state
+    return getattr(_resolve_canvas(parent, canvas), '_state', None)
+
+
 def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable,
-                                  settings=None, force_single_col: bool = False):
+                                  settings=None, force_single_col: bool = False,
+                                  state=None, canvas=None):
     """Build a compact inline settings panel for a node type.
 
     Returns None if this node type has no settings.
@@ -1274,13 +1299,9 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable,
     # track_source, control_source, unknown: no settings
     # Pattern source nodes: pattern picker dropdown
     if t in ("pattern_source", "beat_pattern_source"):
-        # Walk up to find the canvas, then get its _state reference.
-        canvas = parent
-        while canvas is not None and not isinstance(canvas, NodeGraphCanvas):
-            canvas = canvas.parent()
-        state = getattr(canvas, '_state', None)
-        if state is not None:
-            return _make_pattern_source_widget(node, state, parent, on_change)
+        st = _resolve_state(parent, state, canvas)
+        if st is not None:
+            return _make_pattern_source_widget(node, st, parent, on_change)
         return None
 
     # Plugin-backed nodes: auto-generate from descriptor
@@ -1289,10 +1310,12 @@ def _make_default_settings_widget(node: GraphNode, parent, on_change: Callable,
     if desc:
         # Special-case: control_monitor gets a live sparkline widget
         if t in ("builtin.control_monitor", "control_monitor"):
-            return _make_control_monitor_widget(node, parent)
+            return _make_control_monitor_widget(
+                node, parent, canvas=_resolve_canvas(parent, canvas))
         return _make_plugin_settings_widget(
             node, desc, parent, on_change, settings=settings,
-            force_single_col=force_single_col)
+            force_single_col=force_single_col,
+            state=_resolve_state(parent, state, canvas))
     return None
 
 
@@ -1343,12 +1366,16 @@ def _make_pattern_source_widget(node: GraphNode, state, parent, on_change: Calla
     return w
 
 
-def _make_control_monitor_widget(node: GraphNode, parent) -> "QWidget":
+def _make_control_monitor_widget(node: GraphNode, parent, canvas=None) -> "QWidget":
     """Live scrolling sparkline for a control_monitor node.
 
-    Polls the server every 100 ms via the canvas's server_engine reference
-    (stored on the parent NodeGraphCanvas if available).
+    Polls the server every 100 ms via the canvas's server_engine reference.
+    The canvas is captured explicitly because the widget is reparented into a
+    QGraphicsScene (so ``parent()`` no longer reaches it) and the inspector
+    builds it with a non-canvas parent (so the parent chain doesn't either).
     """
+    if canvas is None:
+        canvas = _resolve_canvas(parent, None)
     from PySide6.QtWidgets import QWidget
     from PySide6.QtCore import QTimer, Qt as _Qt
     from PySide6.QtGui import QPainter, QPen, QColor, QFont
@@ -1369,9 +1396,8 @@ def _make_control_monitor_widget(node: GraphNode, parent) -> "QWidget":
             self._timer.start()
 
         def _poll(self):
-            # The widget is reparented into a QGraphicsScene, so parent()
-            # no longer reaches the canvas — use the closure reference.
-            canvas = parent
+            # Use the captured canvas (see docstring): neither parent() nor the
+            # build-time parent reliably reaches the canvas in all host views.
             if canvas is None:
                 return
             server_engine = getattr(canvas, '_server_engine', None)
@@ -1463,7 +1489,45 @@ def _make_control_monitor_widget(node: GraphNode, parent) -> "QWidget":
     return SparklineWidget(parent)
 
 
-def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change: Callable, settings=None, force_single_col: bool = False):
+# Maps an XY-pad's X-port id onto the config.json block describing its data
+# distribution. Timbre pad → decoder latent; performance pad → expression latent.
+_LATENT_BLOCK_FOR = {"style_x": "latent", "perf_x": "perf_latent"}
+
+# Cache parsed config.json per (path, mtime) so re-opening the inspector while
+# dragging doesn't re-read/re-parse a multi-hundred-KB file every rebuild.
+_latent_cfg_cache: dict = {}
+
+
+def _load_latent_block(node: GraphNode, x_port_id: str):
+    """Return the latent config block (extent/anchors/cloud/hull/density) for an
+    XY pad, read from ``<model_dir>/config.json``. ``None`` if not a DDSP latent
+    pad or the file/block is absent — the pad then renders as a plain pad."""
+    block_key = _LATENT_BLOCK_FOR.get(x_port_id)
+    if not block_key:
+        return None
+    mdir = str(node.params.get("model_dir", "") or "")
+    if not mdir:
+        return None
+    import os, json
+    path = os.path.join(mdir, "config.json")
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    cached = _latent_cfg_cache.get(path)
+    if cached is None or cached[0] != mtime:
+        try:
+            with open(path) as f:
+                cfg = json.load(f)
+        except (OSError, ValueError):
+            return None
+        _latent_cfg_cache[path] = (mtime, cfg)
+        cached = _latent_cfg_cache[path]
+    blk = cached[1].get(block_key)
+    return blk if isinstance(blk, dict) else None
+
+
+def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change: Callable, settings=None, force_single_col: bool = False, state=None):
     """Auto-generate a settings panel from a plugin descriptor.
 
     Generates widgets for:
@@ -1641,9 +1705,10 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
         elif cp_type == "integer":
             # Special handling for automation_track_id: show dropdown of track names
             if cp_id == "automation_track_id":
-                # Get state from canvas (parent should be NodeGraphCanvas)
-                state = getattr(parent, '_state', None)
-                
+                # Inspector builds this with a non-canvas parent, so prefer the
+                # explicitly-passed state and fall back to the canvas walk-up.
+                state = _resolve_state(parent, state)
+
                 if state and hasattr(state, 'automation_tracks'):
                     combo = QComboBox()
                     combo.setStyleSheet(STYLE_ACTIVE)
@@ -1782,6 +1847,7 @@ def _make_plugin_settings_widget(node: GraphNode, desc: dict, parent, on_change:
                     float(node.params.get(yp["id"], yp.get("default", 0.0))),
                     x_label=xp.get("display_name", "X"),
                     y_label=yp.get("display_name", "Y"),
+                    latent=_load_latent_block(node, xp["id"]),
                     parent=w)
                 pad.xChanged.connect(
                     lambda v, k=xp["id"]: on_change(node.node_id, k, v))

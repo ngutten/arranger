@@ -605,7 +605,9 @@ class TrackPanel(QFrame):
         w = _make_default_settings_widget(
             node, self.node_frame, canvas._on_node_param_changed,
             settings=getattr(canvas, '_settings', None),
-            force_single_col=True)
+            force_single_col=True,
+            state=getattr(canvas, '_state', None),
+            canvas=canvas)
         if w is not None:
             # Dim controls whose ports are wired (driven by an upstream signal).
             if hasattr(w, 'refresh_wired_ports'):
