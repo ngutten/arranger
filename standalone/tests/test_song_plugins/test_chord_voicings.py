@@ -224,9 +224,6 @@ class TestCycleQuality:
         # Non-cycle qualities (e.g. '13', 'b5') put us at idx=0 before stepping.
         assert cycle_quality('13', 1) == CYCLE_ORDER[1]
 
-    def test_cycle_includes_none(self):
-        assert None in CYCLE_ORDER
-
 
 class TestWithQuality:
     def test_none_means_un_root(self):

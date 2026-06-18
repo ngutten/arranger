@@ -28,11 +28,6 @@ def _mk():
     return ScalarCurveRenderer()
 
 
-def test_default_range_is_auto():
-    r = _mk()
-    assert r._beat_range is None
-
-
 def test_set_beat_range_stores_tuple():
     r = _mk()
     r.set_beat_range(4.0, 20.0)

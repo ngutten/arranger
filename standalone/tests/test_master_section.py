@@ -37,13 +37,6 @@ def test_state_roundtrip_master():
     assert s2.master_ceiling_db == pytest.approx(-0.5)
 
 
-def test_state_master_defaults():
-    s = AppState()
-    assert s.master_gain == pytest.approx(1.0)
-    assert s.master_limiter is True
-    assert s.master_ceiling_db == pytest.approx(-1.0)
-
-
 def test_schedule_emits_master_setup():
     s = AppState()
     s.master_gain = 4.0

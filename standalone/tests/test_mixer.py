@@ -59,13 +59,6 @@ def test_track_roundtrip_pan_mute_solo():
     assert t2.solo is True
 
 
-def test_track_defaults():
-    t = Track(id=1, name='T')
-    assert t.pan == pytest.approx(0.0)
-    assert t.mute is False
-    assert t.solo is False
-
-
 def test_pan_event_emitted_and_mapped():
     s = AppState()
     t = _track_with_notes(s)

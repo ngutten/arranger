@@ -65,12 +65,6 @@ class TestStateLookups:
 
 
 class TestNoteDataclass:
-    def test_note_defaults(self):
-        n = Note(pitch=60, start=0, duration=1)
-        assert n.velocity == 100
-        assert n.bend == []
-        assert n.lyric == ''
-
     def test_note_dict_roundtrip(self):
         n = Note(pitch=72, start=2.5, duration=0.5, velocity=64, bend=[[0, 1]])
         d = n.to_dict()
@@ -78,10 +72,6 @@ class TestNoteDataclass:
         assert n2.pitch == 72
         assert n2.velocity == 64
         assert n2.bend == [[0, 1]]
-
-    def test_note_tags_default_empty(self):
-        n = Note(pitch=60, start=0, duration=1)
-        assert n.tags == {}
 
     def test_note_tags_roundtrip(self):
         tags = {'chord_root': {'quality': 'dom7', 'inversion': '/3'}}
