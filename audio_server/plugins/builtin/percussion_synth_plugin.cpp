@@ -335,6 +335,14 @@ public:
         vm_.tune(channel, note, semitones);
     }
 
+    void channel_volume(int channel, int volume) override {
+        vm_.set_channel_volume(channel, volume);
+    }
+
+    void channel_pan(int channel, int pan) override {
+        vm_.set_channel_pan(channel, pan);
+    }
+
     void process(const PluginProcessContext& ctx, PluginBuffers& buffers) override {
         auto* out = buffers.audio.get("audio_out");
         if (!out) return;
@@ -390,6 +398,9 @@ public:
 
         for (auto& v : vm_.voices) {
             if (!v.active) continue;
+
+            // Track fader/pan: per-channel L/R gains, constant across the block.
+            float gl, gr; vm_.voice_amp(v, gl, gr);
 
             for (int i = 0; i < N; ++i) {
                 float env_val = v.env.next();
@@ -464,8 +475,8 @@ public:
                 }
 
                 float s = filtered * env_val * v.velocity * gain;
-                L[i] += s;
-                R[i] += s;
+                L[i] += s * gl;
+                R[i] += s * gr;
             }
         }
 

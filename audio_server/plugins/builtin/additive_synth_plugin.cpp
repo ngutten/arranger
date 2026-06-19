@@ -128,6 +128,14 @@ public:
         vm_.tune(channel, note, semitones);
     }
 
+    void channel_volume(int channel, int volume) override {
+        vm_.set_channel_volume(channel, volume);
+    }
+
+    void channel_pan(int channel, int pan) override {
+        vm_.set_channel_pan(channel, pan);
+    }
+
     void process(const PluginProcessContext& ctx, PluginBuffers& buffers) override {
         auto* out = buffers.audio.get("audio_out");
         if (!out) return;
@@ -180,6 +188,9 @@ public:
         for (auto& v : vm_.voices) {
             if (!v.active) continue;
 
+            // Track fader/pan: per-channel L/R gains, constant across the block.
+            float gl, gr; vm_.voice_amp(v, gl, gr);
+
             // Effective brightness via tanh mapping (once per block)
             float eff_bright = bright_map.compute(v, brightness, bright_range, voicing);
             eff_bright = std::clamp(eff_bright, 0.0f, 1.0f);
@@ -226,8 +237,8 @@ public:
                 }
 
                 float out_sample = sample * env_val * v.velocity * gain;
-                L[i] += out_sample;
-                R[i] += out_sample;
+                L[i] += out_sample * gl;
+                R[i] += out_sample * gr;
             }
         }
 

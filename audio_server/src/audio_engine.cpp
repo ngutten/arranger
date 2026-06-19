@@ -279,12 +279,17 @@ std::string AudioEngine::set_schedule(const std::string& schedule_json) {
         }
     }
 
-    // Apply immediately on the calling thread so render_offline() and
-    // arrangement_length() work without needing the audio callback to run.
-    // If the stream is active the audio thread will pick up check_pending()
-    // on the next block — the double-apply is harmless.
     dispatcher_.swap_schedule(sched.release());
-    dispatcher_.check_pending();
+
+    // When the stream is idle, apply immediately on the calling thread so
+    // render_offline() and arrangement_length() work without needing the audio
+    // callback to run.  When the stream is live, leave the swap pending: the
+    // audio thread picks it up in process_block(), where it can both restore
+    // channel state and release notes orphaned by the new schedule (e.g. a
+    // track that was just muted) — neither of which is safe to do from here.
+    if (!playing_.load(std::memory_order_relaxed)) {
+        dispatcher_.check_pending();
+    }
     return {};
 }
 
@@ -578,6 +583,7 @@ void AudioEngine::process_block(float* L, float* R, int frames) {
                             if (n) n->all_notes_off(-1);
                         }
                     }
+                    dispatcher_.clear_active();
                     break;
                 }
                 case Cmd::Seek:
@@ -600,6 +606,7 @@ void AudioEngine::process_block(float* L, float* R, int frames) {
                         auto* n = g->find_node(nid);
                         if (n) n->all_notes_off(-1);
                     }
+                    dispatcher_.clear_active();
                     break;
                 }
                 case Cmd::SetParam: {
@@ -641,6 +648,20 @@ void AudioEngine::process_block(float* L, float* R, int frames) {
             double beat = current_beat_.load(std::memory_order_relaxed);
             auto setup_events = sched->get_setup_events_before(beat);
             dispatcher_.apply_setup_events(setup_events, graph, beat);
+        }
+    }
+
+    // Release notes left hanging by the swap: if the new schedule has no future
+    // note_off for a still-sounding note (its track was muted, its placement
+    // deleted, etc.), the note would otherwise sustain forever.  Most audible on
+    // sustained instruments (DDSP/wind); decaying samples masked it by fading out.
+    if (schedule_swapped && graph && playing_.load(std::memory_order_relaxed)) {
+        double beat = current_beat_.load(std::memory_order_relaxed);
+        std::vector<Dispatcher::ActiveNote> orphans;
+        dispatcher_.collect_orphaned_notes(beat, orphans);
+        for (const auto& an : orphans) {
+            if (Node* n = graph->find_node(an.node_id))
+                n->note_off(an.channel, an.pitch);
         }
     }
 
@@ -721,6 +742,7 @@ void AudioEngine::process_block(float* L, float* R, int frames) {
             auto* n = graph->find_node(nid);
             if (n) n->all_notes_off(-1);
         }
+        dispatcher_.clear_active();
         current_beat_.store(0.0, std::memory_order_relaxed);
     }
 

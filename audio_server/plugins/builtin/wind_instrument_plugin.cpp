@@ -310,6 +310,8 @@ public:
 
     void all_notes_off(int channel) override { vm_.all_notes_off(channel); }
     void note_tune(int channel, int note, float semitones) override { vm_.tune(channel, note, semitones); }
+    void channel_volume(int channel, int volume) override { vm_.set_channel_volume(channel, volume); }
+    void channel_pan(int channel, int pan) override { vm_.set_channel_pan(channel, pan); }
 
     // -----------------------------------------------------------------------
     // Audio processing
@@ -401,6 +403,10 @@ public:
             auto& v = vm_.voices[vi];
             if (!v.active) continue;
             WindExt& e = v.ext;
+
+            // Track fader/pan: per-channel L/R gains, constant across the block.
+            // When the output is mono (R aliases L) only the L gain applies.
+            float gl, gr; vm_.voice_amp(v, gl, gr);
 
             const int reg = (e.register_mode >= 0) ? e.register_mode : register_blk;
 
@@ -538,8 +544,8 @@ public:
                 }
 
                 float sample = sig * amp * gain;
-                L[i] += sample;
-                if (out->right) R[i] += sample;   // avoid double-add when mono (R aliases L)
+                L[i] += sample * gl;
+                if (out->right) R[i] += sample * gr;   // avoid double-add when mono (R aliases L)
             }
         }
 

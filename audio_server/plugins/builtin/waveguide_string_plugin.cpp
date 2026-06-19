@@ -254,6 +254,14 @@ public:
         vm_.tune(channel, note, semitones);
     }
 
+    void channel_volume(int channel, int volume) override {
+        vm_.set_channel_volume(channel, volume);
+    }
+
+    void channel_pan(int channel, int pan) override {
+        vm_.set_channel_pan(channel, pan);
+    }
+
     void process(const PluginProcessContext& ctx, PluginBuffers& buffers) override {
         auto* out = buffers.audio.get("audio_out");
         if (!out) return;
@@ -355,6 +363,9 @@ public:
         for (int vi = 0; vi < SYNTH_MAX_VOICES; ++vi) {
             auto& v = vm_.voices[vi];
             if (!v.active) continue;
+
+            // Track fader/pan: per-channel L/R gains, constant across the block.
+            float gl, gr; vm_.voice_amp(v, gl, gr);
 
             // Loop filter coefficient: g=0 bright, g→1 dark
             float g = std::clamp(damping, 0.0f, 0.999f);
@@ -480,8 +491,8 @@ public:
 
                 // Accumulate
                 float sample = output * env_val * v.velocity * gain;
-                L[i] += sample;
-                R[i] += sample;
+                L[i] += sample * gl;
+                R[i] += sample * gr;
             }
         }
 

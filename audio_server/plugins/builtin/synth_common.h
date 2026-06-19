@@ -117,6 +117,14 @@ public:
     float last_note_pitch[16] = {};
     bool  has_last_note[16]   = {};
 
+    // Per-channel mixer state, driven by the track fader/pan via the plugin's
+    // channel_volume()/channel_pan() overrides (MIDI CC7 / CC10).  chan_gain_
+    // is a linear amplitude (GM CC7 curve), chan_pan_ a balance in [-1,1].
+    // Applied per voice by voice_amp() when summing output.  See plugin_api.h
+    // Plugin::channel_volume for the contract.
+    float chan_gain_[16];
+    float chan_pan_[16];
+
     // Note-attrs that have arrived but whose note-on has not yet fired.
     PendingAttrStore pending_attrs_;
 
@@ -142,6 +150,8 @@ public:
         for (int i = 0; i < 16; ++i) {
             last_note_pitch[i] = 0.0f;
             has_last_note[i] = false;
+            chan_gain_[i] = 1.0f;   // unity until the track fader sets CC7
+            chan_pan_[i]  = 0.0f;   // centre until the track sets CC10
         }
         pending_attrs_.clear();
     }
@@ -301,6 +311,28 @@ public:
             if (channel == -1 || v.channel == channel)
                 v.env.release();
         }
+    }
+
+    // --- Per-channel mixer controls (track fader / pan) -------------------
+    // MIDI CC7 → linear amplitude via the GM curve (gain = (v/127)^2), so a
+    // synth-family track matches a FluidSynth track at the same fader.
+    void set_channel_volume(int channel, int volume) {
+        float n = std::clamp(volume, 0, 127) / 127.0f;
+        chan_gain_[channel & 0xF] = n * n;
+    }
+    // MIDI CC10 → balance in [-1,1] (64 = centre).
+    void set_channel_pan(int channel, int pan) {
+        chan_pan_[channel & 0xF] =
+            std::clamp((std::clamp(pan, 0, 127) - 64) / 63.0f, -1.0f, 1.0f);
+    }
+    // Per-voice L/R output gains: the channel fader plus a unity-at-centre
+    // linear balance pan (no boost; the panned-away side only attenuates).
+    // Constant across a block, so hoist this out of the per-sample loop.
+    void voice_amp(const Voice& v, float& gl, float& gr) const {
+        float g = chan_gain_[v.channel & 0xF];
+        float p = chan_pan_[v.channel & 0xF];
+        gl = g * (p > 0.0f ? 1.0f - p : 1.0f);
+        gr = g * (p < 0.0f ? 1.0f + p : 1.0f);
     }
 
     void tune(int channel, int note, float semitones) {

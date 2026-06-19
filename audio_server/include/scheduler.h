@@ -101,10 +101,26 @@ public:
     // Access current schedule (for extracting setup events)
     const Schedule* current_schedule() const { return current_; }
 
+    // A note that has been note_on'd but not yet note_off'd by dispatch().
+    struct ActiveNote { std::string node_id; uint8_t channel; uint8_t pitch; };
+
+    // After a schedule swap, find sounding notes that the *new* schedule will
+    // never release — i.e. there is no future NoteOff at/after `beat` for that
+    // (node, channel, pitch).  Such notes are orphaned (e.g. their track was
+    // muted, so its events were dropped) and would hang forever.  Returns them
+    // and removes them from the active set so the caller can note_off() each.
+    void collect_orphaned_notes(double beat, std::vector<ActiveNote>& out);
+
+    // Forget all sounding notes — call when notes are silenced outside dispatch
+    // (stop, seek, end-of-arrangement all-notes-off) so the active set stays in
+    // sync and a later swap doesn't try to release already-dead notes.
+    void clear_active() { active_.clear(); }
+
 private:
     std::atomic<Schedule*>   pending_  { nullptr };
     Schedule*                current_  { nullptr };
     size_t                   idx_      { 0 };
+    std::vector<ActiveNote>  active_;
 
     void reindex(double beat);
 };

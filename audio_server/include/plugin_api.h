@@ -346,6 +346,21 @@ public:
     virtual void pitch_bend(int channel, int value) { (void)channel; (void)value; }
     virtual void program_change(int channel, int bank, int program) { (void)channel; (void)bank; (void)program; }
     virtual void control_change(int channel, int cc, int value) { (void)channel; (void)cc; (void)value; }
+
+    /// Track fader (MIDI CC7) and pan (MIDI CC10), broadcast from the track's
+    /// track_source to every synth it drives.
+    ///
+    /// CONTRACT: a plugin that produces audio from notes MUST honor these as a
+    /// per-channel output gain / balance, or the track volume and pan controls
+    /// will SILENTLY do nothing — the defaults below are no-ops, there is no
+    /// error.  Apply per channel, since one plugin instance can be shared by
+    /// several tracks on distinct MIDI channels, and apply continuously (the
+    /// value can change while a note sustains).  Conventionally CC7 maps to
+    /// amplitude via the GM curve gain = (volume/127)^2.
+    ///
+    /// Plugins built on synth_common.h's VoiceManager get this for free by
+    /// forwarding to set_channel_volume()/set_channel_pan() and multiplying
+    /// each voice by voice_amp() when summing (see the builtin synths).
     virtual void channel_volume(int channel, int volume) { (void)channel; (void)volume; }
     virtual void channel_pan(int channel, int pan) { (void)channel; (void)pan; }
     virtual void note_tune(int channel, int note, float semitones) { (void)channel; (void)note; (void)semitones; }

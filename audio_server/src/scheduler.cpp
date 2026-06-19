@@ -149,9 +149,18 @@ void Dispatcher::dispatch(double start_beat, double end_beat, Graph* graph) {
                 switch (e.type) {
                     case EventType::NoteOn:
                         node->note_on(e.channel, e.pitch, e.velocity);
+                        active_.push_back({e.node_id, e.channel, e.pitch});
                         break;
                     case EventType::NoteOff:
                         node->note_off(e.channel, e.pitch);
+                        for (auto it = active_.begin(); it != active_.end(); ++it) {
+                            if (it->node_id == e.node_id &&
+                                it->channel == e.channel &&
+                                it->pitch   == e.pitch) {
+                                active_.erase(it);
+                                break;
+                            }
+                        }
                         break;
                     case EventType::Program:
                         node->program_change(e.channel, e.velocity /*bank*/, e.pitch /*prog*/);
@@ -186,7 +195,37 @@ void Dispatcher::dispatch(double start_beat, double end_beat, Graph* graph) {
 
 void Dispatcher::seek(double beat) {
     // Also handle any all_notes_off externally before calling seek.
+    // The caller silences all nodes around a seek, so drop the active set too.
+    active_.clear();
     reindex(beat);
+}
+
+void Dispatcher::collect_orphaned_notes(double beat, std::vector<ActiveNote>& out) {
+    if (!current_) { return; }
+    const auto& evts = current_->events();
+
+    std::vector<ActiveNote> survivors;
+    survivors.reserve(active_.size());
+    for (const auto& an : active_) {
+        // Will the new schedule release this note?  Look for a future NoteOff
+        // (effective beat >= playhead) matching node/channel/pitch.  Past
+        // note_offs were skipped by reindex() and won't fire, so they don't count.
+        bool releasable = false;
+        for (const auto& e : evts) {
+            if (e.type != EventType::NoteOff) continue;
+            double effective_beat = e.beat < 0.0 ? 0.0 : e.beat;
+            if (effective_beat < beat) continue;
+            if (e.node_id == an.node_id &&
+                e.channel == an.channel &&
+                e.pitch   == an.pitch) {
+                releasable = true;
+                break;
+            }
+        }
+        if (releasable) survivors.push_back(an);
+        else            out.push_back(an);
+    }
+    active_.swap(survivors);
 }
 
 double Dispatcher::arrangement_length() const {

@@ -317,6 +317,7 @@ public:
     void activate(float sample_rate, int /*max_block_size*/) override {
         host_sr_ = sample_rate;
         activated_ = true;
+        for (int i = 0; i < 16; ++i) { chan_gain_[i] = 1.0f; chan_pan_[i] = 0.0f; }
         reset_voice();
         maybe_load_model();       // config may have arrived before activation
         recompute_frame_advance();
@@ -378,6 +379,18 @@ public:
         }
     }
 
+    // Track fader / pan (MIDI CC7 / CC10).  See plugin_api.h
+    // Plugin::channel_volume for the contract.  GM CC7 curve (gain=(v/127)^2)
+    // to match FluidSynth and the synth_common voice family.
+    void channel_volume(int channel, int volume) override {
+        float n = std::clamp(volume, 0, 127) / 127.0f;
+        chan_gain_[channel & 0xF] = n * n;
+    }
+    void channel_pan(int channel, int pan) override {
+        chan_pan_[channel & 0xF] =
+            std::clamp((std::clamp(pan, 0, 127) - 64) / 63.0f, -1.0f, 1.0f);
+    }
+
     // Per-note attribute (dispatched just before its note_on). Stash until the
     // note starts; start_note/glide_to_note drain it into the voice multipliers.
     void note_attr(int channel, int note, const std::string& id, float value) override {
@@ -434,6 +447,13 @@ public:
 
         const int block = std::max(1, std::min(block_size_, MAX_BLOCK));
 
+        // Track fader/pan (CC7/CC10): per-channel L/R gains, constant for the
+        // block (monophonic, so one active channel). When mono, only gl applies.
+        const float cg = chan_gain_[v_.channel & 0xF];
+        const float cp = chan_pan_[v_.channel & 0xF];
+        const float gl = cg * (cp > 0.0f ? 1.0f - cp : 1.0f);
+        const float gr = cg * (cp < 0.0f ? 1.0f + cp : 1.0f);
+
         for (int i = 0; i < N; ++i) {
             // Infer a new frame each time the phase crosses a boundary.
             while (v_.frame_phase >= 1.0f) {
@@ -487,8 +507,8 @@ public:
             }
 
             float smp = (s + ns) * env_val * gain;
-            L[i] += smp;
-            if (out->right) R[i] += smp;
+            L[i] += smp * gl;
+            if (out->right) R[i] += smp * gr;
 
             v_.frame_phase += frame_advance_per_sample_;
         }
@@ -1209,6 +1229,12 @@ private:
         float attr_breath  = 1.0f;
         float attr_release = 1.0f;
     } v_;
+
+    // Per-channel mixer state from the track fader/pan (MIDI CC7 / CC10).
+    // Persists across notes; initialised in activate().  See plugin_api.h
+    // Plugin::channel_volume for the contract.
+    float chan_gain_[16];
+    float chan_pan_[16];
 
     std::vector<HeldNote> held_;
     XorShift32 rng_;
