@@ -418,6 +418,7 @@ plugin_library(subtractive_synth SOURCES plugins/builtin/subtractive_synth_plugi
 plugin_library(fm_synth          SOURCES plugins/builtin/fm_synth_plugin.cpp)
 plugin_library(waveguide_string  SOURCES plugins/builtin/waveguide_string_plugin.cpp)
 plugin_library(wind_instrument_plugin  SOURCES plugins/builtin/wind_instrument_plugin.cpp)
+plugin_library(bamboo_flute      SOURCES plugins/builtin/bamboo_flute_plugin.cpp)
 plugin_library(percussion_synth  SOURCES plugins/builtin/percussion_synth_plugin.cpp)
 
 # --- Sampler (libsndfile for audio I/O) ---
@@ -469,6 +470,7 @@ add_dependencies(audio_server_lib
     arranger_plugin_fm_synth
     arranger_plugin_waveguide_string
     arranger_plugin_wind_instrument_plugin
+    arranger_plugin_bamboo_flute
     arranger_plugin_percussion_synth
     arranger_plugin_control_smooth
     arranger_plugin_control_diff
