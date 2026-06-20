@@ -543,10 +543,13 @@ public:
                 v.ext.delay_line[v.ext.write_pos] = y;   // assign, not accumulate
                 v.ext.write_pos = (v.ext.write_pos + 1) & DELAY_MASK;
 
-                // Even-harmonic fill: asymmetric shaper + DC block (openness)
+                // Even-harmonic fill (openness): blend in full-wave-rectified
+                // |y|, whose even-harmonic content is FIRST-order in amplitude
+                // (so it stays audible for the small loop signal — y*y would be
+                // ~26 dB down). The DC block removes the rectifier's DC offset.
                 float sig = y;
                 if (use_open) {
-                    float shaped = y + openness * (y * y);
+                    float shaped = y + openness * 2.0f * std::fabs(y);
                     float db = shaped - v.ext.dc_x1 + 0.995f * v.ext.dc_y1;
                     v.ext.dc_x1 = shaped;
                     v.ext.dc_y1 = db;
