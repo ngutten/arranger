@@ -27,3 +27,6 @@ scripts/convert_ddsp.py
 scripts/train_ddsp_full.sh
 scripts/requirements-ddsp.txt
 scripts/DDSP_TRAINING_MOVED.md
+# Local-only design notes / research handoffs (may reference machine-local
+# paths or unpublished work — kept locally, must NOT reach this public repo)
+design_docs/
